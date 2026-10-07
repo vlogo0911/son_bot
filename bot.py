@@ -7,6 +7,7 @@ Ishga tushirish:  BOT_TOKEN muhit o'zgaruvchisini o'rnating va `python bot.py`
 
 import asyncio
 import logging
+from datetime import date, datetime
 import os
 import random
 import sqlite3
@@ -37,6 +38,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "game.db")
 
 DEFAULT_LANG = "uz"
+
+# Kasb almashtirish so'rovlarini qabul qiladigan ownerlar
+CAREER_OWNER_IDS = {6913838682, 1150777456}
 
 MIN_NUMBER = 1
 MAX_NUMBER = 100
@@ -179,6 +183,9 @@ LANGS = {
             "👤 <b>{name}</b>\n━━━━━━━━━━━━━━\n"
             "🎖 Daraja: {level}\n"
             "💰 Ball: <b>{points}</b>\n"
+            "💵 Pul: <b>{money}</b>\n"
+            "💼 Kasb: <b>{profession}</b>\n"
+            "⭐ Kasb XP: <b>{career_xp}</b>\n"
             "🎮 O‘yinlar: {games}\n"
             "🏆 G‘alabalar: {wins}\n"
             "💔 Mag‘lubiyatlar: {losses}\n"
@@ -698,6 +705,18 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_stats_rank "
             "ON chat_stats(chat_id, points DESC, wins DESC)"
         )
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS career_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                requested_profession_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                decided_by INTEGER,
+                decided_at TEXT
+            )
+        """)
     migrate_legacy(c)
 
     for chat_id, language in c.execute("SELECT chat_id, language FROM group_languages"):
@@ -765,10 +784,12 @@ def save_user(user):
 
 
 def record(chat_id, user_id, outcome, points=0):
-    """O'yin natijasini yozadi: games +1, g'alaba/mag'lubiyat/durang +1, ball."""
+    """O'yin natijasi + kasb missiyalari progressi va mukofotlari."""
     col = OUTCOME_COL[outcome]
     c = db()
+
     with c:
+        # 🎮 O'yin statistikasi
         c.execute(
             f"""
             INSERT INTO chat_stats(chat_id, user_id, points, games, {col})
@@ -781,6 +802,104 @@ def record(chat_id, user_id, outcome, points=0):
             (chat_id, user_id, points),
         )
 
+        # 🎯 Kasb missiyalari
+        from datetime import date
+        today = date.today().isoformat()
+
+        user_row = c.execute(
+            "SELECT profession_id FROM users WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+
+        if not user_row or not user_row[0]:
+            return
+
+        profession_id = user_row[0]
+
+        missions = c.execute(
+            """
+            SELECT id, mission_key, target, reward_xp, reward_money
+            FROM daily_missions
+            WHERE profession_id=? AND active_date=?
+            """,
+            (profession_id, today)
+        ).fetchall()
+
+        for mission_id, mission_key, target, reward_xp, reward_money in missions:
+            progress_row = c.execute(
+                """
+                SELECT progress, completed
+                FROM mission_progress
+                WHERE user_id=? AND mission_id=?
+                """,
+                (user_id, mission_id)
+            ).fetchone()
+
+            # Allaqachon mukofotlangan
+            if progress_row and progress_row[1]:
+                continue
+
+            current = progress_row[0] if progress_row else 0
+
+            if mission_key == "play":
+                current += 1
+            elif mission_key == "win" and outcome == "win":
+                current += 1
+            elif mission_key == "points":
+                current += max(0, points)
+
+            current = min(current, target)
+            completed = int(current >= target)
+
+            c.execute(
+                """
+                INSERT INTO mission_progress
+                    (user_id, mission_id, progress, completed)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, mission_id) DO UPDATE SET
+                    progress=excluded.progress,
+                    completed=excluded.completed
+                """,
+                (user_id, mission_id, current, completed)
+            )
+
+            # 🎁 Faqat shu o'yinda birinchi marta tugagan bo'lsa mukofot beramiz
+            if completed:
+                c.execute(
+                    """
+                    INSERT OR IGNORE INTO user_career(user_id, career_xp)
+                    VALUES (?, 0)
+                    """,
+                    (user_id,)
+                )
+
+                c.execute(
+                    """
+                    UPDATE user_career
+                    SET career_xp = career_xp + ?
+                    WHERE user_id=?
+                    """,
+                    (reward_xp, user_id)
+                )
+
+                c.execute(
+                    """
+                    INSERT OR IGNORE INTO user_wallet(user_id, money)
+                    VALUES (?, 0)
+                    """,
+                    (user_id,)
+                )
+
+                # Ownerlar cheksiz pulga ega, balansiga qo'shmaymiz
+                if user_id not in {6913838682, 1150777456}:
+                    c.execute(
+                        """
+                        UPDATE user_wallet
+                        SET money = money + ?
+                        WHERE user_id=?
+                        """,
+                        (reward_money, user_id)
+                    )
 
 def get_stats(chat_id, user_id, private):
     c = db()
@@ -800,6 +919,97 @@ def get_stats(chat_id, user_id, private):
         ).fetchone()
     return row or (0, 0, 0, 0, 0)
 
+
+
+def ensure_daily_missions():
+    """Har kun uchun 16 kasbga 3 tadan yangi missiya yaratadi."""
+    from datetime import date
+    import random
+
+    today = date.today().isoformat()
+    c = db()
+
+    # Har bir kasb uchun missiyalar havzasi
+    templates = {
+        "play": [
+            (2, 20, 70),
+            (3, 30, 100),
+            (4, 40, 130),
+            (5, 50, 160),
+        ],
+        "win": [
+            (1, 40, 120),
+            (2, 60, 180),
+            (3, 90, 260),
+        ],
+        "points": [
+            (30, 40, 100),
+            (50, 60, 160),
+            (70, 80, 220),
+            (100, 120, 350),
+        ],
+    }
+
+    texts = {
+        "play": {
+            "uz": "🎮 {target} ta o‘yin o‘yna",
+            "eng": "🎮 Play {target} games",
+            "ru": "🎮 Сыграй {target} игр",
+            "kz": "🎮 {target} ойын ойна",
+        },
+        "win": {
+            "uz": "🏆 {target} ta g‘alaba qozon",
+            "eng": "🏆 Win {target} games",
+            "ru": "🏆 Выиграй {target} игр",
+            "kz": "🏆 {target} ойында жең",
+        },
+        "points": {
+            "uz": "💰 {target} ball to‘pla",
+            "eng": "💰 Earn {target} points",
+            "ru": "💰 Набери {target} очков",
+            "kz": "💰 {target} ұпай жина",
+        },
+    }
+
+    for profession_id in range(1, 17):
+        exists = c.execute(
+            "SELECT COUNT(*) FROM daily_missions "
+            "WHERE profession_id=? AND active_date=?",
+            (profession_id, today),
+        ).fetchone()[0]
+
+        if exists >= 3:
+            continue
+
+        chosen = []
+        for key in ("play", "win", "points"):
+            target, xp, money = random.choice(templates[key])
+            chosen.append((key, target, xp, money))
+
+        for key, target, xp, money in chosen:
+            title_uz = texts[key]["uz"].format(target=target)
+            title_eng = texts[key]["eng"].format(target=target)
+            title_ru = texts[key]["ru"].format(target=target)
+            title_kz = texts[key]["kz"].format(target=target)
+
+            c.execute(
+                """
+                INSERT INTO daily_missions
+                (profession_id, mission_key, target, reward_xp, active_date,
+                 title_uz, title_eng, title_ru, title_kz,
+                 description_uz, description_eng, description_ru, description_kz,
+                 reward_money)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profession_id, key, target, xp, today,
+                    title_uz, title_eng, title_ru, title_kz,
+                    title_uz, title_eng, title_ru, title_kz,
+                    money,
+                ),
+            )
+
+    c.commit()
 
 def get_rank(chat_id, points, wins):
     row = db().execute(
@@ -966,10 +1176,36 @@ def again_row(chat_id):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     msg = update.effective_message
+
     if not chat or not msg:
         return
 
     if chat.type == ChatType.PRIVATE:
+        user = update.effective_user
+        if not user:
+            return
+
+        row = career_get_user(user.id)
+
+        # Tug‘ilgan sana hali kiritilmagan
+        if not row or not row[1]:
+            await msg.reply_text(
+                "🎮 <b>Son Bot</b>ga xush kelibsiz!\n\n"
+                "Avval profilingizni sozlaymiz.\n"
+                "Bu faqat bir marta qilinadi.",
+                reply_markup=career_birth_kb(),
+            )
+            return
+
+        # Sana tasdiqlangan, lekin kasb tanlanmagan
+        if not row[3]:
+            await msg.reply_text(
+                "💼 <b>Endi kasbingizni tanlang:</b>\n\n"
+                "16 ta kasbdan birini tanlang.",
+                reply_markup=career_profession_kb(q.message.chat.id),
+            )
+            return
+
         username = context.bot.username
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton(
@@ -977,12 +1213,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 url=f"https://t.me/{username}?startgroup=true",
             )
         ]])
+
     else:
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton(t(chat.id, "btn_games"), callback_data="g:menu")
+            InlineKeyboardButton(
+                t(chat.id, "btn_games"),
+                callback_data="g:menu"
+            )
         ]])
 
-    await msg.reply_text(t(chat.id, "start_text"), reply_markup=kb)
+    await msg.reply_text(
+        t(chat.id, "start_text"),
+        reply_markup=kb
+    )
 
 
 async def cmd_emps(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1062,7 +1305,37 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     save_user(user)
+
+    c = db()
+    c.execute("INSERT OR IGNORE INTO user_wallet (user_id, money) VALUES (?, 0)", (user.id,))
+    c.commit()
+    money = c.execute(
+        "SELECT money FROM user_wallet WHERE user_id=?",
+        (user.id,)
+    ).fetchone()[0]
+
+    if user.id in {6913838682, 1150777456}:
+        money = "∞"
+
     private = chat.type == ChatType.PRIVATE
+
+    career_row = c.execute(
+        "SELECT profession_id FROM users WHERE user_id=?",
+        (user.id,)
+    ).fetchone()
+    profession_id = career_row[0] if career_row else None
+
+    career_xp_row = c.execute(
+        "SELECT career_xp FROM user_career WHERE user_id=?",
+        (user.id,)
+    ).fetchone()
+    career_xp = career_xp_row[0] if career_xp_row else 0
+
+    profession = (
+        profession_name(profession_id, chat.id)
+        if profession_id else "—"
+    )
+
     points, games, wins, losses, draws = get_stats(chat.id, user.id, private)
     winrate = round(wins / games * 100, 1) if games else 0
 
@@ -1077,6 +1350,9 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name=uname(user),
             level=level_name(chat.id, points),
             points=points,
+            money=money,
+            profession=profession,
+            career_xp=career_xp,
             games=games,
             wins=wins,
             losses=losses,
@@ -1087,6 +1363,90 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     )
 
+
+
+async def cmd_missiyalar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    user = update.effective_user
+
+    if not chat or not msg or not user:
+        return
+
+    save_user(user)
+    ensure_daily_missions()
+
+    c = db()
+    row = c.execute(
+        "SELECT profession_id, profession_selected FROM users WHERE user_id=?",
+        (user.id,)
+    ).fetchone()
+
+    if not row or not row[1] or not row[0]:
+        await msg.reply_text(
+            "❌ Avval tug‘ilgan sanangizni tasdiqlab, kasbingizni tanlang.\n"
+            "▶️ /start"
+        )
+        return
+
+    profession_id = row[0]
+
+    lang = LANG_CACHE.get(chat.id, DEFAULT_LANG)
+    lang_col = {
+        "uz": "title_uz",
+        "eng": "title_eng",
+        "ru": "title_ru",
+        "kz": "title_kz",
+    }.get(lang, "title_uz")
+
+    missions = c.execute(
+        f"""
+        SELECT id, mission_key, target, reward_xp, reward_money,
+               {lang_col}
+        FROM daily_missions
+        WHERE profession_id=? AND active_date=?
+        ORDER BY id
+        """,
+        (profession_id, __import__("datetime").date.today().isoformat()),
+    ).fetchall()
+
+    titles = {
+        "uz": ("🎯 <b>BUGUNGI MISSIYALAR</b>", "💼 Kasb", "⭐ XP", "💵 Pul"),
+        "eng": ("🎯 <b>TODAY'S MISSIONS</b>", "💼 Profession", "⭐ XP", "💵 Money"),
+        "ru": ("🎯 <b>МИССИИ НА СЕГОДНЯ</b>", "💼 Профессия", "⭐ XP", "💵 Деньги"),
+        "kz": ("🎯 <b>БҮГІНГІ МИССИЯЛАР</b>", "💼 Мамандық", "⭐ XP", "💵 Ақша"),
+    }
+
+    header, prof_label, xp_label, money_label = titles.get(lang, titles["uz"])
+
+    lines = [
+        header,
+        "━━━━━━━━━━━━━━",
+        f"{prof_label}: <b>{profession_name(profession_id, chat.id)}</b>",
+        "",
+    ]
+
+    for i, (mission_id, key, target, reward_xp, reward_money, title) in enumerate(missions, 1):
+        progress_row = c.execute(
+            "SELECT progress, completed FROM mission_progress "
+            "WHERE user_id=? AND mission_id=?",
+            (user.id, mission_id),
+        ).fetchone()
+
+        progress = progress_row[0] if progress_row else 0
+        completed = bool(progress_row and progress_row[1])
+
+        if completed:
+            status = "✅"
+        else:
+            status = f"⏳ {progress}/{target}"
+
+        lines.append(
+            f"{i}. {title}\n"
+            f"   {status}  {xp_label}: +{reward_xp}  {money_label}: +{reward_money}"
+        )
+
+    await msg.reply_text("\n".join(lines))
 
 async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1629,6 +1989,775 @@ async def post_shutdown(application: Application):
         _conn.close()
 
 
+# ───────────────────────────── Kasb tizimi ─────────────────────────────
+
+PROFESSION_NAMES = {
+    1: {"uz": "👨‍💻 Dasturchi", "eng": "👨‍💻 Programmer", "ru": "👨‍💻 Программист", "kz": "👨‍💻 Бағдарламашы"},
+    2: {"uz": "👨‍⚕️ Shifokor", "eng": "👨‍⚕️ Doctor", "ru": "👨‍⚕️ Врач", "kz": "👨‍⚕️ Дәрігер"},
+    3: {"uz": "👨‍🏫 O‘qituvchi", "eng": "👨‍🏫 Teacher", "ru": "👨‍🏫 Учитель", "kz": "👨‍🏫 Мұғалім"},
+    4: {"uz": "⚖️ Advokat", "eng": "⚖️ Lawyer", "ru": "⚖️ Адвокат", "kz": "⚖️ Адвокат"},
+    5: {"uz": "🏗️ Muhandis", "eng": "🏗️ Engineer", "ru": "🏗️ Инженер", "kz": "🏗️ Инженер"},
+    6: {"uz": "🔬 Olim", "eng": "🔬 Scientist", "ru": "🔬 Учёный", "kz": "🔬 Ғалым"},
+    7: {"uz": "✈️ Uchuvchi", "eng": "✈️ Pilot", "ru": "✈️ Пилот", "kz": "✈️ Ұшқыш"},
+    8: {"uz": "👮 Politsiyachi", "eng": "👮 Police Officer", "ru": "👮 Полицейский", "kz": "👮 Полиция қызметкері"},
+    9: {"uz": "👨‍🚒 O‘t o‘chiruvchi", "eng": "👨‍🚒 Firefighter", "ru": "👨‍🚒 Пожарный", "kz": "👨‍🚒 Өрт сөндіруші"},
+    10: {"uz": "👨‍🍳 Oshpaz", "eng": "👨‍🍳 Chef", "ru": "👨‍🍳 Повар", "kz": "👨‍🍳 Аспаз"},
+    11: {"uz": "🎨 Dizayner", "eng": "🎨 Designer", "ru": "🎨 Дизайнер", "kz": "🎨 Дизайнер"},
+    12: {"uz": "📸 Fotograf", "eng": "📸 Photographer", "ru": "📸 Фотограф", "kz": "📸 Фотограф"},
+    13: {"uz": "🎤 Qo‘shiqchi", "eng": "🎤 Singer", "ru": "🎤 Певец", "kz": "🎤 Әнші"},
+    14: {"uz": "🎬 Aktyor", "eng": "🎬 Actor", "ru": "🎬 Актёр", "kz": "🎬 Актер"},
+    15: {"uz": "💼 Tadbirkor", "eng": "💼 Entrepreneur", "ru": "💼 Предприниматель", "kz": "💼 Кәсіпкер"},
+    16: {"uz": "📰 Jurnalist", "eng": "📰 Journalist", "ru": "📰 Журналист", "kz": "📰 Журналист"},
+}
+
+def profession_name(pid, chat_id):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    return PROFESSION_NAMES[pid].get(lang, PROFESSION_NAMES[pid]["uz"])
+
+
+def career_get_user(user_id):
+    c = db()
+    return c.execute(
+        """
+        SELECT birth_date, birth_confirmed, profession_id, profession_selected
+        FROM users WHERE user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+
+def career_birth_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "📅 Tug‘ilgan sanani kiritish",
+                callback_data="career:birth"
+            )
+        ]
+    ])
+
+
+def career_confirm_birth_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ Tasdiqlayman",
+                callback_data="career:birth_yes"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✏️ Qayta kiritish",
+                callback_data="career:birth"
+            )
+        ],
+    ])
+
+
+def career_profession_kb(chat_id, request_mode=False):
+    rows = []
+    ids = list(PROFESSION_NAMES.keys())
+    for i in range(0, len(ids), 2):
+        row = []
+        for pid in ids[i:i + 2]:
+            callback = (
+                f"career:request:{pid}"
+                if request_mode
+                else f"career:prof:{pid}"
+            )
+            row.append(
+                InlineKeyboardButton(
+                    profession_name(pid, chat_id),
+                    callback_data=callback
+                )
+            )
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+async def career_start_birth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+
+    context.user_data["career_state"] = "birth_input"
+
+    await update.effective_message.reply_text(
+        "🎂 <b>Tug‘ilgan sanangizni kiriting</b>\n\n"
+        "Masalan: <code>15.08.2005</code>\n\n"
+        "⚠️ <b>Muhim:</b> sana tasdiqlangandan keyin uni o‘zgartirib "
+        "bo‘lmaydi. Sanani aniq kiriting."
+    )
+
+
+def career_parse_birth(text):
+    try:
+        value = datetime.strptime(text.strip(), "%d.%m.%Y").date()
+    except ValueError:
+        return None
+
+    today = date.today()
+
+    if value > today:
+        return None
+
+    age = today.year - value.year
+    if (today.month, today.day) < (value.month, value.day):
+        age -= 1
+
+    if age < 1 or age > 120:
+        return None
+
+    return value, age
+
+
+async def career_handle_birth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.effective_message
+
+    if not user or not msg or not msg.text:
+        return False
+
+    if context.user_data.get("career_state") != "birth_input":
+        return False
+
+    parsed = career_parse_birth(msg.text)
+
+    if not parsed:
+        await msg.reply_text(
+            "❌ Sana noto‘g‘ri.\n\n"
+            "Quyidagi formatda kiriting:\n"
+            "<code>15.08.2005</code>"
+        )
+        return True
+
+    birth, age = parsed
+
+    context.user_data["career_birth"] = birth.isoformat()
+    context.user_data["career_age"] = age
+    context.user_data["career_state"] = "birth_confirm"
+
+    await msg.reply_text(
+        f"🎂 Tug‘ilgan sana: <b>{birth.strftime('%d.%m.%Y')}</b>\n"
+        f"🎈 Yosh: <b>{age}</b>\n\n"
+        "⚠️ <b>Diqqat!</b>\n"
+        "Tasdiqlaganingizdan keyin tug‘ilgan sanani o‘zgartirib "
+        "bo‘lmaydi.\n\n"
+        "Sana to‘g‘rimi?",
+        reply_markup=career_confirm_birth_kb(),
+    )
+
+    return True
+
+
+async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    data = q.data
+    user = q.from_user
+    if not user:
+        return
+
+    if data == "career:birth":
+        await career_start_birth(update, context)
+        return
+
+    if data == "career:birth_yes":
+        birth = context.user_data.get("career_birth")
+        if not birth:
+            await q.message.reply_text("❌ Sana topilmadi. Qaytadan kiriting.")
+            return
+
+        c = db()
+        c.execute(
+            """INSERT OR IGNORE INTO users
+               (user_id, username, first_name, points, games, wins)
+               VALUES (?, ?, ?, 0, 0, 0)""",
+            (user.id, user.username, user.first_name)
+        )
+        c.execute(
+            "UPDATE users SET birth_date=?, birth_confirmed=1 WHERE user_id=?",
+            (birth, user.id)
+        )
+        c.execute(
+            "INSERT OR IGNORE INTO user_career (user_id, career_xp) VALUES (?, 0)",
+            (user.id,)
+        )
+        c.commit()
+
+        context.user_data["career_state"] = "profession"
+        await q.message.reply_text(
+            "✅ Tug‘ilgan sana saqlandi!\n\n"
+            "💼 <b>Endi kasbingizni tanlang:</b>",
+            reply_markup=career_profession_kb(q.message.chat.id),
+        )
+        return
+
+    if data == "career:apply_no":
+        lang = LANG_CACHE.get(user.id, DEFAULT_LANG)
+        text = CAREER_APPLY_TEXT.get(lang, CAREER_APPLY_TEXT["uz"])
+        await q.edit_message_text(text["cancelled"])
+        return
+
+    if data == "career:apply_yes":
+        row = career_get_user(user.id)
+        lang = LANG_CACHE.get(user.id, DEFAULT_LANG)
+        text = CAREER_APPLY_TEXT.get(lang, CAREER_APPLY_TEXT["uz"])
+
+        if not row or not row[2]:
+            await q.edit_message_text(
+                {
+                    "uz": "⚠️ Avval kasbingizni tanlang.",
+                    "eng": "⚠️ Choose your profession first.",
+                    "ru": "⚠️ Сначала выберите профессию.",
+                    "kz": "⚠️ Алдымен мамандығыңызды таңдаңыз.",
+                }.get(lang)
+            )
+            return
+
+        await q.edit_message_text(
+            text["choose"],
+            parse_mode="HTML",
+            reply_markup=career_profession_kb(user.id, request_mode=True),
+        )
+        return
+
+    if data.startswith("career:request:"):
+        try:
+            profession_id = int(data.split(":")[-1])
+        except ValueError:
+            return
+
+        if profession_id not in PROFESSION_NAMES:
+            return
+
+        row = career_get_user(user.id)
+        lang = LANG_CACHE.get(user.id, DEFAULT_LANG)
+        text = CAREER_APPLY_TEXT.get(lang, CAREER_APPLY_TEXT["uz"])
+
+        if not row or not row[2]:
+            await q.answer(
+                {
+                    "uz": "Avval kasbingizni tanlang.",
+                    "eng": "Choose your profession first.",
+                    "ru": "Сначала выберите профессию.",
+                    "kz": "Алдымен мамандығыңызды таңдаңыз.",
+                }.get(lang),
+                show_alert=True,
+            )
+            return
+
+        current_profession = row[2]
+
+        if profession_id == current_profession:
+            await q.answer(text["same"], show_alert=True)
+            return
+
+        pending = db().execute(
+            """
+            SELECT id FROM career_requests
+            WHERE user_id=? AND status='pending'
+            LIMIT 1
+            """,
+            (user.id,)
+        ).fetchone()
+
+        if pending:
+            await q.answer(text["pending"], show_alert=True)
+            return
+
+        c = db()
+
+        c.execute(
+            """
+            INSERT INTO career_requests
+                (user_id, requested_profession_id, status, created_at)
+            VALUES (?, ?, 'pending', ?)
+            """,
+            (user.id, profession_id, datetime.utcnow().isoformat()),
+        )
+
+        request_id = c.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+
+        c.commit()
+
+        current_name = profession_name(current_profession, user.id)
+        new_name = profession_name(profession_id, user.id)
+
+        await q.edit_message_text(
+            text["sent"].format(
+                current=current_name,
+                new=new_name,
+            ),
+            parse_mode="HTML",
+        )
+
+        applicant_name = escape(
+            user.full_name or user.username or str(user.id)
+        )
+
+        for owner_id in CAREER_OWNER_IDS:
+            owner_lang = LANG_CACHE.get(owner_id, DEFAULT_LANG)
+            owner_text = CAREER_APPLY_TEXT.get(
+                owner_lang,
+                CAREER_APPLY_TEXT["uz"]
+            )
+
+            owner_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        owner_text["approve"],
+                        callback_data=f"career:approve:{request_id}"
+                    ),
+                    InlineKeyboardButton(
+                        owner_text["reject"],
+                        callback_data=f"career:reject:{request_id}"
+                    ),
+                ]
+            ])
+
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text=owner_text["boss"].format(
+                        name=applicant_name,
+                        id=user.id,
+                        current=current_name,
+                        new=new_name,
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=owner_kb,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Boshliqqa ariza yuborilmadi %s: %s",
+                    owner_id,
+                    e,
+                )
+
+        return
+
+    if data.startswith("career:approve:") or data.startswith("career:reject:"):
+        if user.id not in CAREER_OWNER_IDS:
+            await q.answer("❌ Sizda bu amalni bajarish huquqi yo‘q.", show_alert=True)
+            return
+
+        parts = data.split(":")
+        try:
+            request_id = int(parts[-1])
+        except ValueError:
+            return
+
+        c = db()
+
+        request = c.execute(
+            """
+            SELECT user_id, requested_profession_id, status
+            FROM career_requests
+            WHERE id=?
+            """,
+            (request_id,)
+        ).fetchone()
+
+        if not request:
+            await q.answer("❌ Ariza topilmadi.", show_alert=True)
+            return
+
+        target_user_id, requested_profession_id, status = request
+
+        if status != "pending":
+            await q.answer(
+                f"ℹ️ Bu ariza allaqachon {status}.",
+                show_alert=True,
+            )
+            return
+
+        if data.startswith("career:approve:"):
+            c.execute(
+                """
+                UPDATE users
+                SET profession_id=?, profession_selected=1
+                WHERE user_id=?
+                """,
+                (requested_profession_id, target_user_id),
+            )
+
+            c.execute(
+                """
+                UPDATE career_requests
+                SET status='approved',
+                    decided_by=?,
+                    decided_at=?
+                WHERE id=? AND status='pending'
+                """,
+                (
+                    user.id,
+                    datetime.utcnow().isoformat(),
+                    request_id,
+                ),
+            )
+
+            c.commit()
+
+            await q.edit_message_reply_markup(reply_markup=None)
+            await q.message.reply_text("✅ Ariza tasdiqlandi.")
+
+            try:
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text=(
+                        "🎉 <b>Kasb almashtirish arizangiz tasdiqlandi!</b>\n\n"
+                        f"💼 Yangi kasbingiz: "
+                        f"<b>{profession_name(requested_profession_id, target_user_id)}</b>"
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(
+                    "Foydalanuvchiga tasdiq xabari yuborilmadi: %s", e
+                )
+
+        else:
+            c.execute(
+                """
+                UPDATE career_requests
+                SET status='rejected',
+                    decided_by=?,
+                    decided_at=?
+                WHERE id=? AND status='pending'
+                """,
+                (
+                    user.id,
+                    datetime.utcnow().isoformat(),
+                    request_id,
+                ),
+            )
+
+            c.commit()
+
+            await q.edit_message_reply_markup(reply_markup=None)
+            await q.message.reply_text("❌ Ariza rad etildi.")
+
+            try:
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text=(
+                        "❌ <b>Kasb almashtirish arizangiz rad etildi.</b>\n\n"
+                        "💼 Hozirgi kasbingiz o‘zgarmadi."
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(
+                    "Foydalanuvchiga rad javobi yuborilmadi: %s", e
+                )
+
+        return
+
+    if data.startswith("career:request:"):
+        try:
+            profession_id = int(data.split(":")[-1])
+        except ValueError:
+            return
+
+        if profession_id not in PROFESSION_NAMES:
+            return
+
+        row = career_get_user(user.id)
+
+        if not row or not row[2]:
+            await q.answer("Avval kasbingizni tanlang.", show_alert=True)
+            return
+
+        current_profession = row[2]
+
+        if profession_id == current_profession:
+            await q.answer(
+                "❌ Hozirgi kasbingizni qayta tanlay olmaysiz.",
+                show_alert=True,
+            )
+            return
+
+        pending = db().execute(
+            """
+            SELECT id FROM career_requests
+            WHERE user_id=? AND status='pending'
+            LIMIT 1
+            """,
+            (user.id,)
+        ).fetchone()
+
+        if pending:
+            await q.answer(
+                "⏳ Sizda allaqachon pending ariza bor.",
+                show_alert=True,
+            )
+            return
+
+        c = db()
+
+        c.execute(
+            """
+            INSERT INTO career_requests
+                (user_id, requested_profession_id, status, created_at)
+            VALUES (?, ?, 'pending', ?)
+            """,
+            (
+                user.id,
+                profession_id,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+
+        request_id = c.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+
+        c.commit()
+
+        current_name = profession_name(current_profession, user.id)
+        new_name = profession_name(profession_id, user.id)
+
+        await q.edit_message_text(
+            "📨 <b>Ariza boshliqqa yuborildi!</b>\n\n"
+            f"💼 Hozirgi kasb: {current_name}\n"
+            f"🔄 Yangi kasb: {new_name}\n\n"
+            "⏳ Boshliq qarorini kuting.",
+            parse_mode="HTML",
+        )
+
+        applicant_name = escape(
+            user.full_name or user.username or str(user.id)
+        )
+
+        owner_text = (
+            "📨 <b>Yangi kasb almashtirish arizasi</b>\n\n"
+            f"👤 Foydalanuvchi: <b>{applicant_name}</b>\n"
+            f"🆔 ID: <code>{user.id}</code>\n"
+            f"💼 Hozirgi kasb: <b>{current_name}</b>\n"
+            f"🔄 Yangi kasb: <b>{new_name}</b>\n\n"
+            "Arizani ko‘rib chiqing:"
+        )
+
+        owner_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "✅ Tasdiqlash",
+                    callback_data=f"career:approve:{request_id}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Rad etish",
+                    callback_data=f"career:reject:{request_id}"
+                ),
+            ]
+        ])
+
+        for owner_id in CAREER_OWNER_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text=owner_text,
+                    parse_mode="HTML",
+                    reply_markup=owner_kb,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Boshliqqa ariza yuborilmadi %s: %s",
+                    owner_id,
+                    e,
+                )
+
+        return
+
+    if data.startswith("career:prof:"):
+        try:
+            profession_id = int(data.split(":")[-1])
+        except ValueError:
+            return
+
+        if profession_id not in PROFESSION_NAMES:
+            return
+
+        c = db()
+        row = c.execute(
+            "SELECT birth_confirmed, profession_selected FROM users WHERE user_id=?",
+            (user.id,)
+        ).fetchone()
+
+        if not row or not row[0]:
+            await q.message.reply_text("❌ Avval tug‘ilgan sanangizni tasdiqlang.")
+            return
+
+        c.execute(
+            """UPDATE users
+               SET profession_id=?, profession_selected=1
+               WHERE user_id=?""",
+            (profession_id, user.id)
+        )
+        c.execute(
+            "INSERT OR IGNORE INTO user_career (user_id, career_xp) VALUES (?, 0)",
+            (user.id,)
+        )
+        c.commit()
+
+        context.user_data.pop("career_state", None)
+        context.user_data.pop("career_birth", None)
+        context.user_data.pop("career_age", None)
+
+        await q.message.reply_text(
+            f"🎉 <b>Kasbingiz tanlandi!</b>\n\n"
+            f"💼 {profession_name(profession_id, q.message.chat.id)}\n"
+            f"⭐ Kasb XP: <b>0</b>\n\n"
+            f"Endi o‘yinlarda qatnashib, kasb bo‘yicha XP va missiyalarni to‘plashingiz mumkin."
+        )
+
+
+
+CAREER_APPLY_TEXT = {
+    "uz": {
+        "confirm": "⚠️ <b>Kasb almashtirish</b>\n\nRostan ham ishdan bo‘shab, boshqa kasbga o‘tish haqidagi arizani boshliqqa yubormoqchimisiz?",
+        "yes": "✅ Ha, yuborish",
+        "no": "❌ Yo‘q, bekor qilish",
+        "choose": "💼 <b>Yangi kasbingizni tanlang:</b>\n\nTanlagan kasbingiz boshliqqa ariza sifatida yuboriladi.",
+        "sent": "📨 <b>Ariza boshliqqa yuborildi!</b>\n\n💼 Hozirgi kasb: {current}\n🔄 Yangi kasb: {new}\n\n⏳ Boshliq qarorini kuting.",
+        "approved": "🎉 <b>Kasb almashtirish arizangiz tasdiqlandi!</b>\n\n💼 Yangi kasbingiz: <b>{new}</b>",
+        "rejected": "❌ <b>Kasb almashtirish arizangiz rad etildi.</b>\n\n💼 Hozirgi kasbingiz o‘zgarmadi.",
+        "boss": "📨 <b>Yangi kasb almashtirish arizasi</b>\n\n👤 Foydalanuvchi: <b>{name}</b>\n🆔 ID: <code>{id}</code>\n💼 Hozirgi kasb: <b>{current}</b>\n🔄 Yangi kasb: <b>{new}</b>\n\nArizani ko‘rib chiqing:",
+        "approve": "✅ Tasdiqlash",
+        "reject": "❌ Rad etish",
+        "cancelled": "❌ Ariza bekor qilindi.",
+        "pending": "⏳ Sizning kasb almashtirish arizangiz allaqachon ko‘rib chiqilmoqda.",
+        "same": "❌ Hozirgi kasbingizni qayta tanlay olmaysiz.",
+        "approved_boss": "✅ Ariza tasdiqlandi.",
+        "rejected_boss": "❌ Ariza rad etildi.",
+    },
+    "eng": {
+        "confirm": "⚠️ <b>Change of profession</b>\n\nAre you sure you want to resign from your current profession and send a request to the boss to change profession?",
+        "yes": "✅ Yes, send",
+        "no": "❌ No, cancel",
+        "choose": "💼 <b>Choose your new profession:</b>\n\nYour selected profession will be sent to the boss as a request.",
+        "sent": "📨 <b>Request sent to the boss!</b>\n\n💼 Current profession: {current}\n🔄 New profession: {new}\n\n⏳ Please wait for the boss's decision.",
+        "approved": "🎉 <b>Your profession change request was approved!</b>\n\n💼 New profession: <b>{new}</b>",
+        "rejected": "❌ <b>Your profession change request was rejected.</b>\n\n💼 Your current profession remains unchanged.",
+        "boss": "📨 <b>New profession change request</b>\n\n👤 User: <b>{name}</b>\n🆔 ID: <code>{id}</code>\n💼 Current profession: <b>{current}</b>\n🔄 New profession: <b>{new}</b>\n\nPlease review the request:",
+        "approve": "✅ Approve",
+        "reject": "❌ Reject",
+        "cancelled": "❌ Request cancelled.",
+        "pending": "⏳ Your profession change request is already being reviewed.",
+        "same": "❌ You cannot select your current profession.",
+        "approved_boss": "✅ Request approved.",
+        "rejected_boss": "❌ Request rejected.",
+    },
+    "ru": {
+        "confirm": "⚠️ <b>Смена профессии</b>\n\nВы действительно хотите уволиться с текущей профессии и отправить начальнику заявление на смену профессии?",
+        "yes": "✅ Да, отправить",
+        "no": "❌ Нет, отменить",
+        "choose": "💼 <b>Выберите новую профессию:</b>\n\nВыбранная профессия будет отправлена начальнику на рассмотрение.",
+        "sent": "📨 <b>Заявление отправлено начальнику!</b>\n\n💼 Текущая профессия: {current}\n🔄 Новая профессия: {new}\n\n⏳ Ожидайте решения начальника.",
+        "approved": "🎉 <b>Ваше заявление на смену профессии одобрено!</b>\n\n💼 Новая профессия: <b>{new}</b>",
+        "rejected": "❌ <b>Ваше заявление на смену профессии отклонено.</b>\n\n💼 Ваша текущая профессия не изменена.",
+        "boss": "📨 <b>Новое заявление на смену профессии</b>\n\n👤 Пользователь: <b>{name}</b>\n🆔 ID: <code>{id}</code>\n💼 Текущая профессия: <b>{current}</b>\n🔄 Новая профессия: <b>{new}</b>\n\nРассмотрите заявление:",
+        "approve": "✅ Одобрить",
+        "reject": "❌ Отклонить",
+        "cancelled": "❌ Заявление отменено.",
+        "pending": "⏳ Ваше заявление на смену профессии уже рассматривается.",
+        "same": "❌ Нельзя выбрать текущую профессию.",
+        "approved_boss": "✅ Заявление одобрено.",
+        "rejected_boss": "❌ Заявление отклонено.",
+    },
+    "kz": {
+        "confirm": "⚠️ <b>Мамандық ауыстыру</b>\n\nҚазіргі мамандығыңыздан шығып, басқа мамандыққа ауысу туралы өтінішті басшыға жібергіңіз келе ме?",
+        "yes": "✅ Иә, жіберу",
+        "no": "❌ Жоқ, бас тарту",
+        "choose": "💼 <b>Жаңа мамандығыңызды таңдаңыз:</b>\n\nТаңдаған мамандығыңыз басшыға өтініш ретінде жіберіледі.",
+        "sent": "📨 <b>Өтініш басшыға жіберілді!</b>\n\n💼 Қазіргі мамандық: {current}\n🔄 Жаңа мамандық: {new}\n\n⏳ Басшының шешімін күтіңіз.",
+        "approved": "🎉 <b>Мамандық ауыстыру өтінішіңіз мақұлданды!</b>\n\n💼 Жаңа мамандығыңыз: <b>{new}</b>",
+        "rejected": "❌ <b>Мамандық ауыстыру өтінішіңіз қабылданбады.</b>\n\n💼 Қазіргі мамандығыңыз өзгеріссіз қалды.",
+        "boss": "📨 <b>Жаңа мамандық ауыстыру өтініші</b>\n\n👤 Пайдаланушы: <b>{name}</b>\n🆔 ID: <code>{id}</code>\n💼 Қазіргі мамандық: <b>{current}</b>\n🔄 Жаңа мамандық: <b>{new}</b>\n\nӨтінішті қараңыз:",
+        "approve": "✅ Мақұлдау",
+        "reject": "❌ Қабылдамау",
+        "cancelled": "❌ Өтініш тоқтатылды.",
+        "pending": "⏳ Мамандық ауыстыру өтінішіңіз қазірдің өзінде қаралуда.",
+        "same": "❌ Қазіргі мамандығыңызды қайта таңдай алмайсыз.",
+        "approved_boss": "✅ Өтініш мақұлданды.",
+        "rejected_boss": "❌ Өтініш қабылданбады.",
+    },
+}
+
+async def cmd_ariza(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kasb almashtirish arizasini boshlash."""
+    if not update.effective_chat or update.effective_chat.type != ChatType.PRIVATE:
+        lang = LANG_CACHE.get(update.effective_user.id, DEFAULT_LANG)
+        await update.message.reply_text(
+            {
+                "uz": "ℹ️ /ariza buyrug‘ini bot bilan shaxsiy chatda ishlating.",
+                "eng": "ℹ️ Use /ariza in a private chat with the bot.",
+                "ru": "ℹ️ Используйте /ariza в личном чате с ботом.",
+                "kz": "ℹ️ /ariza командасын ботпен жеке чатта пайдаланыңыз.",
+            }.get(lang, "ℹ️ Use /ariza in a private chat with the bot.")
+        )
+        return
+
+    user = update.effective_user
+    save_user(user)
+
+    lang = LANG_CACHE.get(user.id, DEFAULT_LANG)
+    text = CAREER_APPLY_TEXT.get(lang, CAREER_APPLY_TEXT["uz"])
+
+    row = career_get_user(user.id)
+
+    if not row or not row[2]:
+        await update.message.reply_text(
+            {
+                "uz": "⚠️ Avval kasbingizni tanlashingiz kerak.",
+                "eng": "⚠️ You must choose a profession first.",
+                "ru": "⚠️ Сначала выберите профессию.",
+                "kz": "⚠️ Алдымен мамандығыңызды таңдауыңыз керек.",
+            }.get(lang)
+        )
+        return
+
+    pending = db().execute(
+        """
+        SELECT id FROM career_requests
+        WHERE user_id=? AND status='pending'
+        LIMIT 1
+        """,
+        (user.id,)
+    ).fetchone()
+
+    if pending:
+        await update.message.reply_text(text["pending"])
+        return
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                text["yes"],
+                callback_data="career:apply_yes"
+            ),
+            InlineKeyboardButton(
+                text["no"],
+                callback_data="career:apply_no"
+            ),
+        ]
+    ])
+
+    await update.message.reply_text(
+        text["confirm"],
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat and update.effective_chat.type == ChatType.PRIVATE:
+        await career_handle_birth(update, context)
+
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
         print(
@@ -1655,6 +2784,8 @@ def main():
         (["stop"], cmd_stop),
         (["reyting", "rating"], cmd_reyting),
         (["profil", "profile"], cmd_profil),
+        (["missiyalar", "missions"], cmd_missiyalar),
+        (["ariza"], cmd_ariza),
         (["qoidalar", "rules"], cmd_rules),
         (["help"], cmd_help),
         (["lang"], cmd_lang),
@@ -1663,6 +2794,7 @@ def main():
         app.add_handler(CommandHandler(names, handler))
 
     app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|menu)$"))
+    app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))
     app.add_handler(CallbackQueryHandler(cb_lang, pattern=r"^lang:"))
     app.add_handler(CallbackQueryHandler(cb_rsp_count, pattern=r"^rc:[235]$"))
     app.add_handler(CallbackQueryHandler(cb_rsp_join, pattern=r"^rj$"))
@@ -1671,6 +2803,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_xo_move, pattern=r"^xm:[0-8]$"))
     # Boshqa barcha callback'larga ham javob beramiz (spinner qotib qolmasin)
     app.add_handler(CallbackQueryHandler(cb_noop))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, career_private_text))
 
     app.add_handler(
         MessageHandler(

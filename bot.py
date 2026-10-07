@@ -1,1109 +1,1688 @@
+"""
+🎮 O'yinlar boti  —  Son topish · Tosh-Qaychi-Qog'oz · XO
+
+Talab: python-telegram-bot >= 22   (pip install -r requirements.txt)
+Ishga tushirish:  BOT_TOKEN muhit o'zgaruvchisini o'rnating va `python bot.py`
+"""
+
+import asyncio
+import logging
 import os
 import random
 import sqlite3
-import logging
 from html import escape
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
+from telegram.constants import ChatMemberStatus, ChatType, ParseMode
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
+    CommandHandler,
     ContextTypes,
+    Defaults,
+    MessageHandler,
     filters,
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "BU_YERGA_BOT_TOKEN")
-DB_FILE = "game.db"
+# ───────────────────────────── Sozlamalar ─────────────────────────────
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "game.db")
+
+DEFAULT_LANG = "uz"
 
 MIN_NUMBER = 1
 MAX_NUMBER = 100
+FAST_ATTEMPTS = 7  # shuncha urinishgacha topsa — bonus
+
+# Ballar
+NUMBER_WIN_PTS = 10
+NUMBER_BONUS_PTS = 5
+RSP_WIN_PTS = 10
+XO_WIN_PTS = 15
+XO_DRAW_PTS = 5
+
+# Faolsizlik vaqtlari (soniya)
+NUMBER_TTL = 300
+RSP_SETUP_TTL = 60
+RSP_LOBBY_TTL = 120
+RSP_CHOOSE_TTL = 60
+XO_LOBBY_TTL = 120
+XO_MOVE_TTL = 90
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger("son_bot")
 
-DEFAULT_LANG = "uz"
+# ───────────────────────────── Tarjimalar ─────────────────────────────
+# Barcha matnlar HTML formatida (<b>, <i>). Ismlar har doim escape() qilinadi.
 
 LANGS = {
+    # ───────────────────────── 🇺🇿 O'zbekcha ─────────────────────────
     "uz": {
-        "lang_title": "🌐 Tilni tanlang:",
-        "lang_set": "🌐 Guruh tili o‘zbekchaga o‘rnatildi.",
-        "lang_private": "🌐 Til tanlandi: O‘zbekcha.",
-        "use_group": "Bu buyruqni guruh ichida ishlating.",
-        "choose_game": "🎮 O‘YIN TANLANG:",
-        "number_game": "🎯 Son topish",
-        "rsp_game": "✊ Tosh-Qaychi-Qog‘oz",
-        "number_started": "🎯 Son topish boshlandi!\n1 dan 100 gacha sonni toping!",
-        "number_exists": "🎯 Hozir guruhda son topish o‘yini ketmoqda!",
-        "correct": "🎉 {name} sonni topdi: {number}!\n🏆 +10 ball",
-        "higher": "📈 Kattaroq!",
-        "lower": "📉 Kichikroq!",
-        "rsp_count": "✊ Tosh-Qaychi-Qog‘oz\n\nNechta odam o‘ynaydi?",
-        "rsp_exists": "⚠️ Hozir guruhda RSP o‘yini ketmoqda.",
-        "rsp_wait": "✊ RSP boshlandi!\n\n{count} ta o‘yinchi kerak.\nPastdagi tugmani bosib o‘yinga qo‘shiling.",
-        "rsp_joined": "{name} o‘yinga qo‘shildi! ({current}/{count})",
-        "rsp_already": "Siz allaqachon o‘yinga qo‘shilgansiz.",
-        "rsp_full": "O‘yinchilar to‘ldi!",
-        "rsp_choose": "✊ Siz o‘yinga kirdingiz!\n\nTanlang:",
-        "rsp_wait_choices": "⏳ {current}/{count} o‘yinchi tanlov qildi.\nG‘olib barcha tanlovdan keyin aniqlanadi.",
-        "rsp_already_choice": "Siz tanlovingizni allaqachon berdingiz.",
-        "rsp_result": "🏁 RSP NATIJASI\n\n{players}\n\n{result}",
-        "rsp_winner": "🏆 G‘olib: {names}\n💰 Har biriga +10 ball",
-        "rsp_draw": "🤝 Durang!",
-        "rsp_no_winner": "🤝 G‘olib yo‘q — uchala tanlov ham chiqdi.",
-        "rsp_all_same": "🤝 Hamma bir xil tanladi. Durang!",
-        "rating_title": "🏆 TOP 10 REYTING",
-        "rating_row": "{i}. {name} — {points} ball | {wins} g‘alaba",
-        "rating_empty": "Hali reyting mavjud emas.",
-        "profile": "👤 Profil\n\n"
-                   "📝 O‘yinlar: {games}\n"
-                   "🏆 G‘alabalar: {wins}\n"
-                   "❌ Mag‘lubiyatlar: {losses}\n"
-                   "💰 Ball: {points}\n"
-                   "📊 G‘alaba foizi: {winrate}%",
-        "rules": "📚 QOIDALAR\n\n"
-                 "🎯 Son topish:\n"
-                 "Bot 1–100 oralig‘ida son o‘ylaydi. Guruhdagilar son yuboradi. "
-                 "Bot kattaroq yoki kichikroq deb yo‘l ko‘rsatadi. "
-                 "To‘g‘ri topgan odam +10 ball oladi.\n\n"
-                 "✊ RSP:\n"
-                 "2, 3 yoki 5 kishi o‘ynaydi. "
-                 "Barcha o‘yinchilar tanlov qilmaguncha natija chiqmaydi. "
-                 "G‘oliblar +10 ball oladi.\n\n"
-                 "📊 /reyting — guruh reytingi\n"
-                 "👤 /profil — profilingiz\n"
-                 "🌐 /lang — guruh tilini tanlash",
-        "help": "🤖 BUYRUQLAR\n\n"
-               "/emps — o‘yin tanlash\n"
-               "/reyting — reyting\n"
-               "/profil — profil\n"
-               "/qoidalar — qoidalar\n"
-               "/lang — til tanlash\n"
-               "/help — yordam",
-        "private_start": "🤖 Bot ishlayapti!\n\nO‘yinni guruhda /emps buyrug‘i orqali boshlang.",
+        "flag_name": "🇺🇿 O‘zbekcha",
+        "lang_title": "🌐 <b>Tilni tanlang</b>\n<i>Til shu chat uchun o‘rnatiladi.</i>",
+        "lang_set": "✅ Til o‘rnatildi: 🇺🇿 <b>O‘zbekcha</b>",
+        "lang_admin_only": "⛔ Tilni faqat guruh adminlari o‘zgartira oladi.",
+        "use_group": "👥 Bu buyruqni guruh ichida ishlating.",
+        "start_text": (
+            "🎮 <b>O‘YINLAR BOTI</b> 🎮\n\n"
+            "Salom! Men guruhingizni qiziqarli o‘yinlar bilan to‘ldiraman:\n\n"
+            "🎯 Son topish\n"
+            "✊ Tosh-Qaychi-Qog‘oz\n"
+            "❌⭕ XO\n\n"
+            "🏆 G‘alaba qozoning, ball to‘plang va reytingda birinchi bo‘ling!\n\n"
+            "▶️ Boshlash: /emps"
+        ),
+        "menu_title": "🎮 <b>O‘YINLAR MARKAZI</b>\n\nQaysi o‘yinni o‘ynaymiz? 👇",
+        "btn_number": "🎯 Son topish",
+        "btn_rsp": "✊ Tosh-Qaychi-Qog‘oz",
+        "btn_xo": "❌⭕ XO",
+        "btn_join": "🙋 Qo‘shilish",
+        "btn_again": "🎮 Yana o‘ynash",
+        "btn_games": "🎮 O‘yinlar",
+        "btn_add_group": "➕ Guruhga qo‘shish",
+        "busy": "⚠️ Guruhda hozir o‘yin ketmoqda: <b>{game}</b>\n🛑 To‘xtatish: /stop",
+        "busy_alert": "⚠️ Hozir o‘yin ketmoqda: {game}",
+        "no_game": "🤷 Hozir faol o‘yin yo‘q.\n▶️ Boshlash: /emps",
+        "stop_denied": "⛔ O‘yinni faqat uni boshlagan o‘yinchi yoki admin to‘xtata oladi.",
+        "stopped": "🛑 O‘yin to‘xtatildi.",
+        "timeout": "⌛ Vaqt tugadi — o‘yin bekor qilindi.",
+        "gone": "🤷 Bu o‘yin allaqachon tugagan.",
+        "only_owner": "☝️ Buni faqat o‘yinni boshlagan o‘yinchi tanlay oladi.",
+        "not_player": "🚫 Siz bu o‘yinda ishtirok etmayapsiz.",
+        # 🎯 Son topish
+        "number_started": (
+            "🎯 <b>SON TOPISH</b>\n\n"
+            "🧠 Men <b>{min}</b> dan <b>{max}</b> gacha son o‘yladim.\n"
+            "💬 Chatga son yozing — men yo‘l ko‘rsataman!\n\n"
+            "🏆 G‘olib: +{points} ball\n"
+            "⚡ {fast} urinishgacha topsangiz: +{bonus} bonus\n"
+            "⏱ Faolsizlik vaqti: {minutes} daqiqa\n"
+            "🛑 To‘xtatish: /stop"
+        ),
+        "higher": "📈 <b>Kattaroq!</b>",
+        "lower": "📉 <b>Kichikroq!</b>",
+        "heat_hot": "🔥 Juda yaqin!",
+        "heat_warm": "♨️ Issiq",
+        "heat_cool": "🌤 Iliq",
+        "heat_cold": "🧊 Sovuq",
+        "hint_tail": "📍 Oraliq: <b>{lo}–{hi}</b> · 🎲 Urinish: {n}",
+        "number_dup": "♻️ <b>{number}</b> allaqachon aytilgan!",
+        "number_win": (
+            "🎉 <b>{name}</b> sonni topdi: <b>{number}</b>! 🎯\n"
+            "🎲 Urinishlar soni: {attempts}\n"
+            "🏆 +{points} ball{bonus}"
+        ),
+        "bonus": " ⚡ (tezkor bonus!)",
+        "number_timeout": "⌛ Vaqt tugadi! Yashirin son: <b>{number}</b> edi.\n▶️ Yana o‘ynash: /emps",
+        # ✊ RSP
+        "rsp_setup": "✊✂️📄 <b>TOSH · QAYCHI · QOG‘OZ</b>\n\n👥 Nechta o‘yinchi o‘ynaydi?",
+        "rsp_lobby": (
+            "✊✂️📄 <b>TOSH · QAYCHI · QOG‘OZ</b>\n\n"
+            "👥 O‘yinchilar: <b>{current}/{count}</b>\n\n"
+            "{players}\n\n"
+            "👇 Qo‘shilish uchun tugmani bosing!"
+        ),
+        "rsp_choose": (
+            "✊✂️📄 <b>TOSH · QAYCHI · QOG‘OZ</b>\n\n"
+            "{players}\n\n"
+            "🤫 Tanlovingiz yashirin — hamma tanlagach ochiladi!\n"
+            "⏳ Tanladi: <b>{current}/{count}</b>"
+        ),
+        "rsp_result": "🏁 <b>NATIJA</b>\n\n{players}\n\n{result}",
+        "rsp_winner": "🏆 <b>G‘olib: {names}</b>\n💰 Har biriga +{points} ball",
+        "rsp_draw_same": "🤝 <b>Durang!</b> Hamma bir xil tanladi.",
+        "rsp_draw_three": "🤝 <b>Durang!</b> Uchala variant ham chiqdi.",
+        "rsp_already": "✋ Siz allaqachon qo‘shilgansiz.",
+        "rsp_already_choice": "✋ Siz tanlovingizni allaqachon berdingiz.",
+        "rsp_picked": "✅ Tanlov qabul qilindi: {choice}",
         "rsp_rock": "✊ Tosh",
         "rsp_scissors": "✂️ Qaychi",
         "rsp_paper": "📄 Qog‘oz",
+        # ❌⭕ XO
+        "xo_lobby": "❌⭕ <b>XO</b>\n\n🙋 <b>{owner}</b> raqib kutmoqda!\n👇 O‘yinga qo‘shiling.",
+        "xo_board": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "👉 Navbat: {mark} <b>{turn}</b>\n"
+            "⏱ Har bir yurish uchun {seconds} soniya"
+        ),
+        "xo_win": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "🏆 <b>G‘olib: {mark} {winner}!</b>\n💰 +{points} ball"
+        ),
+        "xo_draw": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "🤝 <b>Durang!</b>\n💰 Har biriga +{points} ball"
+        ),
+        "xo_own": "☝️ Siz o‘yin egasisiz — raqib kerak!",
+        "xo_not_turn": "⏳ Hozir sizning navbatingiz emas!",
+        "xo_taken": "🚫 Bu katak band!",
+        # 🏆 Reyting va profil
+        "rating_title": "🏆 <b>TOP 10 REYTING</b>\n━━━━━━━━━━━━━━",
+        "rating_title_global": "🌍 <b>UMUMIY TOP 10</b>\n━━━━━━━━━━━━━━",
+        "rating_empty": "📭 Hali reyting mavjud emas.\n▶️ O‘yin boshlang: /emps",
+        "profile": (
+            "👤 <b>{name}</b>\n━━━━━━━━━━━━━━\n"
+            "🎖 Daraja: {level}\n"
+            "💰 Ball: <b>{points}</b>\n"
+            "🎮 O‘yinlar: {games}\n"
+            "🏆 G‘alabalar: {wins}\n"
+            "💔 Mag‘lubiyatlar: {losses}\n"
+            "🤝 Duranglar: {draws}\n"
+            "📊 G‘alaba foizi: <b>{winrate}%</b>\n"
+            "{bar}{rank}"
+        ),
+        "profile_rank": "\n🏅 Guruhdagi o‘rin: <b>#{rank}</b>",
+        "levels": ["🌱 Yangi", "🥉 Tajribali", "🥈 Usta", "🥇 Ekspert", "👑 Afsona"],
+        "rules": (
+            "📚 <b>QOIDALAR</b>\n\n"
+            "🎯 <b>Son topish</b>\n"
+            "Bot 1–100 oralig‘ida son o‘ylaydi. Chatga son yozing — bot «kattaroq» yoki «kichikroq» deb yo‘l ko‘rsatadi. "
+            "Topgan o‘yinchi +10 ball oladi (7 urinishgacha +5 bonus).\n\n"
+            "✊ <b>Tosh-Qaychi-Qog‘oz</b>\n"
+            "2, 3 yoki 5 kishi o‘ynaydi. Tanlovlar yashirin, hamma tanlagach natija ochiladi. G‘oliblar +10 ball oladi.\n\n"
+            "❌⭕ <b>XO</b>\n"
+            "Ikki kishi navbatma-navbat yuradi. 3 ta belgini bir qatorga terish — g‘alaba (+15 ball), durang — +5 ball.\n\n"
+            "⌛ Faol bo‘lmasa o‘yin avtomatik bekor bo‘ladi.\n"
+            "📊 Ball va reyting har bir guruh uchun alohida hisoblanadi."
+        ),
+        "help": (
+            "🤖 <b>BUYRUQLAR</b>\n\n"
+            "🎮 /emps — o‘yin tanlash\n"
+            "🛑 /stop — o‘yinni to‘xtatish\n"
+            "🏆 /reyting — reyting\n"
+            "👤 /profil — profilingiz\n"
+            "📚 /qoidalar — qoidalar\n"
+            "🌐 /lang — til tanlash"
+        ),
     },
-
+    # ───────────────────────── 🇬🇧 English ─────────────────────────
     "eng": {
-        "lang_title": "🌐 Choose a language:",
-        "lang_set": "🌐 Group language has been set to English.",
-        "lang_private": "🌐 Language selected: English.",
-        "use_group": "Use this command inside a group.",
-        "choose_game": "🎮 CHOOSE A GAME:",
-        "number_game": "🎯 Guess the Number",
-        "rsp_game": "✊ Rock-Paper-Scissors",
-        "number_started": "🎯 Guess the Number started!\nGuess a number from 1 to 100!",
-        "number_exists": "🎯 A number game is already running in this group!",
-        "correct": "🎉 {name} guessed the number: {number}!\n🏆 +10 points",
-        "higher": "📈 Higher!",
-        "lower": "📉 Lower!",
-        "rsp_count": "✊ Rock-Paper-Scissors\n\nHow many players?",
-        "rsp_exists": "⚠️ A RPS game is already running in this group.",
-        "rsp_wait": "✊ RPS started!\n\n{count} players needed.\nPress the button below to join.",
-        "rsp_joined": "{name} joined! ({current}/{count})",
-        "rsp_already": "You have already joined.",
-        "rsp_full": "Players are full!",
-        "rsp_choose": "✊ You joined the game!\n\nChoose:",
-        "rsp_wait_choices": "⏳ {current}/{count} players have chosen.\nThe winner will be announced after everyone chooses.",
-        "rsp_already_choice": "You have already made your choice.",
-        "rsp_result": "🏁 RPS RESULT\n\n{players}\n\n{result}",
-        "rsp_winner": "🏆 Winner: {names}\n💰 +10 points each",
-        "rsp_draw": "🤝 Draw!",
-        "rsp_no_winner": "🤝 No winner — all three choices appeared.",
-        "rsp_all_same": "🤝 Everyone chose the same. Draw!",
-        "rating_title": "🏆 TOP 10 RATING",
-        "rating_row": "{i}. {name} — {points} points | {wins} wins",
-        "rating_empty": "No rating yet.",
-        "profile": "👤 Profile\n\n"
-                   "📝 Games: {games}\n"
-                   "🏆 Wins: {wins}\n"
-                   "❌ Losses: {losses}\n"
-                   "💰 Points: {points}\n"
-                   "📊 Win rate: {winrate}%",
-        "rules": "📚 RULES\n\n"
-                 "🎯 Guess the Number:\n"
-                 "The bot chooses a number from 1–100. Players send guesses. "
-                 "The bot gives higher/lower hints. The first correct player gets +10 points.\n\n"
-                 "✊ RPS:\n"
-                 "2, 3 or 5 players can play. The result is shown only after everyone chooses. "
-                 "Winners get +10 points.\n\n"
-                 "📊 /reyting — group rating\n"
-                 "👤 /profil — your profile\n"
-                 "🌐 /lang — choose group language",
-        "help": "🤖 COMMANDS\n\n"
-               "/emps — choose a game\n"
-               "/reyting — rating\n"
-               "/profil — profile\n"
-               "/qoidalar — rules\n"
-               "/lang — choose language\n"
-               "/help — help",
-        "private_start": "🤖 Bot is working!\n\nStart a game in a group with /emps.",
+        "flag_name": "🇬🇧 English",
+        "lang_title": "🌐 <b>Choose a language</b>\n<i>It will be set for this chat.</i>",
+        "lang_set": "✅ Language set: 🇬🇧 <b>English</b>",
+        "lang_admin_only": "⛔ Only group admins can change the language.",
+        "use_group": "👥 Use this command inside a group.",
+        "start_text": (
+            "🎮 <b>GAMES BOT</b> 🎮\n\n"
+            "Hi! I'll fill your group with fun games:\n\n"
+            "🎯 Guess the Number\n"
+            "✊ Rock-Paper-Scissors\n"
+            "❌⭕ Tic-Tac-Toe\n\n"
+            "🏆 Win games, earn points and climb the leaderboard!\n\n"
+            "▶️ Start: /emps"
+        ),
+        "menu_title": "🎮 <b>GAMES CENTER</b>\n\nWhat shall we play? 👇",
+        "btn_number": "🎯 Guess the Number",
+        "btn_rsp": "✊ Rock-Paper-Scissors",
+        "btn_xo": "❌⭕ XO",
+        "btn_join": "🙋 Join",
+        "btn_again": "🎮 Play again",
+        "btn_games": "🎮 Games",
+        "btn_add_group": "➕ Add to a group",
+        "busy": "⚠️ A game is already running in this group: <b>{game}</b>\n🛑 Stop it: /stop",
+        "busy_alert": "⚠️ A game is already running: {game}",
+        "no_game": "🤷 There is no active game.\n▶️ Start: /emps",
+        "stop_denied": "⛔ Only the game starter or an admin can stop the game.",
+        "stopped": "🛑 The game was stopped.",
+        "timeout": "⌛ Time is up — the game was cancelled.",
+        "gone": "🤷 This game has already ended.",
+        "only_owner": "☝️ Only the player who started the game can choose this.",
+        "not_player": "🚫 You are not part of this game.",
+        "number_started": (
+            "🎯 <b>GUESS THE NUMBER</b>\n\n"
+            "🧠 I'm thinking of a number from <b>{min}</b> to <b>{max}</b>.\n"
+            "💬 Type a number in the chat — I'll guide you!\n\n"
+            "🏆 Winner: +{points} points\n"
+            "⚡ Guess within {fast} tries: +{bonus} bonus\n"
+            "⏱ Inactivity limit: {minutes} min\n"
+            "🛑 Stop: /stop"
+        ),
+        "higher": "📈 <b>Higher!</b>",
+        "lower": "📉 <b>Lower!</b>",
+        "heat_hot": "🔥 Burning hot!",
+        "heat_warm": "♨️ Warm",
+        "heat_cool": "🌤 Mild",
+        "heat_cold": "🧊 Cold",
+        "hint_tail": "📍 Range: <b>{lo}–{hi}</b> · 🎲 Tries: {n}",
+        "number_dup": "♻️ <b>{number}</b> has already been guessed!",
+        "number_win": (
+            "🎉 <b>{name}</b> guessed the number: <b>{number}</b>! 🎯\n"
+            "🎲 Tries: {attempts}\n"
+            "🏆 +{points} points{bonus}"
+        ),
+        "bonus": " ⚡ (speed bonus!)",
+        "number_timeout": "⌛ Time is up! The number was <b>{number}</b>.\n▶️ Play again: /emps",
+        "rsp_setup": "✊✂️📄 <b>ROCK · PAPER · SCISSORS</b>\n\n👥 How many players?",
+        "rsp_lobby": (
+            "✊✂️📄 <b>ROCK · PAPER · SCISSORS</b>\n\n"
+            "👥 Players: <b>{current}/{count}</b>\n\n"
+            "{players}\n\n"
+            "👇 Press the button to join!"
+        ),
+        "rsp_choose": (
+            "✊✂️📄 <b>ROCK · PAPER · SCISSORS</b>\n\n"
+            "{players}\n\n"
+            "🤫 Your pick is secret — revealed when everyone has chosen!\n"
+            "⏳ Chosen: <b>{current}/{count}</b>"
+        ),
+        "rsp_result": "🏁 <b>RESULT</b>\n\n{players}\n\n{result}",
+        "rsp_winner": "🏆 <b>Winner: {names}</b>\n💰 +{points} points each",
+        "rsp_draw_same": "🤝 <b>Draw!</b> Everyone chose the same.",
+        "rsp_draw_three": "🤝 <b>Draw!</b> All three options appeared.",
+        "rsp_already": "✋ You have already joined.",
+        "rsp_already_choice": "✋ You have already made your choice.",
+        "rsp_picked": "✅ Choice saved: {choice}",
         "rsp_rock": "✊ Rock",
         "rsp_scissors": "✂️ Scissors",
         "rsp_paper": "📄 Paper",
+        "xo_lobby": "❌⭕ <b>XO</b>\n\n🙋 <b>{owner}</b> is waiting for an opponent!\n👇 Join the game.",
+        "xo_board": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "👉 Turn: {mark} <b>{turn}</b>\n"
+            "⏱ {seconds} seconds per move"
+        ),
+        "xo_win": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "🏆 <b>Winner: {mark} {winner}!</b>\n💰 +{points} points"
+        ),
+        "xo_draw": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "🤝 <b>Draw!</b>\n💰 +{points} points each"
+        ),
+        "xo_own": "☝️ You started this game — you need an opponent!",
+        "xo_not_turn": "⏳ It's not your turn!",
+        "xo_taken": "🚫 This cell is taken!",
+        "rating_title": "🏆 <b>TOP 10 LEADERBOARD</b>\n━━━━━━━━━━━━━━",
+        "rating_title_global": "🌍 <b>GLOBAL TOP 10</b>\n━━━━━━━━━━━━━━",
+        "rating_empty": "📭 No leaderboard yet.\n▶️ Start a game: /emps",
+        "profile": (
+            "👤 <b>{name}</b>\n━━━━━━━━━━━━━━\n"
+            "🎖 Level: {level}\n"
+            "💰 Points: <b>{points}</b>\n"
+            "🎮 Games: {games}\n"
+            "🏆 Wins: {wins}\n"
+            "💔 Losses: {losses}\n"
+            "🤝 Draws: {draws}\n"
+            "📊 Win rate: <b>{winrate}%</b>\n"
+            "{bar}{rank}"
+        ),
+        "profile_rank": "\n🏅 Group rank: <b>#{rank}</b>",
+        "levels": ["🌱 Newbie", "🥉 Skilled", "🥈 Pro", "🥇 Expert", "👑 Legend"],
+        "rules": (
+            "📚 <b>RULES</b>\n\n"
+            "🎯 <b>Guess the Number</b>\n"
+            "The bot picks a number from 1–100. Type numbers in the chat — the bot says «higher» or «lower». "
+            "The winner gets +10 points (+5 bonus within 7 tries).\n\n"
+            "✊ <b>Rock-Paper-Scissors</b>\n"
+            "2, 3 or 5 players. Picks are secret and revealed once everyone has chosen. Winners get +10 points.\n\n"
+            "❌⭕ <b>XO</b>\n"
+            "Two players take turns. Three in a row wins (+15 points), a draw gives +5 points.\n\n"
+            "⌛ Inactive games are cancelled automatically.\n"
+            "📊 Points and leaderboards are tracked separately for each group."
+        ),
+        "help": (
+            "🤖 <b>COMMANDS</b>\n\n"
+            "🎮 /emps — choose a game\n"
+            "🛑 /stop — stop the game\n"
+            "🏆 /reyting — leaderboard\n"
+            "👤 /profil — your profile\n"
+            "📚 /qoidalar — rules\n"
+            "🌐 /lang — choose language"
+        ),
     },
-
+    # ───────────────────────── 🇷🇺 Русский ─────────────────────────
     "ru": {
-        "lang_title": "🌐 Выберите язык:",
-        "lang_set": "🌐 Язык группы установлен: русский.",
-        "lang_private": "🌐 Выбран язык: русский.",
-        "use_group": "Используйте эту команду в группе.",
-        "choose_game": "🎮 ВЫБЕРИТЕ ИГРУ:",
-        "number_game": "🎯 Угадай число",
-        "rsp_game": "✊ Камень-Ножницы-Бумага",
-        "number_started": "🎯 Игра началась!\nУгадайте число от 1 до 100!",
-        "number_exists": "🎯 В группе уже идёт игра в угадывание числа!",
-        "correct": "🎉 {name} угадал число: {number}!\n🏆 +10 очков",
-        "higher": "📈 Больше!",
-        "lower": "📉 Меньше!",
-        "rsp_count": "✊ Камень-Ножницы-Бумага\n\nСколько игроков?",
-        "rsp_exists": "⚠️ Игра КНБ уже идёт.",
-        "rsp_wait": "✊ КНБ началась!\n\nНужно игроков: {count}.\nНажмите кнопку ниже, чтобы присоединиться.",
-        "rsp_joined": "{name} присоединился! ({current}/{count})",
-        "rsp_already": "Вы уже присоединились.",
-        "rsp_full": "Все места заняты!",
-        "rsp_choose": "✊ Вы присоединились!\n\nВыберите:",
-        "rsp_wait_choices": "⏳ Выбор сделали {current}/{count} игроков.\nРезультат будет после выбора всех.",
-        "rsp_already_choice": "Вы уже сделали выбор.",
-        "rsp_result": "🏁 РЕЗУЛЬТАТ КНБ\n\n{players}\n\n{result}",
-        "rsp_winner": "🏆 Победитель: {names}\n💰 Каждому +10 очков",
-        "rsp_draw": "🤝 Ничья!",
-        "rsp_no_winner": "🤝 Победителя нет — появились все три варианта.",
-        "rsp_all_same": "🤝 Все выбрали одинаково. Ничья!",
-        "rating_title": "🏆 ТОП 10 РЕЙТИНГА",
-        "rating_row": "{i}. {name} — {points} очков | {wins} побед",
-        "rating_empty": "Рейтинг пока пуст.",
-        "profile": "👤 Профиль\n\n"
-                   "📝 Игр: {games}\n"
-                   "🏆 Побед: {wins}\n"
-                   "❌ Поражений: {losses}\n"
-                   "💰 Очков: {points}\n"
-                   "📊 Процент побед: {winrate}%",
-        "rules": "📚 ПРАВИЛА\n\n"
-                 "🎯 Угадай число:\n"
-                 "Бот выбирает число от 1 до 100. Игроки отправляют варианты. "
-                 "Бот подсказывает больше/меньше. Угадавший получает +10 очков.\n\n"
-                 "✊ КНБ:\n"
-                 "Играют 2, 3 или 5 человек. Результат появляется после выбора всех игроков. "
-                 "Победители получают +10 очков.\n\n"
-                 "📊 /reyting — рейтинг группы\n"
-                 "👤 /profil — профиль\n"
-                 "🌐 /lang — выбор языка",
-        "help": "🤖 КОМАНДЫ\n\n"
-               "/emps — выбрать игру\n"
-               "/reyting — рейтинг\n"
-               "/profil — профиль\n"
-               "/qoidalar — правила\n"
-               "/lang — выбрать язык\n"
-               "/help — помощь",
-        "private_start": "🤖 Бот работает!\n\nЗапустите игру в группе командой /emps.",
+        "flag_name": "🇷🇺 Русский",
+        "lang_title": "🌐 <b>Выберите язык</b>\n<i>Язык будет установлен для этого чата.</i>",
+        "lang_set": "✅ Язык установлен: 🇷🇺 <b>Русский</b>",
+        "lang_admin_only": "⛔ Менять язык могут только админы группы.",
+        "use_group": "👥 Используйте эту команду в группе.",
+        "start_text": (
+            "🎮 <b>БОТ-ИГРЫ</b> 🎮\n\n"
+            "Привет! Я наполню вашу группу интересными играми:\n\n"
+            "🎯 Угадай число\n"
+            "✊ Камень-Ножницы-Бумага\n"
+            "❌⭕ Крестики-нолики\n\n"
+            "🏆 Побеждайте, копите очки и поднимайтесь в рейтинге!\n\n"
+            "▶️ Начать: /emps"
+        ),
+        "menu_title": "🎮 <b>ИГРОВОЙ ЦЕНТР</b>\n\nВо что сыграем? 👇",
+        "btn_number": "🎯 Угадай число",
+        "btn_rsp": "✊ Камень-Ножницы-Бумага",
+        "btn_xo": "❌⭕ XO",
+        "btn_join": "🙋 Присоединиться",
+        "btn_again": "🎮 Сыграть ещё",
+        "btn_games": "🎮 Игры",
+        "btn_add_group": "➕ Добавить в группу",
+        "busy": "⚠️ В группе уже идёт игра: <b>{game}</b>\n🛑 Остановить: /stop",
+        "busy_alert": "⚠️ Сейчас уже идёт игра: {game}",
+        "no_game": "🤷 Сейчас нет активной игры.\n▶️ Начать: /emps",
+        "stop_denied": "⛔ Остановить игру может только её создатель или админ.",
+        "stopped": "🛑 Игра остановлена.",
+        "timeout": "⌛ Время вышло — игра отменена.",
+        "gone": "🤷 Эта игра уже закончилась.",
+        "only_owner": "☝️ Это может выбрать только тот, кто начал игру.",
+        "not_player": "🚫 Вы не участвуете в этой игре.",
+        "number_started": (
+            "🎯 <b>УГАДАЙ ЧИСЛО</b>\n\n"
+            "🧠 Я загадал число от <b>{min}</b> до <b>{max}</b>.\n"
+            "💬 Пишите числа в чат — я буду подсказывать!\n\n"
+            "🏆 Победитель: +{points} очков\n"
+            "⚡ Угадаете за {fast} попыток: +{bonus} бонус\n"
+            "⏱ Время бездействия: {minutes} мин\n"
+            "🛑 Остановить: /stop"
+        ),
+        "higher": "📈 <b>Больше!</b>",
+        "lower": "📉 <b>Меньше!</b>",
+        "heat_hot": "🔥 Очень горячо!",
+        "heat_warm": "♨️ Тепло",
+        "heat_cool": "🌤 Прохладно",
+        "heat_cold": "🧊 Холодно",
+        "hint_tail": "📍 Диапазон: <b>{lo}–{hi}</b> · 🎲 Попыток: {n}",
+        "number_dup": "♻️ <b>{number}</b> уже называли!",
+        "number_win": (
+            "🎉 <b>{name}</b> угадал число: <b>{number}</b>! 🎯\n"
+            "🎲 Попыток: {attempts}\n"
+            "🏆 +{points} очков{bonus}"
+        ),
+        "bonus": " ⚡ (бонус за скорость!)",
+        "number_timeout": "⌛ Время вышло! Загаданное число: <b>{number}</b>.\n▶️ Сыграть ещё: /emps",
+        "rsp_setup": "✊✂️📄 <b>КАМЕНЬ · НОЖНИЦЫ · БУМАГА</b>\n\n👥 Сколько игроков?",
+        "rsp_lobby": (
+            "✊✂️📄 <b>КАМЕНЬ · НОЖНИЦЫ · БУМАГА</b>\n\n"
+            "👥 Игроки: <b>{current}/{count}</b>\n\n"
+            "{players}\n\n"
+            "👇 Нажмите кнопку, чтобы присоединиться!"
+        ),
+        "rsp_choose": (
+            "✊✂️📄 <b>КАМЕНЬ · НОЖНИЦЫ · БУМАГА</b>\n\n"
+            "{players}\n\n"
+            "🤫 Выбор тайный — откроется, когда выберут все!\n"
+            "⏳ Выбрали: <b>{current}/{count}</b>"
+        ),
+        "rsp_result": "🏁 <b>РЕЗУЛЬТАТ</b>\n\n{players}\n\n{result}",
+        "rsp_winner": "🏆 <b>Победитель: {names}</b>\n💰 Каждому +{points} очков",
+        "rsp_draw_same": "🤝 <b>Ничья!</b> Все выбрали одинаково.",
+        "rsp_draw_three": "🤝 <b>Ничья!</b> Выпали все три варианта.",
+        "rsp_already": "✋ Вы уже присоединились.",
+        "rsp_already_choice": "✋ Вы уже сделали выбор.",
+        "rsp_picked": "✅ Выбор принят: {choice}",
         "rsp_rock": "✊ Камень",
         "rsp_scissors": "✂️ Ножницы",
         "rsp_paper": "📄 Бумага",
+        "xo_lobby": "❌⭕ <b>XO</b>\n\n🙋 <b>{owner}</b> ждёт соперника!\n👇 Присоединяйтесь к игре.",
+        "xo_board": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "👉 Ход: {mark} <b>{turn}</b>\n"
+            "⏱ {seconds} секунд на ход"
+        ),
+        "xo_win": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "🏆 <b>Победитель: {mark} {winner}!</b>\n💰 +{points} очков"
+        ),
+        "xo_draw": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "🤝 <b>Ничья!</b>\n💰 Каждому +{points} очков"
+        ),
+        "xo_own": "☝️ Вы создали игру — нужен соперник!",
+        "xo_not_turn": "⏳ Сейчас не ваш ход!",
+        "xo_taken": "🚫 Эта клетка занята!",
+        "rating_title": "🏆 <b>ТОП 10 РЕЙТИНГА</b>\n━━━━━━━━━━━━━━",
+        "rating_title_global": "🌍 <b>ОБЩИЙ ТОП 10</b>\n━━━━━━━━━━━━━━",
+        "rating_empty": "📭 Рейтинг пока пуст.\n▶️ Начните игру: /emps",
+        "profile": (
+            "👤 <b>{name}</b>\n━━━━━━━━━━━━━━\n"
+            "🎖 Уровень: {level}\n"
+            "💰 Очки: <b>{points}</b>\n"
+            "🎮 Игр: {games}\n"
+            "🏆 Побед: {wins}\n"
+            "💔 Поражений: {losses}\n"
+            "🤝 Ничьих: {draws}\n"
+            "📊 Процент побед: <b>{winrate}%</b>\n"
+            "{bar}{rank}"
+        ),
+        "profile_rank": "\n🏅 Место в группе: <b>#{rank}</b>",
+        "levels": ["🌱 Новичок", "🥉 Опытный", "🥈 Мастер", "🥇 Эксперт", "👑 Легенда"],
+        "rules": (
+            "📚 <b>ПРАВИЛА</b>\n\n"
+            "🎯 <b>Угадай число</b>\n"
+            "Бот загадывает число от 1 до 100. Пишите числа в чат — бот подсказывает «больше» или «меньше». "
+            "Угадавший получает +10 очков (+5 бонус за 7 попыток).\n\n"
+            "✊ <b>Камень-Ножницы-Бумага</b>\n"
+            "Играют 2, 3 или 5 человек. Выбор тайный, результат — после выбора всех. Победители получают +10 очков.\n\n"
+            "❌⭕ <b>XO</b>\n"
+            "Двое ходят по очереди. Три в ряд — победа (+15 очков), ничья — +5 очков.\n\n"
+            "⌛ Неактивные игры отменяются автоматически.\n"
+            "📊 Очки и рейтинг ведутся отдельно для каждой группы."
+        ),
+        "help": (
+            "🤖 <b>КОМАНДЫ</b>\n\n"
+            "🎮 /emps — выбрать игру\n"
+            "🛑 /stop — остановить игру\n"
+            "🏆 /reyting — рейтинг\n"
+            "👤 /profil — ваш профиль\n"
+            "📚 /qoidalar — правила\n"
+            "🌐 /lang — выбрать язык"
+        ),
     },
-
+    # ───────────────────────── 🇰🇿 Қазақша ─────────────────────────
     "kz": {
-        "lang_title": "🌐 Тілді таңдаңыз:",
-        "lang_set": "🌐 Топтың тілі қазақша болып орнатылды.",
-        "lang_private": "🌐 Таңдалған тіл: қазақша.",
-        "use_group": "Бұл команданы топ ішінде қолданыңыз.",
-        "choose_game": "🎮 ОЙЫНДЫ ТАҢДАҢЫЗ:",
-        "number_game": "🎯 Сан тап",
-        "rsp_game": "✊ Тас-Қайшы-Қағаз",
-        "number_started": "🎯 Сан табу ойыны басталды!\n1 мен 100 арасындағы санды табыңыз!",
-        "number_exists": "🎯 Топта сан табу ойыны жүріп жатыр!",
-        "correct": "🎉 {name} санды тапты: {number}!\n🏆 +10 ұпай",
-        "higher": "📈 Үлкенірек!",
-        "lower": "📉 Кішірек!",
-        "rsp_count": "✊ Тас-Қайшы-Қағаз\n\nҚанша ойыншы ойнайды?",
-        "rsp_exists": "⚠️ Топта RPS ойыны жүріп жатыр.",
-        "rsp_wait": "✊ RPS басталды!\n\n{count} ойыншы керек.\nТөмендегі батырманы басып қосылыңыз.",
-        "rsp_joined": "{name} ойынға қосылды! ({current}/{count})",
-        "rsp_already": "Сіз ойынға әлдеқашан қосылдыңыз.",
-        "rsp_full": "Ойыншылар саны толды!",
-        "rsp_choose": "✊ Сіз ойынға қосылдыңыз!\n\nТаңдаңыз:",
-        "rsp_wait_choices": "⏳ {current}/{count} ойыншы таңдау жасады.\nБарлығы таңдағаннан кейін нәтиже шығады.",
-        "rsp_already_choice": "Сіз таңдауыңызды жасап қойдыңыз.",
-        "rsp_result": "🏁 RPS НӘТИЖЕСІ\n\n{players}\n\n{result}",
-        "rsp_winner": "🏆 Жеңімпаз: {names}\n💰 Әрқайсысына +10 ұпай",
-        "rsp_draw": "🤝 Тең ойын!",
-        "rsp_no_winner": "🤝 Жеңімпаз жоқ — үш таңдау да шықты.",
-        "rsp_all_same": "🤝 Барлығы бірдей таңдады. Тең ойын!",
-        "rating_title": "🏆 ТОП 10 РЕЙТИНГ",
-        "rating_row": "{i}. {name} — {points} ұпай | {wins} жеңіс",
-        "rating_empty": "Рейтинг әлі жоқ.",
-        "profile": "👤 Профиль\n\n"
-                   "📝 Ойындар: {games}\n"
-                   "🏆 Жеңістер: {wins}\n"
-                   "❌ Жеңілістер: {losses}\n"
-                   "💰 Ұпай: {points}\n"
-                   "📊 Жеңіс пайызы: {winrate}%",
-        "rules": "📚 ЕРЕЖЕЛЕР\n\n"
-                 "🎯 Сан тап:\n"
-                 "Бот 1–100 арасынан сан таңдайды. Ойыншылар сан жібереді. "
-                 "Бот үлкен/кіші екенін көрсетеді. Дұрыс тапқан ойыншы +10 ұпай алады.\n\n"
-                 "✊ RPS:\n"
-                 "2, 3 немесе 5 адам ойнайды. Барлығы таңдағанша нәтиже көрсетілмейді. "
-                 "Жеңімпаздар +10 ұпай алады.\n\n"
-                 "📊 /reyting — топ рейтингі\n"
-                 "👤 /profil — профиль\n"
-                 "🌐 /lang — тіл таңдау",
-        "help": "🤖 БҰЙРЫҚТАР\n\n"
-               "/emps — ойын таңдау\n"
-               "/reyting — рейтинг\n"
-               "/profil — профиль\n"
-               "/qoidalar — ережелер\n"
-               "/lang — тіл таңдау\n"
-               "/help — көмек",
-        "private_start": "🤖 Бот жұмыс істеп тұр!\n\nТопта /emps арқылы ойынды бастаңыз.",
+        "flag_name": "🇰🇿 Қазақша",
+        "lang_title": "🌐 <b>Тілді таңдаңыз</b>\n<i>Тіл осы чат үшін орнатылады.</i>",
+        "lang_set": "✅ Тіл орнатылды: 🇰🇿 <b>Қазақша</b>",
+        "lang_admin_only": "⛔ Тілді тек топ админдері өзгерте алады.",
+        "use_group": "👥 Бұл команданы топ ішінде қолданыңыз.",
+        "start_text": (
+            "🎮 <b>ОЙЫНДАР БОТЫ</b> 🎮\n\n"
+            "Сәлем! Мен тобыңызды қызықты ойындармен толтырамын:\n\n"
+            "🎯 Сан тап\n"
+            "✊ Тас-Қайшы-Қағаз\n"
+            "❌⭕ XO\n\n"
+            "🏆 Жеңіңіз, ұпай жинаңыз және рейтингте бірінші болыңыз!\n\n"
+            "▶️ Бастау: /emps"
+        ),
+        "menu_title": "🎮 <b>ОЙЫН ОРТАЛЫҒЫ</b>\n\nНе ойнаймыз? 👇",
+        "btn_number": "🎯 Сан тап",
+        "btn_rsp": "✊ Тас-Қайшы-Қағаз",
+        "btn_xo": "❌⭕ XO",
+        "btn_join": "🙋 Қосылу",
+        "btn_again": "🎮 Тағы ойнау",
+        "btn_games": "🎮 Ойындар",
+        "btn_add_group": "➕ Топқа қосу",
+        "busy": "⚠️ Топта ойын жүріп жатыр: <b>{game}</b>\n🛑 Тоқтату: /stop",
+        "busy_alert": "⚠️ Қазір ойын жүріп жатыр: {game}",
+        "no_game": "🤷 Қазір белсенді ойын жоқ.\n▶️ Бастау: /emps",
+        "stop_denied": "⛔ Ойынды тек оны бастаған ойыншы немесе админ тоқтата алады.",
+        "stopped": "🛑 Ойын тоқтатылды.",
+        "timeout": "⌛ Уақыт бітті — ойын тоқтатылды.",
+        "gone": "🤷 Бұл ойын әлдеқашан аяқталған.",
+        "only_owner": "☝️ Мұны тек ойынды бастаған ойыншы таңдай алады.",
+        "not_player": "🚫 Сіз бұл ойынға қатыспайсыз.",
+        "number_started": (
+            "🎯 <b>САН ТАП</b>\n\n"
+            "🧠 Мен <b>{min}</b> мен <b>{max}</b> арасынан сан ойладым.\n"
+            "💬 Чатқа сан жазыңыз — мен жол көрсетемін!\n\n"
+            "🏆 Жеңімпаз: +{points} ұпай\n"
+            "⚡ {fast} әрекетке дейін тапсаңыз: +{bonus} бонус\n"
+            "⏱ Белсенділіксіз уақыт: {minutes} минут\n"
+            "🛑 Тоқтату: /stop"
+        ),
+        "higher": "📈 <b>Үлкенірек!</b>",
+        "lower": "📉 <b>Кішірек!</b>",
+        "heat_hot": "🔥 Өте жақын!",
+        "heat_warm": "♨️ Ыстық",
+        "heat_cool": "🌤 Жылы",
+        "heat_cold": "🧊 Суық",
+        "hint_tail": "📍 Аралық: <b>{lo}–{hi}</b> · 🎲 Әрекет: {n}",
+        "number_dup": "♻️ <b>{number}</b> саны айтылып қойған!",
+        "number_win": (
+            "🎉 <b>{name}</b> санды тапты: <b>{number}</b>! 🎯\n"
+            "🎲 Әрекет саны: {attempts}\n"
+            "🏆 +{points} ұпай{bonus}"
+        ),
+        "bonus": " ⚡ (жылдамдық бонусы!)",
+        "number_timeout": "⌛ Уақыт бітті! Жасырылған сан: <b>{number}</b> еді.\n▶️ Тағы ойнау: /emps",
+        "rsp_setup": "✊✂️📄 <b>ТАС · ҚАЙШЫ · ҚАҒАЗ</b>\n\n👥 Қанша ойыншы ойнайды?",
+        "rsp_lobby": (
+            "✊✂️📄 <b>ТАС · ҚАЙШЫ · ҚАҒАЗ</b>\n\n"
+            "👥 Ойыншылар: <b>{current}/{count}</b>\n\n"
+            "{players}\n\n"
+            "👇 Қосылу үшін батырманы басыңыз!"
+        ),
+        "rsp_choose": (
+            "✊✂️📄 <b>ТАС · ҚАЙШЫ · ҚАҒАЗ</b>\n\n"
+            "{players}\n\n"
+            "🤫 Таңдау жасырын — бәрі таңдағанда ашылады!\n"
+            "⏳ Таңдады: <b>{current}/{count}</b>"
+        ),
+        "rsp_result": "🏁 <b>НӘТИЖЕ</b>\n\n{players}\n\n{result}",
+        "rsp_winner": "🏆 <b>Жеңімпаз: {names}</b>\n💰 Әрқайсысына +{points} ұпай",
+        "rsp_draw_same": "🤝 <b>Тең ойын!</b> Бәрі бірдей таңдады.",
+        "rsp_draw_three": "🤝 <b>Тең ойын!</b> Үш нұсқа да шықты.",
+        "rsp_already": "✋ Сіз әлдеқашан қосылдыңыз.",
+        "rsp_already_choice": "✋ Сіз таңдауыңызды жасап қойдыңыз.",
+        "rsp_picked": "✅ Таңдау қабылданды: {choice}",
         "rsp_rock": "✊ Тас",
         "rsp_scissors": "✂️ Қайшы",
         "rsp_paper": "📄 Қағаз",
+        "xo_lobby": "❌⭕ <b>XO</b>\n\n🙋 <b>{owner}</b> қарсылас күтіп тұр!\n👇 Ойынға қосылыңыз.",
+        "xo_board": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "👉 Кезек: {mark} <b>{turn}</b>\n"
+            "⏱ Әр жүріске {seconds} секунд"
+        ),
+        "xo_win": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "🏆 <b>Жеңімпаз: {mark} {winner}!</b>\n💰 +{points} ұпай"
+        ),
+        "xo_draw": (
+            "❌⭕ <b>XO</b>\n\n"
+            "❌ <b>{x}</b>  🆚  ⭕ <b>{o}</b>\n\n"
+            "🤝 <b>Тең ойын!</b>\n💰 Әрқайсысына +{points} ұпай"
+        ),
+        "xo_own": "☝️ Сіз ойынды бастадыңыз — қарсылас керек!",
+        "xo_not_turn": "⏳ Қазір сіздің кезегіңіз емес!",
+        "xo_taken": "🚫 Бұл тор бос емес!",
+        "rating_title": "🏆 <b>ТОП 10 РЕЙТИНГ</b>\n━━━━━━━━━━━━━━",
+        "rating_title_global": "🌍 <b>ЖАЛПЫ ТОП 10</b>\n━━━━━━━━━━━━━━",
+        "rating_empty": "📭 Рейтинг әлі жоқ.\n▶️ Ойын бастаңыз: /emps",
+        "profile": (
+            "👤 <b>{name}</b>\n━━━━━━━━━━━━━━\n"
+            "🎖 Деңгей: {level}\n"
+            "💰 Ұпай: <b>{points}</b>\n"
+            "🎮 Ойындар: {games}\n"
+            "🏆 Жеңістер: {wins}\n"
+            "💔 Жеңілістер: {losses}\n"
+            "🤝 Тең ойындар: {draws}\n"
+            "📊 Жеңіс пайызы: <b>{winrate}%</b>\n"
+            "{bar}{rank}"
+        ),
+        "profile_rank": "\n🏅 Топтағы орын: <b>#{rank}</b>",
+        "levels": ["🌱 Жаңадан", "🥉 Тәжірибелі", "🥈 Шебер", "🥇 Сарапшы", "👑 Аңыз"],
+        "rules": (
+            "📚 <b>ЕРЕЖЕЛЕР</b>\n\n"
+            "🎯 <b>Сан тап</b>\n"
+            "Бот 1–100 арасынан сан ойлайды. Чатқа сан жазыңыз — бот «үлкенірек» немесе «кішірек» деп көрсетеді. "
+            "Тапқан ойыншы +10 ұпай алады (7 әрекетке дейін +5 бонус).\n\n"
+            "✊ <b>Тас-Қайшы-Қағаз</b>\n"
+            "2, 3 немесе 5 адам ойнайды. Таңдау жасырын, бәрі таңдағанда нәтиже ашылады. Жеңімпаздар +10 ұпай алады.\n\n"
+            "❌⭕ <b>XO</b>\n"
+            "Екі адам кезекпен жүреді. Үш белгіні бір қатарға қою — жеңіс (+15 ұпай), тең ойын — +5 ұпай.\n\n"
+            "⌛ Белсенді болмаса, ойын өздігінен тоқтатылады.\n"
+            "📊 Ұпай мен рейтинг әр топ үшін бөлек есептеледі."
+        ),
+        "help": (
+            "🤖 <b>БҰЙРЫҚТАР</b>\n\n"
+            "🎮 /emps — ойын таңдау\n"
+            "🛑 /stop — ойынды тоқтату\n"
+            "🏆 /reyting — рейтинг\n"
+            "👤 /profil — профиль\n"
+            "📚 /qoidalar — ережелер\n"
+            "🌐 /lang — тіл таңдау"
+        ),
     },
 }
 
+LANG_ORDER = ["uz", "eng", "ru", "kz"]
+LANG_CACHE: dict[int, str] = {}
+
+
+def t(chat_id, key, **kwargs):
+    """Chatning tilida matn qaytaradi (topilmasa — o'zbekcha)."""
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    text = LANGS[lang].get(key)
+    if text is None:
+        text = LANGS[DEFAULT_LANG].get(key, key)
+    return text.format(**kwargs) if kwargs else text
+
+
+def level_name(chat_id, points):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    idx = 0
+    for i, threshold in enumerate((0, 50, 150, 400, 1000)):
+        if points >= threshold:
+            idx = i
+    return LANGS[lang]["levels"][idx]
+
+
+# ───────────────────────────── Ma'lumotlar bazasi ─────────────────────────────
+
+_conn = None
+_SEEN: dict[int, tuple] = {}
+OUTCOME_COL = {"win": "wins", "loss": "losses", "draw": "draws"}
+
 
 def db():
-    return sqlite3.connect(DB_FILE)
+    global _conn
+    if _conn is None:
+        _conn = sqlite3.connect(DB_FILE)
+    return _conn
 
 
 def init_db():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            points INTEGER DEFAULT 0,
-            games INTEGER DEFAULT 0,
-            wins INTEGER DEFAULT 0
+    c = db()
+    with c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                points INTEGER DEFAULT 0,
+                games INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS group_languages (
+                chat_id INTEGER PRIMARY KEY,
+                language TEXT NOT NULL DEFAULT 'uz'
+            )
+        """)
+        # Har bir guruh uchun alohida statistika
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS chat_stats (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0,
+                games INTEGER NOT NULL DEFAULT 0,
+                wins INTEGER NOT NULL DEFAULT 0,
+                losses INTEGER NOT NULL DEFAULT 0,
+                draws INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (chat_id, user_id)
+            )
+        """)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stats_rank "
+            "ON chat_stats(chat_id, points DESC, wins DESC)"
         )
-    """)
+    migrate_legacy(c)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS games (
-            chat_id INTEGER PRIMARY KEY,
-            number INTEGER,
-            attempts INTEGER DEFAULT 0,
-            active INTEGER DEFAULT 0
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS group_languages (
-            chat_id INTEGER PRIMARY KEY,
-            language TEXT NOT NULL DEFAULT 'uz'
-        )
-    """)
-
-    conn.commit()
-    conn.close()
+    for chat_id, language in c.execute("SELECT chat_id, language FROM group_languages"):
+        if language in LANGS:
+            LANG_CACHE[chat_id] = language
 
 
-def get_group_lang(chat_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT language FROM group_languages WHERE chat_id = ?",
-        (chat_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
+def migrate_legacy(c):
+    """Eski global ballarni (agar bitta guruh bo'lsa) o'sha guruhga ko'chiradi."""
+    if c.execute("PRAGMA user_version").fetchone()[0] >= 1:
+        return
 
-    if row and row[0] in LANGS:
-        return row[0]
+    chats = [r[0] for r in c.execute("SELECT chat_id FROM group_languages WHERE chat_id < 0")]
+    has_stats = c.execute("SELECT 1 FROM chat_stats LIMIT 1").fetchone()
 
-    return DEFAULT_LANG
+    if len(chats) == 1 and not has_stats:
+        with c:
+            c.execute(
+                """
+                INSERT INTO chat_stats(chat_id, user_id, points, games, wins, losses)
+                SELECT ?, user_id, points, games, wins, MAX(games - wins, 0)
+                FROM users WHERE games > 0 OR points > 0
+                """,
+                (chats[0],),
+            )
+        logger.info("Eski statistika %s guruhiga ko'chirildi", chats[0])
+    else:
+        logger.info("Eski statistikani ko'chirib bo'lmadi (guruhlar soni: %d)", len(chats))
+
+    c.execute("PRAGMA user_version = 1")
+    c.commit()
 
 
 def set_group_lang(chat_id, language):
     if language not in LANGS:
         language = DEFAULT_LANG
-
-    conn = db()
-    conn.execute("""
-        INSERT INTO group_languages(chat_id, language)
-        VALUES (?, ?)
-        ON CONFLICT(chat_id)
-        DO UPDATE SET language = excluded.language
-    """, (chat_id, language))
-    conn.commit()
-    conn.close()
-
-
-def t(chat_id, key, **kwargs):
-    language = get_group_lang(chat_id)
-    text = LANGS[language].get(key, LANGS[DEFAULT_LANG].get(key, key))
-    return text.format(**kwargs)
+    c = db()
+    with c:
+        c.execute(
+            """
+            INSERT INTO group_languages(chat_id, language) VALUES (?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET language = excluded.language
+            """,
+            (chat_id, language),
+        )
+    LANG_CACHE[chat_id] = language
 
 
 def save_user(user):
-    conn = db()
-    conn.execute("""
-        INSERT INTO users(user_id, username, first_name)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            username = excluded.username,
-            first_name = excluded.first_name
-    """, (
-        user.id,
-        user.username,
-        user.first_name,
-    ))
-    conn.commit()
-    conn.close()
+    key = (user.username, user.first_name)
+    if _SEEN.get(user.id) == key:
+        return
+    c = db()
+    with c:
+        c.execute(
+            """
+            INSERT INTO users(user_id, username, first_name) VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                first_name = excluded.first_name
+            """,
+            (user.id, user.username, user.first_name),
+        )
+    _SEEN[user.id] = key
 
 
-def add_points(user_id, points):
-    conn = db()
-    conn.execute(
-        "UPDATE users SET points = points + ? WHERE user_id = ?",
-        (points, user_id),
-    )
-    conn.commit()
-    conn.close()
+def record(chat_id, user_id, outcome, points=0):
+    """O'yin natijasini yozadi: games +1, g'alaba/mag'lubiyat/durang +1, ball."""
+    col = OUTCOME_COL[outcome]
+    c = db()
+    with c:
+        c.execute(
+            f"""
+            INSERT INTO chat_stats(chat_id, user_id, points, games, {col})
+            VALUES (?, ?, ?, 1, 1)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                points = points + excluded.points,
+                games = games + 1,
+                {col} = {col} + 1
+            """,
+            (chat_id, user_id, points),
+        )
 
 
-def add_game_stats(user_id, win=False):
-    conn = db()
-
-    if win:
-        conn.execute("""
-            UPDATE users
-            SET games = games + 1,
-                wins = wins + 1
-            WHERE user_id = ?
-        """, (user_id,))
+def get_stats(chat_id, user_id, private):
+    c = db()
+    if private:
+        row = c.execute(
+            """
+            SELECT COALESCE(SUM(points),0), COALESCE(SUM(games),0), COALESCE(SUM(wins),0),
+                   COALESCE(SUM(losses),0), COALESCE(SUM(draws),0)
+            FROM chat_stats WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
     else:
-        conn.execute("""
-            UPDATE users
-            SET games = games + 1
-            WHERE user_id = ?
-        """, (user_id,))
-
-    conn.commit()
-    conn.close()
+        row = c.execute(
+            "SELECT points, games, wins, losses, draws FROM chat_stats WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id),
+        ).fetchone()
+    return row or (0, 0, 0, 0, 0)
 
 
-def get_user(user_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT points, games, wins
-        FROM users
-        WHERE user_id = ?
-    """, (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
+def get_rank(chat_id, points, wins):
+    row = db().execute(
+        """
+        SELECT COUNT(*) + 1 FROM chat_stats
+        WHERE chat_id = ? AND (points > ? OR (points = ? AND wins > ?))
+        """,
+        (chat_id, points, points, wins),
+    ).fetchone()
+    return row[0]
 
 
-def get_game(chat_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT number, attempts, active
-        FROM games
-        WHERE chat_id = ?
-    """, (chat_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-def create_game(chat_id):
-    number = random.randint(MIN_NUMBER, MAX_NUMBER)
-
-    conn = db()
-    conn.execute("""
-        INSERT INTO games(chat_id, number, attempts, active)
-        VALUES (?, ?, 0, 1)
-        ON CONFLICT(chat_id) DO UPDATE SET
-            number = excluded.number,
-            attempts = 0,
-            active = 1
-    """, (chat_id, number))
-    conn.commit()
-    conn.close()
-
-
-def update_attempts(chat_id):
-    conn = db()
-    conn.execute("""
-        UPDATE games
-        SET attempts = attempts + 1
-        WHERE chat_id = ?
-    """, (chat_id,))
-    conn.commit()
-    conn.close()
-
-
-def finish_game(chat_id):
-    conn = db()
-    conn.execute(
-        "UPDATE games SET active = 0 WHERE chat_id = ?",
+def top_players(chat_id, private):
+    c = db()
+    if private:
+        return c.execute(
+            """
+            SELECT u.first_name, u.username, SUM(s.points) AS p, SUM(s.wins) AS w
+            FROM chat_stats s LEFT JOIN users u ON u.user_id = s.user_id
+            GROUP BY s.user_id HAVING SUM(s.games) > 0
+            ORDER BY p DESC, w DESC LIMIT 10
+            """
+        ).fetchall()
+    return c.execute(
+        """
+        SELECT u.first_name, u.username, s.points, s.wins
+        FROM chat_stats s LEFT JOIN users u ON u.user_id = s.user_id
+        WHERE s.chat_id = ? AND s.games > 0
+        ORDER BY s.points DESC, s.wins DESC LIMIT 10
+        """,
         (chat_id,),
-    )
-    conn.commit()
-    conn.close()
+    ).fetchall()
 
 
-def display_name(user):
-    if user.username:
-        return "@" + user.username
-    return user.first_name or "Noma'lum"
+# ───────────────────────────── Yordamchi funksiyalar ─────────────────────────────
 
 
-rsp_games = {}
-
-RSP_CHOICES = {
-    "rock": "rsp_rock",
-    "scissors": "rsp_scissors",
-    "paper": "rsp_paper",
-}
-
-RSP_BEATS = {
-    "rock": "scissors",
-    "scissors": "paper",
-    "paper": "rock",
-}
+def pretty_name(first_name, username):
+    name = (first_name or "").strip() or (f"@{username}" if username else "User")
+    return escape(name[:24])
 
 
-def emps_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎯 Son topish", callback_data="emps_number"),
-        ],
-        [
-            InlineKeyboardButton("✊ RSP", callback_data="emps_rsp"),
-        ],
-    ])
+def uname(user):
+    return pretty_name(user.first_name, user.username)
 
 
-async def emps(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_chat:
-        return
+def bar(percent, size=10):
+    filled = round(percent / 100 * size)
+    return "▰" * filled + "▱" * (size - filled)
 
-    if update.effective_chat.type == "private":
-        await update.message.reply_text(
-            "Bu buyruqni guruh ichida ishlating."
+
+async def is_admin(bot, chat_id, user_id):
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except TelegramError:
+        return False
+    return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
+
+
+async def edit(bot, chat_id, message_id, text, kb=None):
+    """Xabarni xavfsiz tahrirlaydi ("not modified" xatosini e'tiborsiz qoldiradi)."""
+    try:
+        await bot.edit_message_text(
+            text, chat_id=chat_id, message_id=message_id, reply_markup=kb
         )
-        return
-
-    await update.message.reply_text(
-        t(update.effective_chat.id, "choose_game"),
-        reply_markup=emps_keyboard(),
-    )
-
-
-def rsp_count_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("👥 2", callback_data="rsp_count_2"),
-            InlineKeyboardButton("👥 3", callback_data="rsp_count_3"),
-            InlineKeyboardButton("👥 5", callback_data="rsp_count_5"),
-        ]
-    ])
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            logger.warning("edit xatosi: %s", e)
+    except TelegramError as e:
+        logger.warning("edit xatosi: %s", e)
 
 
-async def start_rsp_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
+# ───────────────────────────── O'yin holati va taymerlar ─────────────────────────────
+# Har bir chatda bir vaqtda bitta o'yin. Faolsizlikdan keyin avtomatik bekor bo'ladi.
 
-    await query.answer()
-
-    if chat_id in rsp_games:
-        await query.message.reply_text(
-            t(chat_id, "rsp_exists")
-        )
-        return
-
-    await query.message.reply_text(
-        t(chat_id, "rsp_count"),
-        reply_markup=rsp_count_keyboard(),
-    )
+GAMES: dict[int, dict] = {}
+BG_TASKS: set = set()
 
 
-async def create_rsp(update: Update, count):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-
-    await query.answer()
-
-    if chat_id in rsp_games:
-        await query.message.reply_text(
-            t(chat_id, "rsp_exists")
-        )
-        return
-
-    rsp_games[chat_id] = {
-        "count": count,
-        "players": {},
-        "choices": {},
-    }
-
-    lang = get_group_lang(chat_id)
-
-    join_labels = {
-        "uz": "✊ Qo‘shilish",
-        "eng": "✊ Join",
-        "ru": "✊ Присоединиться",
-        "kz": "✊ Қосылу",
-    }
-
-    await query.message.reply_text(
-        t(chat_id, "rsp_wait", count=count),
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    join_labels.get(lang, "✊ Qo‘shilish"),
-                    callback_data="rsp_join"
-                )
-            ]
-        ]),
-    )
+def new_game(chat_id, kind, owner, **extra):
+    game = {"type": kind, "owner": owner, "timer": None, "msg_id": None, **extra}
+    GAMES[chat_id] = game
+    return game
 
 
-def rsp_choice_keyboard(chat_id):
-    lang = get_group_lang(chat_id)
-
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "✊ " + LANGS[lang]["rsp_rock"].split(" ", 1)[-1],
-                callback_data="rsp_choice_rock",
-            ),
-            InlineKeyboardButton(
-                "✂️ " + LANGS[lang]["rsp_scissors"].split(" ", 1)[-1],
-                callback_data="rsp_choice_scissors",
-            ),
-            InlineKeyboardButton(
-                "📄 " + LANGS[lang]["rsp_paper"].split(" ", 1)[-1],
-                callback_data="rsp_choice_paper",
-            ),
-        ]
-    ])
+def arm(app, chat_id, game, seconds):
+    """O'yin taymerini (qayta) ishga tushiradi."""
+    old = game.get("timer")
+    if old and not old.done():
+        old.cancel()
+    task = asyncio.create_task(_expire(app, chat_id, game, seconds))
+    BG_TASKS.add(task)
+    task.add_done_callback(BG_TASKS.discard)
+    game["timer"] = task
 
 
-async def rsp_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    user = query.from_user
-
-    await query.answer()
-
-    game = rsp_games.get(chat_id)
-
-    if not game:
-        await query.message.reply_text(
-            t(chat_id, "rsp_full")
-        )
-        return
-
-    if user.id in game["players"]:
-        await query.answer(
-            t(chat_id, "rsp_already"),
-            show_alert=True,
-        )
-        return
-
-    if len(game["players"]) >= game["count"]:
-        await query.answer(
-            t(chat_id, "rsp_full"),
-            show_alert=True,
-        )
-        return
-
-    save_user(user)
-
-    game["players"][user.id] = display_name(user)
-
-    current = len(game["players"])
-
-    await query.message.reply_text(
-        t(
-            chat_id,
-            "rsp_joined",
-            name=escape(display_name(user)),
-            current=current,
-            count=game["count"],
-        )
-    )
-
-    if current == game["count"]:
-        await query.message.reply_text(
-            t(chat_id, "rsp_choose"),
-            reply_markup=rsp_choice_keyboard(chat_id),
-        )
+def end_game(chat_id, game):
+    if GAMES.get(chat_id) is game:
+        del GAMES[chat_id]
+    timer = game.get("timer")
+    if timer and not timer.done():
+        timer.cancel()
+    game["timer"] = None
 
 
-async def rsp_choice(update: Update, choice):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    user = query.from_user
-
-    game = rsp_games.get(chat_id)
-
-    if not game:
-        await query.answer()
-        return
-
-    if user.id not in game["players"]:
-        await query.answer(
-            t(chat_id, "rsp_already"),
-            show_alert=True,
-        )
-        return
-
-    if user.id in game["choices"]:
-        await query.answer(
-            t(chat_id, "rsp_already_choice"),
-            show_alert=True,
-        )
-        return
-
-    game["choices"][user.id] = choice
-
-    await query.answer("✅")
-
-    current = len(game["choices"])
-    count = game["count"]
-
-    status_text = t(
-        chat_id,
-        "rsp_wait_choices",
-        current=current,
-        count=count,
-    )
-
-    status_message_id = game.get("status_message_id")
-
-    if status_message_id:
+async def close_game_message(bot, chat_id, game, text):
+    """O'yin xabarini yakuniy matn bilan almashtiradi (yoki yangi xabar yuboradi)."""
+    if game.get("msg_id") and game["type"] != "number":
         try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_message_id,
-                text=status_text,
+            await bot.edit_message_text(
+                text, chat_id=chat_id, message_id=game["msg_id"], reply_markup=None
             )
-        except Exception:
+            return
+        except TelegramError:
             pass
+    try:
+        await bot.send_message(chat_id, text)
+    except TelegramError as e:
+        logger.warning("send xatosi: %s", e)
 
-    if current >= count:
-        await finish_rsp(query, chat_id)
 
-
-async def finish_rsp(query, chat_id):
-    game = rsp_games.get(chat_id)
-
-    if not game:
+async def _expire(app, chat_id, game, seconds):
+    try:
+        await asyncio.sleep(seconds)
+    except asyncio.CancelledError:
         return
 
-    choices = game["choices"]
+    if GAMES.get(chat_id) is not game:
+        return
 
-    players_lines = []
+    del GAMES[chat_id]
+    game["timer"] = None
 
-    for user_id, choice in choices.items():
-        name = escape(game["players"][user_id])
-        lang = get_group_lang(chat_id)
-        choice_text = LANGS[lang][RSP_CHOICES[choice]]
-        players_lines.append(f"{name} — {choice_text}")
-
-    choice_values = set(choices.values())
-
-    winners = []
-
-    if len(choice_values) == 1:
-        result = t(chat_id, "rsp_all_same")
-
-    elif len(choice_values) == 3:
-        result = t(chat_id, "rsp_no_winner")
-
+    if game["type"] == "number":
+        text = t(chat_id, "number_timeout", number=game["number"])
     else:
-        winner_choice = None
-
-        for a in choice_values:
-            for b in choice_values:
-                if a != b and RSP_BEATS[a] == b:
-                    winner_choice = a
-                    break
-            if winner_choice:
-                break
-
-        for user_id, choice in choices.items():
-            if choice == winner_choice:
-                winners.append(user_id)
-
-        if winners:
-            winner_names = ", ".join(
-                escape(game["players"][uid])
-                for uid in winners
-            )
-
-            result = t(
-                chat_id,
-                "rsp_winner",
-                names=winner_names,
-            )
-
-            for uid in winners:
-                add_points(uid, 10)
-
-            for uid in choices:
-                add_game_stats(uid, uid in winners)
-        else:
-            result = t(chat_id, "rsp_draw")
-
-    if len(choice_values) <= 1:
-        for uid in choices:
-            add_game_stats(uid, False)
-
-    players_text = "\n".join(players_lines)
-
-    await query.message.reply_text(
-        t(
-            chat_id,
-            "rsp_result",
-            players=players_text,
-            result=result,
-        )
-    )
-
-    del rsp_games[chat_id]
+        text = t(chat_id, "timeout")
+    await close_game_message(app.bot, chat_id, game, text)
 
 
-async def reyting(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+def active(q, kind):
+    """Tugma bosilgan xabar hozirgi o'yinga tegishlimi? (eski xabarlardan himoya)"""
+    game = GAMES.get(q.message.chat.id)
+    if game and game["type"] == kind and game.get("msg_id") == q.message.message_id:
+        return game
+    return None
 
-    conn = db()
-    cur = conn.cursor()
 
-    cur.execute("""
-        SELECT username, first_name, points, wins
-        FROM users
-        ORDER BY points DESC, wins DESC
-        LIMIT 10
-    """)
+# ───────────────────────────── Menyu va umumiy buyruqlar ─────────────────────────────
 
-    rows = cur.fetchall()
-    conn.close()
 
-    if not rows:
-        await update.message.reply_text(
-            t(chat_id, "rating_empty")
-        )
+def menu_kb(chat_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(chat_id, "btn_number"), callback_data="g:number")],
+        [InlineKeyboardButton(t(chat_id, "btn_rsp"), callback_data="g:rsp")],
+        [InlineKeyboardButton(t(chat_id, "btn_xo"), callback_data="g:xo")],
+    ])
+
+
+def again_row(chat_id):
+    return [InlineKeyboardButton(t(chat_id, "btn_again"), callback_data="g:menu")]
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    if not chat or not msg:
         return
 
-    text = t(chat_id, "rating_title") + "\n\n"
+    if chat.type == ChatType.PRIVATE:
+        username = context.bot.username
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                t(chat.id, "btn_add_group"),
+                url=f"https://t.me/{username}?startgroup=true",
+            )
+        ]])
+    else:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(t(chat.id, "btn_games"), callback_data="g:menu")
+        ]])
 
-    for i, row in enumerate(rows, 1):
-        username, first_name, points, wins = row
-        name = "@" + username if username else (first_name or "User")
-
-        text += t(
-            chat_id,
-            "rating_row",
-            i=i,
-            name=escape(name),
-            points=points,
-            wins=wins,
-        ) + "\n"
-
-    await update.message.reply_text(text)
+    await msg.reply_text(t(chat.id, "start_text"), reply_markup=kb)
 
 
-async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_emps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    if not chat or not msg:
+        return
+
+    if chat.type == ChatType.PRIVATE:
+        await msg.reply_text(t(chat.id, "use_group"))
+        return
+
+    game = GAMES.get(chat.id)
+    if game:
+        await msg.reply_text(t(chat.id, "busy", game=t(chat.id, "btn_" + game["type"])))
+        return
+
+    await msg.reply_text(t(chat.id, "menu_title"), reply_markup=menu_kb(chat.id))
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
     user = update.effective_user
-    chat_id = update.effective_chat.id
+    if not chat or not msg or not user:
+        return
+
+    if chat.type == ChatType.PRIVATE:
+        await msg.reply_text(t(chat.id, "use_group"))
+        return
+
+    game = GAMES.get(chat.id)
+    if not game:
+        await msg.reply_text(t(chat.id, "no_game"))
+        return
+
+    anonymous_admin = bool(msg.sender_chat and msg.sender_chat.id == chat.id)
+    allowed = (
+        user.id == game["owner"]
+        or anonymous_admin
+        or await is_admin(context.bot, chat.id, user.id)
+    )
+    if not allowed:
+        await msg.reply_text(t(chat.id, "stop_denied"))
+        return
+
+    end_game(chat.id, game)
+    await close_game_message(context.bot, chat.id, game, t(chat.id, "stopped"))
+
+
+async def cmd_reyting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    if not chat or not msg:
+        return
+
+    private = chat.type == ChatType.PRIVATE
+    rows = top_players(chat.id, private)
+    if not rows:
+        await msg.reply_text(t(chat.id, "rating_empty"))
+        return
+
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    lines = [t(chat.id, "rating_title_global" if private else "rating_title"), ""]
+    for i, (first_name, username, points, wins) in enumerate(rows):
+        lines.append(
+            f"{medals[i]} <b>{pretty_name(first_name, username)}</b> — {points} 💰 · {wins} 🏆"
+        )
+    await msg.reply_text("\n".join(lines))
+
+
+async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    user = update.effective_user
+    if not chat or not msg or not user:
+        return
 
     save_user(user)
+    private = chat.type == ChatType.PRIVATE
+    points, games, wins, losses, draws = get_stats(chat.id, user.id, private)
+    winrate = round(wins / games * 100, 1) if games else 0
 
-    row = get_user(user.id)
+    rank = ""
+    if not private and games:
+        rank = t(chat.id, "profile_rank", rank=get_rank(chat.id, points, wins))
 
-    if not row:
-        return
-
-    points, games, wins = row
-    losses = max(0, games - wins)
-    winrate = round((wins / games) * 100, 1) if games else 0
-
-    await update.message.reply_text(
+    await msg.reply_text(
         t(
-            chat_id,
+            chat.id,
             "profile",
+            name=uname(user),
+            level=level_name(chat.id, points),
+            points=points,
             games=games,
             wins=wins,
             losses=losses,
-            points=points,
+            draws=draws,
             winrate=winrate,
+            bar=bar(winrate),
+            rank=rank,
         )
     )
 
 
-async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        t(update.effective_chat.id, "rules")
-    )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        t(update.effective_chat.id, "help")
-    )
-
-
-async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
+    msg = update.effective_message
+    if chat and msg:
+        await msg.reply_text(t(chat.id, "rules"))
 
-    if chat.type == "private":
-        await update.message.reply_text(
-            "🌐 /lang buyrug‘ini guruh ichida ishlating."
-        )
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    if chat and msg:
+        await msg.reply_text(t(chat.id, "help"))
+
+
+# ───────────────────────────── Til tanlash ─────────────────────────────
+
+
+async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    if not chat or not msg:
         return
-
-    me = await context.bot.get_me()
-    username = me.username
-
-    chat_id = chat.id
 
     buttons = [
-        [
-            InlineKeyboardButton(
-                "🇺🇿 O‘zbekcha",
-                url=f"https://t.me/{username}?start=lang_{chat_id}_uz",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🇬🇧 English",
-                url=f"https://t.me/{username}?start=lang_{chat_id}_eng",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🇷🇺 Русский",
-                url=f"https://t.me/{username}?start=lang_{chat_id}_ru",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🇰🇿 Қазақша",
-                url=f"https://t.me/{username}?start=lang_{chat_id}_kz",
-            )
-        ],
+        InlineKeyboardButton(LANGS[code]["flag_name"], callback_data=f"lang:{code}")
+        for code in LANG_ORDER
     ]
+    kb = InlineKeyboardMarkup([buttons[:2], buttons[2:]])
+    await msg.reply_text(t(chat.id, "lang_title"), reply_markup=kb)
 
-    await update.message.reply_text(
-        t(chat_id, "lang_title"),
-        reply_markup=InlineKeyboardMarkup(buttons),
+
+async def cb_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat = q.message.chat
+    code = q.data.split(":", 1)[1]
+
+    if code not in LANGS:
+        await q.answer()
+        return
+
+    # Guruhda tilni faqat adminlar o'zgartira oladi
+    if chat.type != ChatType.PRIVATE and not await is_admin(context.bot, chat.id, q.from_user.id):
+        await q.answer(t(chat.id, "lang_admin_only"), show_alert=True)
+        return
+
+    set_group_lang(chat.id, code)
+    await q.answer()
+    await edit(context.bot, chat.id, q.message.message_id, t(chat.id, "lang_set"))
+
+
+# ───────────────────────────── O'yin menyusi ─────────────────────────────
+
+
+async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    msg = q.message
+    chat_id = msg.chat.id
+    kind = q.data.split(":", 1)[1]
+    user = q.from_user
+
+    if msg.chat.type == ChatType.PRIVATE:
+        await q.answer(t(chat_id, "use_group"), show_alert=True)
+        return
+
+    game = GAMES.get(chat_id)
+    if game:
+        await q.answer(
+            t(chat_id, "busy_alert", game=t(chat_id, "btn_" + game["type"])),
+            show_alert=True,
+        )
+        return
+
+    await q.answer()
+
+    if kind == "menu":
+        await context.bot.send_message(
+            chat_id, t(chat_id, "menu_title"), reply_markup=menu_kb(chat_id)
+        )
+        return
+
+    save_user(user)
+    name = uname(user)
+    app = context.application
+
+    if kind == "number":
+        game = new_game(
+            chat_id, "number", user.id,
+            number=random.randint(MIN_NUMBER, MAX_NUMBER),
+            lo=MIN_NUMBER, hi=MAX_NUMBER,
+            attempts=0, tried=set(), players=set(),
+        )
+        await edit(
+            context.bot, chat_id, msg.message_id,
+            t(
+                chat_id, "number_started",
+                min=MIN_NUMBER, max=MAX_NUMBER, points=NUMBER_WIN_PTS,
+                fast=FAST_ATTEMPTS, bonus=NUMBER_BONUS_PTS, minutes=NUMBER_TTL // 60,
+            ),
+        )
+        arm(app, chat_id, game, NUMBER_TTL)
+
+    elif kind == "rsp":
+        game = new_game(
+            chat_id, "rsp", user.id,
+            state="setup", msg_id=msg.message_id, count=0,
+            names={user.id: name}, choices={},
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("👥 2", callback_data="rc:2"),
+            InlineKeyboardButton("👥 3", callback_data="rc:3"),
+            InlineKeyboardButton("👥 5", callback_data="rc:5"),
+        ]])
+        await edit(context.bot, chat_id, msg.message_id, t(chat_id, "rsp_setup"), kb)
+        arm(app, chat_id, game, RSP_SETUP_TTL)
+
+    elif kind == "xo":
+        game = new_game(
+            chat_id, "xo", user.id,
+            state="lobby", msg_id=msg.message_id,
+            names={user.id: name}, board=[""] * 9, seat={}, turn="X",
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(t(chat_id, "btn_join"), callback_data="xj")
+        ]])
+        await edit(context.bot, chat_id, msg.message_id, t(chat_id, "xo_lobby", owner=name), kb)
+        arm(app, chat_id, game, XO_LOBBY_TTL)
+
+
+# ───────────────────────────── 🎯 Son topish ─────────────────────────────
+
+HEAT = [(3, "heat_hot"), (10, "heat_warm"), (25, "heat_cool"), (10**9, "heat_cold")]
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not msg.text or not user or user.is_bot:
+        return
+
+    chat_id = msg.chat_id
+    game = GAMES.get(chat_id)
+    if not game or game["type"] != "number":
+        return
+
+    text = msg.text.strip()
+    if not (text.isascii() and text.isdigit()):
+        return
+    guess = int(text)
+    if not MIN_NUMBER <= guess <= MAX_NUMBER:
+        return
+
+    save_user(user)
+
+    if guess in game["tried"]:
+        await msg.reply_text(t(chat_id, "number_dup", number=guess))
+        return
+
+    game["tried"].add(guess)
+    game["attempts"] += 1
+    game["players"].add(user.id)
+    number = game["number"]
+
+    if guess == number:
+        attempts = game["attempts"]
+        fast = attempts <= FAST_ATTEMPTS
+        points = NUMBER_WIN_PTS + (NUMBER_BONUS_PTS if fast else 0)
+        end_game(chat_id, game)
+
+        for uid in game["players"]:
+            if uid == user.id:
+                record(chat_id, uid, "win", points)
+            else:
+                record(chat_id, uid, "loss")
+
+        await msg.reply_text(
+            t(
+                chat_id, "number_win",
+                name=uname(user), number=number, attempts=attempts,
+                points=points, bonus=t(chat_id, "bonus") if fast else "",
+            )
+        )
+        return
+
+    if guess < number:
+        game["lo"] = max(game["lo"], guess + 1)
+        head = t(chat_id, "higher")
+    else:
+        game["hi"] = min(game["hi"], guess - 1)
+        head = t(chat_id, "lower")
+
+    diff = abs(guess - number)
+    heat = next(t(chat_id, key) for limit, key in HEAT if diff <= limit)
+    tail = t(chat_id, "hint_tail", lo=game["lo"], hi=game["hi"], n=game["attempts"])
+
+    arm(context.application, chat_id, game, NUMBER_TTL)
+    await msg.reply_text(f"{head} {heat}\n{tail}")
+
+
+# ───────────────────────────── ✊ Tosh-Qaychi-Qog'oz ─────────────────────────────
+
+RSP_CHOICES = {"rock": "rsp_rock", "scissors": "rsp_scissors", "paper": "rsp_paper"}
+RSP_BEATS = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
+
+
+def rsp_lobby_text(chat_id, game):
+    names = list(game["names"].values())
+    lines = [f"🙋 {n}" for n in names] + ["⬜ …"] * (game["count"] - len(names))
+    return t(
+        chat_id, "rsp_lobby",
+        current=len(names), count=game["count"], players="\n".join(lines),
     )
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
+def rsp_join_kb(chat_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(t(chat_id, "btn_join"), callback_data="rj")
+    ]])
 
-    if not context.args:
-        await update.message.reply_text(
-            t(chat.id, "private_start")
-        )
+
+def rsp_choice_kb(chat_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(t(chat_id, label), callback_data=f"rp:{key}")
+        for key, label in RSP_CHOICES.items()
+    ]])
+
+
+def rsp_choose_text(chat_id, game):
+    lines = [
+        ("✅ " if uid in game["choices"] else "⌛ ") + name
+        for uid, name in game["names"].items()
+    ]
+    return t(
+        chat_id, "rsp_choose",
+        players="\n".join(lines), current=len(game["choices"]), count=game["count"],
+    )
+
+
+async def cb_rsp_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id = q.message.chat.id
+    game = active(q, "rsp")
+
+    if not game or game["state"] != "setup":
+        await q.answer(t(chat_id, "gone"), show_alert=True)
+        return
+    if q.from_user.id != game["owner"]:
+        await q.answer(t(chat_id, "only_owner"), show_alert=True)
         return
 
-    payload = context.args[0]
+    count = int(q.data.split(":", 1)[1])
+    game["count"] = count
+    game["state"] = "lobby"
 
-    if not payload.startswith("lang_"):
-        await update.message.reply_text(
-            t(chat.id, "private_start")
-        )
+    await q.answer()
+    await edit(context.bot, chat_id, game["msg_id"], rsp_lobby_text(chat_id, game), rsp_join_kb(chat_id))
+    arm(context.application, chat_id, game, RSP_LOBBY_TTL)
+
+
+async def cb_rsp_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id = q.message.chat.id
+    user = q.from_user
+    game = active(q, "rsp")
+
+    if not game or game["state"] != "lobby":
+        await q.answer(t(chat_id, "gone"), show_alert=True)
+        return
+    if user.id in game["names"]:
+        await q.answer(t(chat_id, "rsp_already"), show_alert=True)
         return
 
-    try:
-        data = payload[len("lang_"):]
-        group_id_str, language = data.rsplit("_", 1)
-        group_id = int(group_id_str)
-
-        if language not in LANGS:
-            await update.message.reply_text(
-                "❌ Noma’lum til."
-            )
-            return
-
-        set_group_lang(group_id, language)
-
-        await update.message.reply_text(
-            LANGS[language]["lang_private"]
-        )
-
-        try:
-            await context.bot.send_message(
-                chat_id=group_id,
-                text=LANGS[language]["lang_set"],
-            )
-        except Exception as e:
-            logger.warning("Group language message error: %s", e)
-
-    except Exception as e:
-        logger.warning("Language payload error: %s", e)
-        await update.message.reply_text(
-            t(chat.id, "private_start")
-        )
-
-
-async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-
-    if data == "emps_number":
-        chat_id = query.message.chat.id
-
-        await query.answer()
-
-        if get_game(chat_id) and get_game(chat_id)[2] == 1:
-            await query.message.reply_text(
-                t(chat_id, "number_exists")
-            )
-            return
-
-        create_game(chat_id)
-
-        await query.message.reply_text(
-            t(chat_id, "number_started")
-        )
-
-    elif data == "emps_rsp":
-        await start_rsp_selection(update, context)
-
-    elif data.startswith("rsp_count_"):
-        count = int(data.split("_")[-1])
-        await create_rsp(update, count)
-
-    elif data == "rsp_join":
-        await rsp_join(update, context)
-
-    elif data.startswith("rsp_choice_"):
-        choice = data.replace("rsp_choice_", "")
-        await rsp_choice(update, choice)
-
-
-async def handle_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-
-    if not message or not message.text:
-        return
-
-    if message.chat.type == "private":
-        return
-
-    try:
-        guess = int(message.text.strip())
-    except ValueError:
-        return
-
-    if guess < MIN_NUMBER or guess > MAX_NUMBER:
-        return
-
-    chat_id = message.chat.id
-    game = get_game(chat_id)
-
-    if not game or game[2] != 1:
-        return
-
-    user = message.from_user
     save_user(user)
+    game["names"][user.id] = uname(user)
+    await q.answer()
 
-    number = game[0]
-
-    update_attempts(chat_id)
-
-    if guess == number:
-        finish_game(chat_id)
-
-        add_points(user.id, 10)
-        add_game_stats(user.id, True)
-
-        await message.reply_text(
-            t(
-                chat_id,
-                "correct",
-                name=escape(display_name(user)),
-                number=number,
-            )
-        )
-
-    elif guess < number:
-        await message.reply_text(
-            t(chat_id, "higher")
-        )
-
+    if len(game["names"]) >= game["count"]:
+        game["state"] = "choose"
+        await edit(context.bot, chat_id, game["msg_id"], rsp_choose_text(chat_id, game), rsp_choice_kb(chat_id))
+        arm(context.application, chat_id, game, RSP_CHOOSE_TTL)
     else:
-        await message.reply_text(
-            t(chat_id, "lower")
+        await edit(context.bot, chat_id, game["msg_id"], rsp_lobby_text(chat_id, game), rsp_join_kb(chat_id))
+        arm(context.application, chat_id, game, RSP_LOBBY_TTL)
+
+
+async def cb_rsp_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id = q.message.chat.id
+    user = q.from_user
+    game = active(q, "rsp")
+
+    if not game or game["state"] != "choose":
+        await q.answer(t(chat_id, "gone"), show_alert=True)
+        return
+    if user.id not in game["names"]:
+        await q.answer(t(chat_id, "not_player"), show_alert=True)
+        return
+    if user.id in game["choices"]:
+        await q.answer(t(chat_id, "rsp_already_choice"), show_alert=True)
+        return
+
+    choice = q.data.split(":", 1)[1]
+    game["choices"][user.id] = choice
+    await q.answer(t(chat_id, "rsp_picked", choice=t(chat_id, RSP_CHOICES[choice])))
+
+    if len(game["choices"]) >= game["count"]:
+        await finish_rsp(context, chat_id, game)
+    else:
+        await edit(context.bot, chat_id, game["msg_id"], rsp_choose_text(chat_id, game), rsp_choice_kb(chat_id))
+        arm(context.application, chat_id, game, RSP_CHOOSE_TTL)
+
+
+def rsp_winners(choices):
+    """G'oliblar ro'yxati (durang bo'lsa bo'sh) va natija turi."""
+    values = set(choices.values())
+    if len(values) == 1:
+        return [], "same"
+    if len(values) == 3:
+        return [], "three"
+    a, b = tuple(values)
+    win = a if RSP_BEATS[a] == b else b
+    return [uid for uid, c in choices.items() if c == win], "win"
+
+
+async def finish_rsp(context, chat_id, game):
+    end_game(chat_id, game)
+    choices = game["choices"]
+    names = game["names"]
+    winners, kind = rsp_winners(choices)
+
+    for uid in choices:
+        if kind != "win":
+            record(chat_id, uid, "draw")
+        elif uid in winners:
+            record(chat_id, uid, "win", RSP_WIN_PTS)
+        else:
+            record(chat_id, uid, "loss")
+
+    lines = []
+    for uid, choice in choices.items():
+        mark = "🏆" if uid in winners else "▫️"
+        lines.append(f"{mark} {names[uid]} — {t(chat_id, RSP_CHOICES[choice])}")
+
+    if kind == "win":
+        result = t(chat_id, "rsp_winner", names=", ".join(names[u] for u in winners), points=RSP_WIN_PTS)
+    elif kind == "same":
+        result = t(chat_id, "rsp_draw_same")
+    else:
+        result = t(chat_id, "rsp_draw_three")
+
+    await edit(
+        context.bot, chat_id, game["msg_id"],
+        t(chat_id, "rsp_result", players="\n".join(lines), result=result),
+        InlineKeyboardMarkup([again_row(chat_id)]),
+    )
+
+
+# ───────────────────────────── ❌⭕ XO ─────────────────────────────
+
+XO_LINES = [
+    (0, 1, 2), (3, 4, 5), (6, 7, 8),
+    (0, 3, 6), (1, 4, 7), (2, 5, 8),
+    (0, 4, 8), (2, 4, 6),
+]
+MARK = {"X": "❌", "O": "⭕"}
+WIN_MARK = {"X": "❎", "O": "🅾️"}
+
+
+def xo_winner(board):
+    for line in XO_LINES:
+        a, b, c = line
+        if board[a] and board[a] == board[b] == board[c]:
+            return board[a], line
+    return None, ()
+
+
+def xo_text(chat_id, game, key="xo_board", **kwargs):
+    names, seat = game["names"], game["seat"]
+    return t(chat_id, key, x=names[seat["X"]], o=names[seat["O"]], **kwargs)
+
+
+def xo_keyboard(chat_id, game, finished=False, line=()):
+    rows = []
+    for r in range(3):
+        row = []
+        for c in range(3):
+            i = r * 3 + c
+            cell = game["board"][i]
+            if cell:
+                label = (WIN_MARK if i in line else MARK)[cell]
+                data = "noop"
+            else:
+                label = "⬜"
+                data = "noop" if finished else f"xm:{i}"
+            row.append(InlineKeyboardButton(label, callback_data=data))
+        rows.append(row)
+    if finished:
+        rows.append(again_row(chat_id))
+    return InlineKeyboardMarkup(rows)
+
+
+def xo_turn_text(chat_id, game):
+    turn = game["turn"]
+    return xo_text(
+        chat_id, game, "xo_board",
+        mark=MARK[turn], turn=game["names"][game["seat"][turn]], seconds=XO_MOVE_TTL,
+    )
+
+
+async def cb_xo_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id = q.message.chat.id
+    user = q.from_user
+    game = active(q, "xo")
+
+    if not game or game["state"] != "lobby":
+        await q.answer(t(chat_id, "gone"), show_alert=True)
+        return
+    if user.id == game["owner"]:
+        await q.answer(t(chat_id, "xo_own"), show_alert=True)
+        return
+
+    save_user(user)
+    game["names"][user.id] = uname(user)
+
+    # Kim birinchi yurishini tasodifiy aniqlaymiz (X boshlaydi)
+    ids = [game["owner"], user.id]
+    random.shuffle(ids)
+    game["seat"] = {"X": ids[0], "O": ids[1]}
+    game["state"] = "play"
+    game["turn"] = "X"
+
+    await q.answer()
+    await edit(context.bot, chat_id, game["msg_id"], xo_turn_text(chat_id, game), xo_keyboard(chat_id, game))
+    arm(context.application, chat_id, game, XO_MOVE_TTL)
+
+
+async def cb_xo_move(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id = q.message.chat.id
+    user = q.from_user
+    game = active(q, "xo")
+
+    if not game or game["state"] != "play":
+        await q.answer(t(chat_id, "gone"), show_alert=True)
+        return
+
+    seat = game["seat"]
+    if user.id not in seat.values():
+        await q.answer(t(chat_id, "not_player"), show_alert=True)
+        return
+    if seat[game["turn"]] != user.id:
+        await q.answer(t(chat_id, "xo_not_turn"), show_alert=True)
+        return
+
+    idx = int(q.data.split(":", 1)[1])
+    board = game["board"]
+    if board[idx]:
+        await q.answer(t(chat_id, "xo_taken"), show_alert=True)
+        return
+
+    mark = game["turn"]
+    board[idx] = mark
+    await q.answer()
+
+    winner, line = xo_winner(board)
+
+    if winner:
+        loser = "O" if winner == "X" else "X"
+        end_game(chat_id, game)
+        record(chat_id, seat[winner], "win", XO_WIN_PTS)
+        record(chat_id, seat[loser], "loss")
+        text = xo_text(
+            chat_id, game, "xo_win",
+            mark=MARK[winner], winner=game["names"][seat[winner]], points=XO_WIN_PTS,
         )
+        await edit(context.bot, chat_id, game["msg_id"], text, xo_keyboard(chat_id, game, True, line))
+        return
+
+    if all(board):
+        end_game(chat_id, game)
+        record(chat_id, seat["X"], "draw", XO_DRAW_PTS)
+        record(chat_id, seat["O"], "draw", XO_DRAW_PTS)
+        text = xo_text(chat_id, game, "xo_draw", points=XO_DRAW_PTS)
+        await edit(context.bot, chat_id, game["msg_id"], text, xo_keyboard(chat_id, game, True))
+        return
+
+    game["turn"] = "O" if mark == "X" else "X"
+    await edit(context.bot, chat_id, game["msg_id"], xo_turn_text(chat_id, game), xo_keyboard(chat_id, game))
+    arm(context.application, chat_id, game, XO_MOVE_TTL)
+
+
+# ───────────────────────────── Boshqa callback'lar ─────────────────────────────
+
+
+async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+
+# ───────────────────────────── Xatolar va ishga tushirish ─────────────────────────────
+
+
+async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Kutilmagan xato", exc_info=context.error)
+
+
+async def post_init(application: Application):
+    sets = {
+        None: [
+            ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
+            ("reyting", "🏆 Reyting"), ("profil", "👤 Profil"),
+            ("qoidalar", "📚 Qoidalar"), ("lang", "🌐 Til"), ("help", "❓ Yordam"),
+        ],
+        "en": [
+            ("emps", "🎮 Choose a game"), ("stop", "🛑 Stop the game"),
+            ("reyting", "🏆 Leaderboard"), ("profil", "👤 Profile"),
+            ("qoidalar", "📚 Rules"), ("lang", "🌐 Language"), ("help", "❓ Help"),
+        ],
+        "ru": [
+            ("emps", "🎮 Выбрать игру"), ("stop", "🛑 Остановить игру"),
+            ("reyting", "🏆 Рейтинг"), ("profil", "👤 Профиль"),
+            ("qoidalar", "📚 Правила"), ("lang", "🌐 Язык"), ("help", "❓ Помощь"),
+        ],
+    }
+    try:
+        for lang, cmds in sets.items():
+            await application.bot.set_my_commands(
+                [BotCommand(c, d) for c, d in cmds], language_code=lang
+            )
+    except TelegramError as e:
+        logger.warning("Buyruqlar menyusini o'rnatib bo'lmadi: %s", e)
+
+
+async def post_shutdown(application: Application):
+    for game in list(GAMES.values()):
+        timer = game.get("timer")
+        if timer and not timer.done():
+            timer.cancel()
+    if _conn is not None:
+        _conn.close()
 
 
 def main():
-    if BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
-        print("BOT_TOKEN o‘rnatilmagan!")
+    if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
+        print(
+            "❌ BOT_TOKEN o‘rnatilmagan!\n"
+            "   Linux/Mac:  export BOT_TOKEN='123:ABC...'\n"
+            "   Windows:    set BOT_TOKEN=123:ABC...   (PowerShell: $env:BOT_TOKEN='123:ABC...')"
+        )
         return
 
     init_db()
 
-    application = (
+    app = (
         Application.builder()
         .token(BOT_TOKEN)
+        .defaults(Defaults(parse_mode=ParseMode.HTML))
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 
-    application.add_handler(
-        CommandHandler("start", start)
-    )
+    commands = [
+        (["start"], cmd_start),
+        (["emps", "games", "oyin"], cmd_emps),
+        (["stop"], cmd_stop),
+        (["reyting", "rating"], cmd_reyting),
+        (["profil", "profile"], cmd_profil),
+        (["qoidalar", "rules"], cmd_rules),
+        (["help"], cmd_help),
+        (["lang"], cmd_lang),
+    ]
+    for names, handler in commands:
+        app.add_handler(CommandHandler(names, handler))
 
-    application.add_handler(
-        CommandHandler("emps", emps)
-    )
+    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|menu)$"))
+    app.add_handler(CallbackQueryHandler(cb_lang, pattern=r"^lang:"))
+    app.add_handler(CallbackQueryHandler(cb_rsp_count, pattern=r"^rc:[235]$"))
+    app.add_handler(CallbackQueryHandler(cb_rsp_join, pattern=r"^rj$"))
+    app.add_handler(CallbackQueryHandler(cb_rsp_pick, pattern=r"^rp:(rock|scissors|paper)$"))
+    app.add_handler(CallbackQueryHandler(cb_xo_join, pattern=r"^xj$"))
+    app.add_handler(CallbackQueryHandler(cb_xo_move, pattern=r"^xm:[0-8]$"))
+    # Boshqa barcha callback'larga ham javob beramiz (spinner qotib qolmasin)
+    app.add_handler(CallbackQueryHandler(cb_noop))
 
-    application.add_handler(
-        CommandHandler("lang", lang_command)
-    )
-
-    application.add_handler(
-        CommandHandler("reyting", reyting)
-    )
-
-    application.add_handler(
-        CommandHandler("profil", profil)
-    )
-
-    application.add_handler(
-        CommandHandler("qoidalar", rules)
-    )
-
-    application.add_handler(
-        CommandHandler("help", help_command)
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(callbacks)
-    )
-
-    application.add_handler(
+    app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_number,
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS & filters.UpdateType.MESSAGE,
+            on_text,
         )
     )
 
-    print("Bot ishga tushdi...")
+    app.add_error_handler(on_error)
 
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES
-    )
+    print("🤖 Bot ishga tushdi...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

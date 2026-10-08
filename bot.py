@@ -2902,9 +2902,10 @@ async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tr = SECRET_LANGS[lang]
 
     # Format:
-    # @BotUsername Salom, yaxshimisan @username
+    #   Salom @username
+    #   Salom 123456789
     m = re.match(
-        r"^(?P<message>.+?)\s+@(?P<username>[A-Za-z0-9_]{5,32})$",
+        r"^(?P<message>.+?)\s+(?:(?:@(?P<username>[A-Za-z0-9_]{5,32}))|(?P<user_id>\d+))$",
         text,
         re.S,
     )
@@ -2927,7 +2928,8 @@ async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     message_text = m.group("message").strip()
-    username = m.group("username").lower()
+    username = m.group("username")
+    user_id_text = m.group("user_id")
 
     if not message_text:
         await query.answer(
@@ -2937,13 +2939,18 @@ async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # MUHIM:
-    # Endi foydalanuvchi users jadvalida bo'lishi shart emas.
-    # Faqat @username saqlanadi.
+    if user_id_text:
+        recipient_id = int(user_id_text)
+        recipient_username = ""
+        display_recipient = f"ID: {recipient_id}"
+    else:
+        recipient_id = 0
+        recipient_username = username.lower()
+        display_recipient = f"@{username}"
+
     token = secrets.token_urlsafe(18)
 
     c = db()
-
     with c:
         c.execute(
             """
@@ -2960,8 +2967,8 @@ async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (
                 token,
                 user.id,
-                0,
-                username,
+                recipient_id,
+                recipient_username,
                 message_text,
                 datetime.utcnow().isoformat(),
             ),
@@ -2978,7 +2985,7 @@ async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     card_text = (
         f"{tr['title']}\n"
-        f"👤 {tr['for']}: @{escape(username)}\n\n"
+        f"👤 {tr['for']}: {escape(display_recipient)}\n\n"
         f"👁 {tr['read']}"
     )
 
@@ -2987,7 +2994,7 @@ async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineQueryResultArticle(
                 id=token,
                 title=tr["title"],
-                description=f"@{username}",
+                description=display_recipient,
                 input_message_content=InputTextMessageContent(
                     card_text,
                     parse_mode=ParseMode.HTML,
@@ -3000,7 +3007,10 @@ async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def secret_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def secret_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     query = update.callback_query
     if not query:
         return
@@ -3016,7 +3026,10 @@ async def secret_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     row = c.execute(
         """
-        SELECT recipient_username, message_text
+        SELECT
+            recipient_id,
+            recipient_username,
+            message_text
         FROM secret_messages
         WHERE token = ?
         LIMIT 1
@@ -3031,22 +3044,34 @@ async def secret_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    recipient_username, message_text = row
+    recipient_id, recipient_username, message_text = row
 
-    # Tugmani bosgan odamning username'i
+    clicker_id = query.from_user.id
     clicker_username = (
         query.from_user.username or ""
     ).lower()
 
-    # Faqat aynan ko'rsatilgan @username ochishi mumkin
-    if not clicker_username or clicker_username != recipient_username.lower():
-        await query.answer(
-            "⛔ Bu xabar siz uchun emas.",
-            show_alert=True,
-        )
-        return
+    # ID orqali yuborilgan yashirin xabar
+    if recipient_id:
+        if clicker_id != int(recipient_id):
+            await query.answer(
+                "⛔ Bu xabar siz uchun emas.",
+                show_alert=True,
+            )
+            return
 
-    # 200 belgigacha popupda to'liq ko'rsatamiz.
+    # Username orqali yuborilgan yashirin xabar
+    else:
+        if (
+            not clicker_username
+            or clicker_username != recipient_username.lower()
+        ):
+            await query.answer(
+                "⛔ Bu xabar siz uchun emas.",
+                show_alert=True,
+            )
+            return
+
     if len(message_text) <= 200:
         await query.answer(
             message_text,
@@ -3054,7 +3079,6 @@ async def secret_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Uzun xabarlar uchun adresatning shaxsiy chatiga yuboramiz.
     lang = secret_lang(query.from_user)
     tr = SECRET_LANGS[lang]
 
@@ -3063,10 +3087,12 @@ async def secret_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.from_user.id,
             text=tr["message"].format(message_text),
         )
+
         await query.answer(
             "📩 To‘liq yashirin xabar shaxsiy chatga yuborildi.",
             show_alert=True,
         )
+
     except TelegramError:
         await query.answer(
             message_text[:197] + "...",

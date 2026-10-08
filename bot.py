@@ -181,6 +181,9 @@ LANGS = {
         "rating_empty": "📭 Hali reyting mavjud emas.\n▶️ O‘yin boshlang: /emps",
         "profile": (
             "👤 <b>{name}</b>\n━━━━━━━━━━━━━━\n"
+            "🎂 Tug‘ilgan sana: <b>{birth_date}</b>\n"
+            "🎈 Yosh: <b>{age}</b>\n"
+            "━━━━━━━━━━━━━━\n"
             "🎖 Daraja: {level}\n"
             "💰 Ball: <b>{points}</b>\n"
             "💵 Pul: <b>{money}</b>\n"
@@ -322,8 +325,14 @@ LANGS = {
         "rating_empty": "📭 No leaderboard yet.\n▶️ Start a game: /emps",
         "profile": (
             "👤 <b>{name}</b>\n━━━━━━━━━━━━━━\n"
+            "🎂 Date of birth: <b>{birth_date}</b>\n"
+            "🎈 Age: <b>{age}</b>\n"
+            "━━━━━━━━━━━━━━\n"
             "🎖 Level: {level}\n"
             "💰 Points: <b>{points}</b>\n"
+            "💵 Money: <b>{money}</b>\n"
+            "💼 Profession: <b>{profession}</b>\n"
+            "⭐ Career XP: <b>{career_xp}</b>\n"
             "🎮 Games: {games}\n"
             "🏆 Wins: {wins}\n"
             "💔 Losses: {losses}\n"
@@ -460,8 +469,14 @@ LANGS = {
         "rating_empty": "📭 Рейтинг пока пуст.\n▶️ Начните игру: /emps",
         "profile": (
             "👤 <b>{name}</b>\n━━━━━━━━━━━━━━\n"
+            "🎂 Дата рождения: <b>{birth_date}</b>\n"
+            "🎈 Возраст: <b>{age}</b>\n"
+            "━━━━━━━━━━━━━━\n"
             "🎖 Уровень: {level}\n"
             "💰 Очки: <b>{points}</b>\n"
+            "💵 Деньги: <b>{money}</b>\n"
+            "💼 Профессия: <b>{profession}</b>\n"
+            "⭐ Карьерный XP: <b>{career_xp}</b>\n"
             "🎮 Игр: {games}\n"
             "🏆 Побед: {wins}\n"
             "💔 Поражений: {losses}\n"
@@ -598,8 +613,14 @@ LANGS = {
         "rating_empty": "📭 Рейтинг әлі жоқ.\n▶️ Ойын бастаңыз: /emps",
         "profile": (
             "👤 <b>{name}</b>\n━━━━━━━━━━━━━━\n"
+            "🎂 Туған күні: <b>{birth_date}</b>\n"
+            "🎈 Жасы: <b>{age}</b>\n"
+            "━━━━━━━━━━━━━━\n"
             "🎖 Деңгей: {level}\n"
             "💰 Ұпай: <b>{points}</b>\n"
+            "💵 Ақша: <b>{money}</b>\n"
+            "💼 Мамандық: <b>{profession}</b>\n"
+            "⭐ Мансап XP: <b>{career_xp}</b>\n"
             "🎮 Ойындар: {games}\n"
             "🏆 Жеңістер: {wins}\n"
             "💔 Жеңілістер: {losses}\n"
@@ -1320,10 +1341,41 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     private = chat.type == ChatType.PRIVATE
 
     career_row = c.execute(
-        "SELECT profession_id FROM users WHERE user_id=?",
+        "SELECT birth_date, profession_id FROM users WHERE user_id=?",
         (user.id,)
     ).fetchone()
-    profession_id = career_row[0] if career_row else None
+
+    birth_date = career_row[0] if career_row else None
+    profession_id = career_row[1] if career_row else None
+
+    age = None
+    if birth_date:
+        try:
+            from datetime import date
+            birth = date.fromisoformat(birth_date)
+            today = date.today()
+            age = today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
+        except (ValueError, TypeError):
+            age = None
+
+    birth_display = "—"
+    if birth_date:
+        try:
+            birth_display = date.fromisoformat(birth_date).strftime("%d.%m.%Y")
+        except (ValueError, TypeError):
+            birth_display = birth_date
+
+    if age is not None:
+        lang = LANG_CACHE.get(chat.id, DEFAULT_LANG)
+        age_units = {
+            "uz": "yosh",
+            "eng": "years old",
+            "ru": "лет",
+            "kz": "жаста",
+        }
+        age_display = f"{age} {age_units.get(lang, age_units["uz"])}"
+    else:
+        age_display = "—"
 
     career_xp_row = c.execute(
         "SELECT career_xp FROM user_career WHERE user_id=?",
@@ -1348,6 +1400,8 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat.id,
             "profile",
             name=uname(user),
+            birth_date=birth_display,
+            age=age_display,
             level=level_name(chat.id, points),
             points=points,
             money=money,

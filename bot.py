@@ -11,12 +11,16 @@ from datetime import date, datetime
 import os
 import random
 import sqlite3
+import re
+import secrets
 from html import escape
 
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     Update,
 )
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
@@ -27,6 +31,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     Defaults,
+    InlineQueryHandler,
     MessageHandler,
     filters,
 )
@@ -727,6 +732,16 @@ def init_db():
             "ON chat_stats(chat_id, points DESC, wins DESC)"
         )
 
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS secret_messages (
+                token TEXT PRIMARY KEY,
+                sender_id INTEGER NOT NULL,
+                recipient_id INTEGER NOT NULL,
+                recipient_username TEXT NOT NULL,
+                message_text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS career_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2812,6 +2827,254 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         await career_handle_birth(update, context)
 
 
+
+# ───────────────────── 🔐 YASHIRIN INLINE XABAR ─────────────────────
+
+SECRET_LANGS = {
+    "uz": {
+        "title": "🔐 Yashirin xabar",
+        "read": "👁 Xabarni o‘qish",
+        "for": "Kimga",
+        "not_found": "❌ Bu foydalanuvchi botda hali ro‘yxatdan o‘tmagan.",
+        "empty": "✍️ Xabar yozing va oxiriga @username qo‘shing.",
+        "not_for_you": "⛔ Bu xabar siz uchun emas.",
+        "message": "🔐 Yashirin xabar:\n\n{}",
+        "too_long": "📩 Xabar juda uzun. To‘liq xabarni olish uchun botga /start yuboring.",
+    },
+    "eng": {
+        "title": "🔐 Secret message",
+        "read": "👁 Read message",
+        "for": "For",
+        "not_found": "❌ This user has not registered with the bot yet.",
+        "empty": "✍️ Write a message and add @username at the end.",
+        "not_for_you": "⛔ This message is not for you.",
+        "message": "🔐 Secret message:\n\n{}",
+        "too_long": "📩 Message is too long. Send /start to the bot to receive it.",
+    },
+    "ru": {
+        "title": "🔐 Секретное сообщение",
+        "read": "👁 Прочитать",
+        "for": "Для",
+        "not_found": "❌ Этот пользователь ещё не зарегистрирован в боте.",
+        "empty": "✍️ Напишите сообщение и добавьте @username в конце.",
+        "not_for_you": "⛔ Это сообщение не для вас.",
+        "message": "🔐 Секретное сообщение:\n\n{}",
+        "too_long": "📩 Сообщение слишком длинное. Отправьте боту /start.",
+    },
+    "kz": {
+        "title": "🔐 Құпия хабарлама",
+        "read": "👁 Оқу",
+        "for": "Кімге",
+        "not_found": "❌ Бұл қолданушы ботта әлі тіркелмеген.",
+        "empty": "✍️ Хабарлама жазып, соңына @username қосыңыз.",
+        "not_for_you": "⛔ Бұл хабарлама сізге арналмаған.",
+        "message": "🔐 Құпия хабарлама:\n\n{}",
+        "too_long": "📩 Хабарлама тым ұзын. Ботқа /start жіберіңіз.",
+    },
+}
+
+
+def secret_lang(user):
+    """Inline rejimida guruh chat_id bo'lmagani uchun Telegram tilidan foydalanamiz."""
+    code = (getattr(user, "language_code", None) or "").lower()
+
+    if code.startswith("uz"):
+        return "uz"
+    if code.startswith("ru"):
+        return "ru"
+    if code.startswith(("kk", "kz")):
+        return "kz"
+    if code.startswith("en"):
+        return "eng"
+
+    return DEFAULT_LANG if DEFAULT_LANG in SECRET_LANGS else "uz"
+
+
+
+async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query
+    if not query:
+        return
+
+    user = query.from_user
+    text = (query.query or "").strip()
+    lang = secret_lang(user)
+    tr = SECRET_LANGS[lang]
+
+    # Format:
+    # @BotUsername Salom, yaxshimisan @username
+    m = re.match(
+        r"^(?P<message>.+?)\s+@(?P<username>[A-Za-z0-9_]{5,32})$",
+        text,
+        re.S,
+    )
+
+    if not m:
+        await query.answer(
+            results=[
+                InlineQueryResultArticle(
+                    id="secret-help",
+                    title=tr["title"],
+                    description=tr["empty"],
+                    input_message_content=InputTextMessageContent(
+                        tr["empty"]
+                    ),
+                )
+            ],
+            cache_time=0,
+            is_personal=True,
+        )
+        return
+
+    message_text = m.group("message").strip()
+    username = m.group("username").lower()
+
+    if not message_text:
+        await query.answer(
+            results=[],
+            cache_time=0,
+            is_personal=True,
+        )
+        return
+
+    # MUHIM:
+    # Endi foydalanuvchi users jadvalida bo'lishi shart emas.
+    # Faqat @username saqlanadi.
+    token = secrets.token_urlsafe(18)
+
+    c = db()
+
+    with c:
+        c.execute(
+            """
+            INSERT INTO secret_messages(
+                token,
+                sender_id,
+                recipient_id,
+                recipient_username,
+                message_text,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                token,
+                user.id,
+                0,
+                username,
+                message_text,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                tr["read"],
+                callback_data=f"secret:{token}",
+            )
+        ]
+    ])
+
+    card_text = (
+        f"{tr['title']}\n"
+        f"👤 {tr['for']}: @{escape(username)}\n\n"
+        f"👁 {tr['read']}"
+    )
+
+    await query.answer(
+        results=[
+            InlineQueryResultArticle(
+                id=token,
+                title=tr["title"],
+                description=f"@{username}",
+                input_message_content=InputTextMessageContent(
+                    card_text,
+                    parse_mode=ParseMode.HTML,
+                ),
+                reply_markup=keyboard,
+            )
+        ],
+        cache_time=0,
+        is_personal=True,
+    )
+
+
+async def secret_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data or ""
+    token = data.split(":", 1)[1] if ":" in data else ""
+
+    if not token:
+        await query.answer()
+        return
+
+    c = db()
+
+    row = c.execute(
+        """
+        SELECT recipient_username, message_text
+        FROM secret_messages
+        WHERE token = ?
+        LIMIT 1
+        """,
+        (token,),
+    ).fetchone()
+
+    if not row:
+        await query.answer(
+            "❌ Xabar topilmadi yoki muddati tugagan.",
+            show_alert=True,
+        )
+        return
+
+    recipient_username, message_text = row
+
+    # Tugmani bosgan odamning username'i
+    clicker_username = (
+        query.from_user.username or ""
+    ).lower()
+
+    # Faqat aynan ko'rsatilgan @username ochishi mumkin
+    if not clicker_username or clicker_username != recipient_username.lower():
+        await query.answer(
+            "⛔ Bu xabar siz uchun emas.",
+            show_alert=True,
+        )
+        return
+
+    # 200 belgigacha popupda to'liq ko'rsatamiz.
+    if len(message_text) <= 200:
+        await query.answer(
+            message_text,
+            show_alert=True,
+        )
+        return
+
+    # Uzun xabarlar uchun adresatning shaxsiy chatiga yuboramiz.
+    lang = secret_lang(query.from_user)
+    tr = SECRET_LANGS[lang]
+
+    try:
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text=tr["message"].format(message_text),
+        )
+        await query.answer(
+            "📩 To‘liq yashirin xabar shaxsiy chatga yuborildi.",
+            show_alert=True,
+        )
+    except TelegramError:
+        await query.answer(
+            message_text[:197] + "...",
+            show_alert=True,
+        )
+
+
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
         print(
@@ -2848,7 +3111,11 @@ def main():
         app.add_handler(CommandHandler(names, handler))
 
     app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|menu)$"))
+    app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))
+    app.add_handler(
+        CallbackQueryHandler(secret_callback, pattern=r"^secret:")
+    )
     app.add_handler(CallbackQueryHandler(cb_lang, pattern=r"^lang:"))
     app.add_handler(CallbackQueryHandler(cb_rsp_count, pattern=r"^rc:[235]$"))
     app.add_handler(CallbackQueryHandler(cb_rsp_join, pattern=r"^rj$"))

@@ -1202,6 +1202,7 @@ def menu_kb(chat_id):
         [InlineKeyboardButton(t(chat_id, "btn_number"), callback_data="g:number")],
         [InlineKeyboardButton(t(chat_id, "btn_rsp"), callback_data="g:rsp")],
         [InlineKeyboardButton(t(chat_id, "btn_xo"), callback_data="g:xo")],
+        [InlineKeyboardButton(memory_t(chat_id, "btn"), callback_data="g:memory")],
     ])
 
 
@@ -1643,6 +1644,437 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]])
         await edit(context.bot, chat_id, msg.message_id, t(chat_id, "xo_lobby", owner=name), kb)
         arm(app, chat_id, game, XO_LOBBY_TTL)
+
+    elif kind == "memory":
+        game = new_game(
+            chat_id, "memory", user.id,
+            state="setup", msg_id=msg.message_id,
+            names={user.id: name},
+        )
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("4×4", callback_data="m:size:4"),
+                InlineKeyboardButton("6×6", callback_data="m:size:6"),
+            ]
+        ])
+        await edit(
+            context.bot, chat_id, msg.message_id,
+            memory_t(chat_id, "choose"), kb
+        )
+        arm(app, chat_id, game, MEMORY_SETUP_TTL)
+
+
+
+# ───────────────────────────── 🧠 Juftini top ─────────────────────────────
+
+MEMORY_SETUP_TTL = 120
+MEMORY_LOBBY_TTL = 180
+MEMORY_GAME_TTL = 900
+MEMORY_HIDE_DELAY = 0.9
+
+MEMORY_EMOJIS = [
+    "🐶", "🐱", "🦊", "🐼", "🐸", "🐵", "🦁", "🐯", "🐨",
+    "🐷", "🐰", "🦄", "🐲", "🍎", "🍕", "🍔", "⚽", "🏀",
+    "🎲", "🎯", "🚀", "🌟", "🔥", "💎", "🎵", "🌈",
+]
+
+MEMORY_TEXT = {
+    "uz": {
+        "btn": "🧠 Juftini top",
+        "choose": "🧠 <b>Juftini top</b>\n\nMaydonni tanlang:",
+        "lobby": "🧠 <b>Juftini top</b>\n\n👥 O‘yinchilar: {players}/2\n\n{names}\n\nIkkinchi o‘yinchini kuting 👇",
+        "join": "🙋 Qo‘shilish",
+        "already": "Siz allaqachon o‘yindasiz.",
+        "full": "O‘yinchilar to‘ldi.",
+        "turn": "🎯 Navbat: <b>{name}</b>\n🏆 {a}: {ap} juft\n🏆 {b}: {bp} juft",
+        "not_turn": "⏳ Hozir navbat boshqa o‘yinchida.",
+        "one": "Avval birinchi katakni tanlang.",
+        "same": "Boshqa katakni tanlang.",
+        "match": "🎉 <b>{name}</b> juftlikni topdi! +1 juft. Yana yuradi.",
+        "miss": "❌ Juftlik topilmadi. Navbat <b>{name}</b>ga.",
+        "result": "🧠 <b>JUFTINI TOP — NATIJA</b>\n\n🏆 {a}: <b>{ap}</b> juft\n🏆 {b}: <b>{bp}</b> juft\n\n{result}",
+        "winner": "👑 G‘olib: <b>{name}</b>!",
+        "draw": "🤝 Durang!",
+        "waiting": "⏳ Ikkinchi o‘yinchini kuting.",
+    },
+    "eng": {
+        "btn": "🧠 Find the Pair",
+        "choose": "🧠 <b>Find the Pair</b>\n\nChoose the board:",
+        "lobby": "🧠 <b>Find the Pair</b>\n\n👥 Players: {players}/2\n\n{names}\n\nWaiting for the second player 👇",
+        "join": "🙋 Join",
+        "already": "You are already in the game.",
+        "full": "The game is full.",
+        "turn": "🎯 Turn: <b>{name}</b>\n🏆 {a}: {ap} pairs\n🏆 {b}: {bp} pairs",
+        "not_turn": "⏳ It is the other player's turn.",
+        "one": "Choose the first cell first.",
+        "same": "Choose another cell.",
+        "match": "🎉 <b>{name}</b> found a pair! +1 pair. Play again.",
+        "miss": "❌ No pair. Turn goes to <b>{name}</b>.",
+        "result": "🧠 <b>FIND THE PAIR — RESULT</b>\n\n🏆 {a}: <b>{ap}</b> pairs\n🏆 {b}: <b>{bp}</b> pairs\n\n{result}",
+        "winner": "👑 Winner: <b>{name}</b>!",
+        "draw": "🤝 Draw!",
+        "waiting": "⏳ Waiting for the second player.",
+    },
+    "ru": {
+        "btn": "🧠 Найди пару",
+        "choose": "🧠 <b>Найди пару</b>\n\nВыберите поле:",
+        "lobby": "🧠 <b>Найди пару</b>\n\n👥 Игроки: {players}/2\n\n{names}\n\nЖдём второго игрока 👇",
+        "join": "🙋 Войти",
+        "already": "Вы уже участвуете.",
+        "full": "Игра заполнена.",
+        "turn": "🎯 Ход: <b>{name}</b>\n🏆 {a}: {ap} пар\n🏆 {b}: {bp} пар",
+        "not_turn": "⏳ Сейчас ход другого игрока.",
+        "one": "Сначала выберите первую клетку.",
+        "same": "Выберите другую клетку.",
+        "match": "🎉 <b>{name}</b> нашёл пару! +1 пара. Ход продолжается.",
+        "miss": "❌ Пара не найдена. Ход переходит к <b>{name}</b>.",
+        "result": "🧠 <b>НАЙДИ ПАРУ — РЕЗУЛЬТАТ</b>\n\n🏆 {a}: <b>{ap}</b> пар\n🏆 {b}: <b>{bp}</b> пар\n\n{result}",
+        "winner": "👑 Победитель: <b>{name}</b>!",
+        "draw": "🤝 Ничья!",
+        "waiting": "⏳ Ждём второго игрока.",
+    },
+    "kz": {
+        "btn": "🧠 Жұбын тап",
+        "choose": "🧠 <b>Жұбын тап</b>\n\nӨрісті таңдаңыз:",
+        "lobby": "🧠 <b>Жұбын тап</b>\n\n👥 Ойыншылар: {players}/2\n\n{names}\n\nЕкінші ойыншы күтілуде 👇",
+        "join": "🙋 Қосылу",
+        "already": "Сіз ойынға қатысып жатырсыз.",
+        "full": "Ойыншылар толды.",
+        "turn": "🎯 Кезек: <b>{name}</b>\n🏆 {a}: {ap} жұп\n🏆 {b}: {bp} жұп",
+        "not_turn": "⏳ Қазір басқа ойыншының кезегі.",
+        "one": "Алдымен бірінші ұяшықты таңдаңыз.",
+        "same": "Басқа ұяшықты таңдаңыз.",
+        "match": "🎉 <b>{name}</b> жұпты тапты! +1 жұп. Кезек жалғасады.",
+        "miss": "❌ Жұп табылмады. Кезек <b>{name}</b> ойыншыға өтті.",
+        "result": "🧠 <b>ЖҰБЫН ТАП — НӘТИЖЕ</b>\n\n🏆 {a}: <b>{ap}</b> жұп\n🏆 {b}: <b>{bp}</b> жұп\n\n{result}",
+        "winner": "👑 Жеңімпаз: <b>{name}</b>!",
+        "draw": "🤝 Тең түсті!",
+        "waiting": "⏳ Екінші ойыншы күтілуде.",
+    },
+}
+
+
+def memory_t(chat_id, key, **kwargs):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    data = MEMORY_TEXT.get(lang, MEMORY_TEXT["uz"])
+    return data[key].format(**kwargs)
+
+
+def memory_lobby_kb(chat_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            memory_t(chat_id, "join"),
+            callback_data="m:join"
+        )
+    ]])
+
+
+def memory_lobby_text(chat_id, game):
+    names = "\n".join(
+        f"🙋 {name}" for name in game["names"].values()
+    )
+    return memory_t(
+        chat_id, "lobby",
+        players=len(game["names"]),
+        names=names,
+    )
+
+
+def memory_make_board(size):
+    pairs = (size * size) // 2
+    emojis = random.sample(MEMORY_EMOJIS, pairs)
+    values = emojis * 2
+    random.shuffle(values)
+    return values
+
+
+def memory_keyboard(game):
+    size = game["size"]
+    board = game["board"]
+    revealed = game["revealed"]
+    locked = game["locked"]
+    first = game.get("first")
+    second = game.get("second")
+    rows = []
+
+    for r in range(size):
+        row = []
+        for c in range(size):
+            i = r * size + c
+
+            if i in locked or i in revealed or i == first or i == second:
+                label = board[i]
+            else:
+                label = "⬜"
+
+            row.append(
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"m:cell:{i}"
+                )
+            )
+        rows.append(row)
+
+    return InlineKeyboardMarkup(rows)
+
+
+def memory_text(chat_id, game):
+    ids = list(game["names"])
+    a = ids[0]
+    b = ids[1]
+
+    return memory_t(
+        chat_id,
+        "turn",
+        name=game["names"][game["turn"]],
+        a=game["names"][a],
+        b=game["names"][b],
+        ap=game["scores"].get(a, 0),
+        bp=game["scores"].get(b, 0),
+    )
+
+
+async def memory_finish(context, chat_id, game):
+    ids = list(game["names"])
+    a, b = ids[0], ids[1]
+    ap = game["scores"].get(a, 0)
+    bp = game["scores"].get(b, 0)
+
+    if ap > bp:
+        winner = a
+        result = memory_t(
+            chat_id, "winner",
+            name=game["names"][winner]
+        )
+        record(chat_id, winner, "win", ap)
+        record(chat_id, b, "loss")
+    elif bp > ap:
+        winner = b
+        result = memory_t(
+            chat_id, "winner",
+            name=game["names"][winner]
+        )
+        record(chat_id, winner, "win", bp)
+        record(chat_id, a, "loss")
+    else:
+        result = memory_t(chat_id, "draw")
+        record(chat_id, a, "draw")
+        record(chat_id, b, "draw")
+
+    end_game(chat_id, game)
+
+    await edit(
+        context.bot,
+        chat_id,
+        game["msg_id"],
+        memory_t(
+            chat_id, "result",
+            a=game["names"][a],
+            b=game["names"][b],
+            ap=ap,
+            bp=bp,
+            result=result,
+        ),
+        None,
+    )
+
+
+async def cb_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id = q.message.chat.id
+    user = q.from_user
+    data = q.data
+
+    game = active(q, "memory")
+
+    if not game:
+        await q.answer(memory_t(chat_id, "waiting"), show_alert=True)
+        return
+
+    # Maydon tanlash
+    if data.startswith("m:size:"):
+        if game["state"] != "setup":
+            await q.answer(memory_t(chat_id, "waiting"), show_alert=True)
+            return
+
+        if user.id != game["owner"]:
+            await q.answer(t(chat_id, "only_owner"), show_alert=True)
+            return
+
+        size = int(data.rsplit(":", 1)[1])
+
+        game["size"] = size
+        game["state"] = "lobby"
+
+        await q.answer()
+
+        await edit(
+            context.bot,
+            chat_id,
+            game["msg_id"],
+            memory_lobby_text(chat_id, game),
+            memory_lobby_kb(chat_id),
+        )
+        arm(context.application, chat_id, game, MEMORY_LOBBY_TTL)
+        return
+
+    # Ikkinchi o'yinchi qo'shilishi
+    if data == "m:join":
+        if game["state"] != "lobby":
+            await q.answer(t(chat_id, "gone"), show_alert=True)
+            return
+
+        if user.id in game["names"]:
+            await q.answer(memory_t(chat_id, "already"), show_alert=True)
+            return
+
+        if len(game["names"]) >= 2:
+            await q.answer(memory_t(chat_id, "full"), show_alert=True)
+            return
+
+        save_user(user)
+        game["names"][user.id] = uname(user)
+        await q.answer()
+
+        if len(game["names"]) < 2:
+            await edit(
+                context.bot,
+                chat_id,
+                game["msg_id"],
+                memory_lobby_text(chat_id, game),
+                memory_lobby_kb(chat_id),
+            )
+            return
+
+        game["state"] = "play"
+        game["board"] = memory_make_board(game["size"])
+        game["revealed"] = set()
+        game["locked"] = set()
+        game["scores"] = {uid: 0 for uid in game["names"]}
+        game["turn"] = list(game["names"])[0]
+        game["first"] = None
+        game["second"] = None
+        game["busy"] = False
+
+        await edit(
+            context.bot,
+            chat_id,
+            game["msg_id"],
+            memory_text(chat_id, game),
+            memory_keyboard(game),
+        )
+        arm(context.application, chat_id, game, MEMORY_GAME_TTL)
+        return
+
+    # Katak
+    if data.startswith("m:cell:"):
+        if game["state"] != "play":
+            await q.answer(t(chat_id, "gone"), show_alert=True)
+            return
+
+        if user.id not in game["names"]:
+            await q.answer(t(chat_id, "not_player"), show_alert=True)
+            return
+
+        if user.id != game["turn"]:
+            await q.answer(memory_t(chat_id, "not_turn"), show_alert=True)
+            return
+
+        if game.get("busy"):
+            await q.answer()
+            return
+
+        idx = int(data.rsplit(":", 1)[1])
+
+        if idx in game["locked"] or idx in game["revealed"]:
+            await q.answer()
+            return
+
+        if game["first"] == idx:
+            await q.answer(memory_t(chat_id, "same"), show_alert=True)
+            return
+
+        await q.answer()
+
+        if game["first"] is None:
+            game["first"] = idx
+
+            await edit(
+                context.bot,
+                chat_id,
+                game["msg_id"],
+                memory_text(chat_id, game),
+                memory_keyboard(game),
+            )
+            return
+
+        game["second"] = idx
+        game["busy"] = True
+
+        await edit(
+            context.bot,
+            chat_id,
+            game["msg_id"],
+            memory_text(chat_id, game),
+            memory_keyboard(game),
+        )
+
+        first = game["first"]
+        second = game["second"]
+
+        if game["board"][first] == game["board"][second]:
+            await asyncio.sleep(0.25)
+
+            game["locked"].add(first)
+            game["locked"].add(second)
+            game["scores"][user.id] += 1
+            game["first"] = None
+            game["second"] = None
+            game["busy"] = False
+
+            pairs_total = (game["size"] * game["size"]) // 2
+
+            if len(game["locked"]) == pairs_total * 2:
+                await memory_finish(context, chat_id, game)
+                return
+
+            await edit(
+                context.bot,
+                chat_id,
+                game["msg_id"],
+                memory_t(chat_id, "match", name=game["names"][user.id])
+                + "\n\n" + memory_text(chat_id, game),
+                memory_keyboard(game),
+            )
+            arm(context.application, chat_id, game, MEMORY_GAME_TTL)
+            return
+
+        # Mos kelmasa, ikkisini qisqa vaqt ko'rsatib turamiz.
+        await asyncio.sleep(MEMORY_HIDE_DELAY)
+
+        if GAMES.get(chat_id) is not game:
+            return
+
+        game["first"] = None
+        game["second"] = None
+        game["busy"] = False
+
+        ids = list(game["names"])
+        other = ids[0] if ids[1] == user.id else ids[1]
+        game["turn"] = other
+
+        await edit(
+            context.bot,
+            chat_id,
+            game["msg_id"],
+            memory_t(
+                chat_id, "miss",
+                name=game["names"][other]
+            ) + "\n\n" + memory_text(chat_id, game),
+            memory_keyboard(game),
+        )
+        arm(context.application, chat_id, game, MEMORY_GAME_TTL)
+        return
 
 
 # ───────────────────────────── 🎯 Son topish ─────────────────────────────
@@ -3136,7 +3568,8 @@ def main():
     for names, handler in commands:
         app.add_handler(CommandHandler(names, handler))
 
-    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|menu)$"))
+    app.add_handler(CallbackQueryHandler(cb_memory, pattern=r"^m:"))
+    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|menu)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))
     app.add_handler(

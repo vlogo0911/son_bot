@@ -41,7 +41,8 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(BASE_DIR, "game.db")
+VOLUME_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+DB_FILE = os.path.join(VOLUME_PATH, "game.db") if VOLUME_PATH else os.path.join(BASE_DIR, "game.db")
 
 DEFAULT_LANG = "uz"
 
@@ -3467,7 +3468,14 @@ async def post_init(application: Application):
         "SELECT 1 FROM bot_notice_state WHERE notice_key=?", (notice_key,)
     ).fetchone()
     if not sent_before:
-        ids = [r[0] for r in db().execute("SELECT user_id FROM users").fetchall()]
+        ids = [
+            r[0] for r in db().execute("""
+                SELECT u.user_id
+                FROM users u
+                LEFT JOIN user_gender g ON g.user_id = u.user_id
+                WHERE g.user_id IS NULL
+            """).fetchall()
+        ]
         for user_id in ids:
             try:
                 await application.bot.send_message(

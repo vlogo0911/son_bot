@@ -3462,36 +3462,6 @@ async def post_init(application: Application):
 
 
 
-    # Foydalanuvchilarga jins tanlash xabari: bir marta yuboriladi.
-    notice_key = "gender_notice_v1"
-    sent_before = db().execute(
-        "SELECT 1 FROM bot_notice_state WHERE notice_key=?", (notice_key,)
-    ).fetchone()
-    if not sent_before:
-        ids = [
-            r[0] for r in db().execute("""
-                SELECT u.user_id
-                FROM users u
-                LEFT JOIN user_gender g ON g.user_id = u.user_id
-                WHERE g.user_id IS NULL
-            """).fetchall()
-        ]
-        for user_id in ids:
-            try:
-                await application.bot.send_message(
-                    chat_id=user_id,
-                    text="🆕 Son Bot yangilandi! Jinsingizni tanlang:",
-                    reply_markup=gender_keyboard(),
-                )
-            except TelegramError as e:
-                logger.info("Jins xabari yuborilmadi (%s): %s", user_id, e)
-        with db():
-            db().execute(
-                "INSERT OR IGNORE INTO bot_notice_state(notice_key, completed_at) VALUES (?, ?)",
-                (notice_key, datetime.now().isoformat(timespec="seconds")),
-            )
-
-
 async def post_shutdown(application: Application):
     for game in list(GAMES.values()):
         timer = game.get("timer")

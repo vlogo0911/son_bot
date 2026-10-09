@@ -199,7 +199,7 @@ LANGS = {
             "💔 Mag‘lubiyatlar: {losses}\n"
             "🤝 Duranglar: {draws}\n"
             "📊 G‘alaba foizi: <b>{winrate}%</b>\n"
-            "{bar}{rank}"
+            "{partner_info}\n{bar}{rank}"
         ),
         "profile_rank": "\n🏅 Guruhdagi o‘rin: <b>#{rank}</b>",
         "levels": ["🌱 Yangi", "🥉 Tajribali", "🥈 Usta", "🥇 Ekspert", "👑 Afsona"],
@@ -343,7 +343,7 @@ LANGS = {
             "💔 Losses: {losses}\n"
             "🤝 Draws: {draws}\n"
             "📊 Win rate: <b>{winrate}%</b>\n"
-            "{bar}{rank}"
+            "{partner_info}\n{bar}{rank}"
         ),
         "profile_rank": "\n🏅 Group rank: <b>#{rank}</b>",
         "levels": ["🌱 Newbie", "🥉 Skilled", "🥈 Pro", "🥇 Expert", "👑 Legend"],
@@ -487,7 +487,7 @@ LANGS = {
             "💔 Поражений: {losses}\n"
             "🤝 Ничьих: {draws}\n"
             "📊 Процент побед: <b>{winrate}%</b>\n"
-            "{bar}{rank}"
+            "{partner_info}\n{bar}{rank}"
         ),
         "profile_rank": "\n🏅 Место в группе: <b>#{rank}</b>",
         "levels": ["🌱 Новичок", "🥉 Опытный", "🥈 Мастер", "🥇 Эксперт", "👑 Легенда"],
@@ -631,7 +631,7 @@ LANGS = {
             "💔 Жеңілістер: {losses}\n"
             "🤝 Тең ойындар: {draws}\n"
             "📊 Жеңіс пайызы: <b>{winrate}%</b>\n"
-            "{bar}{rank}"
+            "{partner_info}\n{bar}{rank}"
         ),
         "profile_rank": "\n🏅 Топтағы орын: <b>#{rank}</b>",
         "levels": ["🌱 Жаңадан", "🥉 Тәжірибелі", "🥈 Шебер", "🥇 Сарапшы", "👑 Аңыз"],
@@ -759,6 +759,51 @@ def init_db():
         if language in LANGS:
             LANG_CACHE[chat_id] = language
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_gender (
+            user_id INTEGER PRIMARY KEY,
+            gender TEXT NOT NULL CHECK(gender IN ('male', 'female')),
+            updated_at TEXT NOT NULL
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user1_id INTEGER NOT NULL,
+            user2_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            status TEXT NOT NULL DEFAULT 'active'
+        )
+    """)
+    c.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pairs_active_user1
+        ON pairs(user1_id) WHERE status = 'active'
+    """)
+    c.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pairs_active_user2
+        ON pairs(user2_id) WHERE status = 'active'
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pair_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_type TEXT NOT NULL,
+            requester_id INTEGER NOT NULL,
+            target_id INTEGER,
+            group_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            decided_by INTEGER,
+            decided_at TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS bot_notice_state (
+            notice_key TEXT PRIMARY KEY,
+            completed_at TEXT NOT NULL
+        )
+    """)
 
 def migrate_legacy(c):
     """Eski global ballarni (agar bitta guruh bo'lsa) o'sha guruhga ko'chiradi."""
@@ -1222,6 +1267,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user:
             return
 
+        save_user(user)
+        gender = db().execute(
+            "SELECT gender FROM user_gender WHERE user_id=?", (user.id,)
+        ).fetchone()
+        if not gender:
+            await msg.reply_text(
+                "👋 Botdan foydalanish uchun jinsingizni tanlang:",
+                reply_markup=gender_keyboard(),
+            )
+            return
+
         row = career_get_user(user.id)
 
         # Tug‘ilgan sana hali kiritilmagan
@@ -1239,7 +1295,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(
                 "💼 <b>Endi kasbingizni tanlang:</b>\n\n"
                 "16 ta kasbdan birini tanlang.",
-                reply_markup=career_profession_kb(q.message.chat.id),
+                reply_markup=career_profession_kb(chat.id),
             )
             return
 
@@ -1411,6 +1467,20 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not private and games:
         rank = t(chat.id, "profile_rank", rank=get_rank(chat.id, points, wins))
 
+    pair = active_pair(user.id)
+    if pair:
+        partner_id = pair[2] if pair[1] == user.id else pair[1]
+        partner_info = f"💞 Juftingiz: {person_name(partner_id)}"
+    else:
+        lang = LANG_CACHE.get(chat.id, DEFAULT_LANG)
+        partner_texts = {
+            "uz": "💞 Juftingiz: Hozircha juftingiz yo‘q",
+            "eng": "💞 Partner: You don't have a partner yet.",
+            "ru": "💞 Пара: Пока у вас нет пары.",
+            "kz": "💞 Жұбыңыз: Әзірге жұбыңыз жоқ.",
+        }
+        partner_info = partner_texts.get(lang, partner_texts["uz"])
+
     await msg.reply_text(
         t(
             chat.id,
@@ -1430,9 +1500,529 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
             winrate=winrate,
             bar=bar(winrate),
             rank=rank,
+            partner_info=partner_info,
         )
     )
 
+
+
+
+# ───────────── JINS VA JUFTLIK TIZIMI ─────────────
+
+def active_pair(user_id):
+    return db().execute(
+        """SELECT id, user1_id, user2_id, group_id, started_at
+           FROM pairs
+           WHERE status='active' AND (user1_id=? OR user2_id=?)
+           LIMIT 1""",
+        (user_id, user_id),
+    ).fetchone()
+
+
+def person_name(user_id):
+    row = db().execute(
+        "SELECT first_name, username FROM users WHERE user_id=?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        return f"ID {user_id}"
+    return ("@" + row[1]) if row[1] else (row[0] or f"ID {user_id}")
+
+
+def gender_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("👦 O‘g‘il bola", callback_data="rel:gender:male"),
+        InlineKeyboardButton("👧 Qiz bola", callback_data="rel:gender:female"),
+    ]])
+
+
+async def notify_pair_owners(application, request_id, title):
+    c = db()
+    row = c.execute(
+        "SELECT requester_id, target_id FROM pair_requests WHERE id=?",
+        (request_id,),
+    ).fetchone()
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"rel:owner:yes:{request_id}"),
+        InlineKeyboardButton("❌ Rad etish", callback_data=f"rel:owner:no:{request_id}"),
+    ]])
+
+    people = ""
+    if row:
+        people = (
+            f"\\n👤 Arizachi: {person_name(row[0])} (ID: {row[0]})"
+            + (
+                f"\\n👥 Ikkinchi tomon: {person_name(row[1])} (ID: {row[1]})"
+                if row[1] else ""
+            )
+        )
+
+    sent = 0
+    for owner_id in CAREER_OWNER_IDS:
+        try:
+            await application.bot.send_message(
+                chat_id=owner_id,
+                text=f"📨 <b>{title}</b>\\nAriza raqami: {request_id}{people}",
+                reply_markup=kb,
+            )
+            sent += 1
+        except TelegramError as e:
+            logger.warning("Egaga ariza yuborilmadi (%s): %s", owner_id, e)
+    return sent
+
+
+async def create_rel_request(application, request_type, requester_id,
+                             target_id=None, group_id=None):
+    c = db()
+    pending = c.execute(
+        """SELECT id FROM pair_requests
+           WHERE request_type=? AND requester_id=?
+           AND status IN ('pending', 'proposal', 'partner_consent')
+           LIMIT 1""",
+        (request_type, requester_id),
+    ).fetchone()
+    if pending:
+        return None
+
+    now = datetime.now().isoformat(timespec="seconds")
+    initial_status = "partner_consent" if request_type == "divorce" else "pending"
+
+    with c:
+        cur = c.execute(
+            """INSERT INTO pair_requests
+               (request_type, requester_id, target_id, group_id, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (request_type, requester_id, target_id, group_id, initial_status, now),
+        )
+        request_id = cur.lastrowid
+
+    if request_type == "divorce":
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Roziman", callback_data=f"rel:divorce:yes:{request_id}"),
+            InlineKeyboardButton("❌ Rad etaman", callback_data=f"rel:divorce:no:{request_id}"),
+        ]])
+        try:
+            await application.bot.send_message(
+                chat_id=target_id,
+                text=f"💔 <b>Ajrashish so‘rovi</b>\\n"
+                     f"{person_name(requester_id)} siz bilan ajrashishni so‘radi. "
+                     "Rozilik bildirasizmi?",
+                reply_markup=kb,
+            )
+        except TelegramError:
+            logger.warning("Ajrashish so‘rovi juftiga yuborilmadi: %s", target_id)
+            return request_id
+    else:
+        labels = {
+            "pair": "💞 Juftlashish arizasi",
+            "quit_job": "💼 Ishdan bo‘shash arizasi",
+        }
+        await notify_pair_owners(
+            application, request_id, labels.get(request_type, "Ariza")
+        )
+    return request_id
+
+
+async def cmd_menyu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    user = update.effective_user
+    if not chat or not msg or not user:
+        return
+    if chat.type != ChatType.PRIVATE:
+        await msg.reply_text("📩 Menyuni bot bilan shaxsiy chatda oching: /menyu")
+        return
+
+    save_user(user)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💞 Juftlashish arizasi", callback_data="rel:menu:pair")],
+        [InlineKeyboardButton("💼 Ishdan bo‘shash arizasi", callback_data="rel:menu:quit")],
+        [InlineKeyboardButton("💔 Juft bilan ajrashish arizasi", callback_data="rel:menu:divorce")],
+    ])
+    await msg.reply_text("📋 <b>Arizalar menyusi</b>\nKerakli bo‘limni tanlang:", reply_markup=kb)
+
+
+async def cmd_juft(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    user = update.effective_user
+    if not chat or not msg or not user:
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text("ℹ️ Guruhda kerakli odamning xabariga javob berib /juft yuboring.")
+        return
+
+    target = msg.reply_to_message.from_user if msg.reply_to_message else None
+    if not target:
+        await msg.reply_text("⚠️ Avval juft bo‘lmoqchi bo‘lgan odamning xabariga javob bering.")
+        return
+    if target.id == user.id or target.is_bot:
+        await msg.reply_text("⚠️ O‘zingizni yoki botni tanlay olmaysiz.")
+        return
+
+    save_user(user)
+    save_user(target)
+
+    if active_pair(user.id) or active_pair(target.id):
+        await msg.reply_text("💞 Sizlardan biri allaqachon juftlikda.")
+        return
+
+    c = db()
+    old = c.execute(
+        """SELECT id FROM pair_requests
+           WHERE request_type='pair' AND requester_id=? AND target_id=?
+             AND status IN ('proposal','pending')
+           LIMIT 1""",
+        (user.id, target.id),
+    ).fetchone()
+    if old:
+        await msg.reply_text("⏳ Bu odamga taklif allaqachon yuborilgan.")
+        return
+
+    now = datetime.now().isoformat(timespec="seconds")
+    with c:
+        cur = c.execute(
+            """INSERT INTO pair_requests
+               (request_type, requester_id, target_id, group_id,
+                status, created_at)
+               VALUES ('pair', ?, ?, ?, 'proposal', ?)""",
+            (user.id, target.id, chat.id, now),
+        )
+        rid = cur.lastrowid
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("💞 Roziman", callback_data=f"rel:proposal:yes:{rid}"),
+        InlineKeyboardButton("❌ Rad etish", callback_data=f"rel:proposal:no:{rid}"),
+    ]])
+    try:
+        await context.bot.send_message(
+            chat_id=target.id,
+            text=f"💌 <b>Juftlik taklifi!</b>\n{person_name(user.id)} sizga juft bo‘lishni taklif qildi.",
+            reply_markup=kb,
+        )
+        await msg.reply_text("💌 Taklif shaxsiy chatga yuborildi.")
+    except TelegramError:
+        await msg.reply_text(
+            "⚠️ Taklifni shaxsiy chatga yubora olmadim. U odam botni ochib /start bosishi kerak."
+        )
+
+
+async def cmd_juftim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user:
+        return
+    pair = active_pair(user.id)
+    if not pair:
+        await msg.reply_text("Siz bo‘ydoqsiz 💔")
+        return
+
+    partner_id = pair[2] if pair[1] == user.id else pair[1]
+    try:
+        started = datetime.fromisoformat(pair[4])
+        duration = datetime.now() - started
+        days = max(0, duration.days)
+        since = started.strftime("%d.%m.%Y")
+    except (ValueError, TypeError):
+        days, since = 0, "—"
+
+    await msg.reply_text(
+        f"💞 <b>Juftingiz:</b> {person_name(partner_id)}\n"
+        f"📅 Birga bo‘lgan vaqt: {days} kun\n"
+        f"🗓 Juft bo‘lgan sana: {since}"
+    )
+
+
+async def cmd_juftliklar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    if not chat or not msg:
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text("ℹ️ /juftliklar buyrug‘ini guruhda ishlating.")
+        return
+
+    rows = db().execute(
+        """SELECT user1_id, user2_id, started_at FROM pairs
+           WHERE group_id=? AND status='active'
+           ORDER BY started_at""",
+        (chat.id,),
+    ).fetchall()
+    if not rows:
+        await msg.reply_text("💔 Bu guruhda hali juftliklar yo‘q.")
+        return
+
+    lines = ["💞 <b>Guruh juftliklari</b>\n"]
+    for i, row in enumerate(rows, 1):
+        lines.append(f"{i}. {person_name(row[0])} ❤️ {person_name(row[1])}")
+    await msg.reply_text("\n".join(lines))
+
+
+async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    data = q.data or ""
+    uid = q.from_user.id
+    c = db()
+
+    if data.startswith("rel:gender:"):
+        gender = data.rsplit(":", 1)[1]
+        if gender not in ("male", "female"):
+            await q.answer("Noto‘g‘ri tanlov.", show_alert=True)
+            return
+        with c:
+            c.execute(
+                """INSERT INTO user_gender(user_id, gender, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                   gender=excluded.gender, updated_at=excluded.updated_at""",
+                (uid, gender, datetime.now().isoformat(timespec="seconds")),
+            )
+        await q.answer("Tanlov saqlandi!")
+        await q.edit_message_text("✅ Jinsingiz saqlandi. Davom etish uchun /start bosing.")
+        return
+
+    if data.startswith("rel:menu:"):
+        action = data.rsplit(":", 1)[1]
+        if action == "pair":
+            await q.answer()
+            await q.edit_message_text(
+                "💞 Juftlashish uchun guruhda kerakli odamning xabariga javob berib /juft yuboring.\n"
+                "U rozi bo‘lsa, ariza bot egalariga yuboriladi."
+            )
+            return
+        if action not in ("divorce", "quit"):
+            await q.answer()
+            return
+        if action == "divorce" and not active_pair(uid):
+            await q.answer("Sizda hozir juft yo‘q.", show_alert=True)
+            return
+        if action == "quit":
+            row = c.execute(
+                "SELECT profession_id FROM users WHERE user_id=?", (uid,)
+            ).fetchone()
+            if not row or not row[0]:
+                await q.answer("Sizda tanlangan kasb yo‘q.", show_alert=True)
+                return
+        kind = "divorce" if action == "divorce" else "quit_job"
+        target_id = None
+        if action == "divorce":
+            pair = active_pair(uid)
+            target_id = pair[2] if pair[1] == uid else pair[1]
+        rid = await create_rel_request(
+            context.application, kind, uid, target_id=target_id
+        )
+        await q.answer()
+        if not rid:
+            text = "⏳ Sizda bu turdagi ariza allaqachon kutilmoqda."
+        elif kind == "divorce":
+            text = "💌 Ajrashish so‘rovi juftingizga shaxsiy xabarda yuborildi. Avval uning roziligi kerak."
+        else:
+            text = "⏳ Arizangiz bot egalariga yuborildi. Ulardan biri tasdiqlashi kerak."
+        await q.edit_message_text(text)
+        return
+
+    if data.startswith("rel:divorce:"):
+        parts = data.split(":")
+        answer, rid = parts[2], int(parts[3])
+        row = c.execute(
+            """SELECT requester_id, target_id, status
+               FROM pair_requests
+               WHERE id=? AND request_type='divorce'""",
+            (rid,),
+        ).fetchone()
+
+        if not row or row[1] != uid or row[2] != "partner_consent":
+            await q.answer("Bu so‘rov eskirgan yoki sizga tegishli emas.",
+                           show_alert=True)
+            return
+
+        requester, target, _ = row
+
+        if answer == "no":
+            with c:
+                c.execute(
+                    "UPDATE pair_requests SET status='rejected' "
+                    "WHERE id=? AND status='partner_consent'",
+                    (rid,),
+                )
+            try:
+                await context.bot.send_message(
+                    requester, "❌ Juftingiz ajrashishga rozilik bermadi."
+                )
+            except TelegramError:
+                pass
+            await q.answer("Rad etildi.")
+            await q.edit_message_text("❌ Ajrashish so‘rovini rad etdingiz.")
+            return
+
+        pair = active_pair(uid)
+        requester_pair = active_pair(requester)
+        if (not pair or not requester_pair
+                or pair[0] != requester_pair[0]
+                or {pair[1], pair[2]} != {uid, requester}):
+            with c:
+                c.execute(
+                    "UPDATE pair_requests SET status='rejected' WHERE id=?",
+                    (rid,),
+                )
+            await q.answer("Faol juftlik topilmadi.", show_alert=True)
+            await q.edit_message_text("So‘rov bekor qilindi: faol juftlik topilmadi.")
+            return
+
+        with c:
+            c.execute(
+                "UPDATE pair_requests SET status='pending' "
+                "WHERE id=? AND status='partner_consent'",
+                (rid,),
+            )
+
+        try:
+            await context.bot.send_message(
+                requester,
+                "✅ Juftingiz ajrashishga rozilik berdi. Endi bot egalari qaror qiladi."
+            )
+        except TelegramError:
+            pass
+        await q.answer("Rozilik saqlandi.")
+        await q.edit_message_text(
+            "✅ Rozilik berdingiz. Ariza bot egalariga yuborildi."
+        )
+        await notify_pair_owners(
+            context.application, rid, "💔 Ajrashish arizasi — juft rozilik berdi"
+        )
+        return
+
+    if data.startswith("rel:proposal:"):
+        parts = data.split(":")
+        answer, rid = parts[2], int(parts[3])
+        row = c.execute(
+            """SELECT requester_id, target_id, group_id, status
+               FROM pair_requests WHERE id=? AND request_type='pair'""",
+            (rid,),
+        ).fetchone()
+        if not row or row[1] != uid or row[3] != "proposal":
+            await q.answer("Bu taklif eskirgan.", show_alert=True)
+            return
+        if answer == "no":
+            with c:
+                c.execute("UPDATE pair_requests SET status='rejected' WHERE id=?", (rid,))
+            await q.answer("Taklif rad etildi.")
+            await q.edit_message_text("❌ Taklif rad etildi.")
+            return
+        if active_pair(uid) or active_pair(row[0]):
+            await q.answer("Sizlardan biri allaqachon juftlikda.", show_alert=True)
+            return
+        with c:
+            c.execute(
+                "UPDATE pair_requests SET status='pending' WHERE id=? AND status='proposal'",
+                (rid,),
+            )
+        await q.answer("Roziligingiz saqlandi.")
+        await q.edit_message_text("✅ Roziligingiz saqlandi. Endi bot egalari tasdig‘i kutilmoqda.")
+        await notify_pair_owners(
+            context.application, rid, "💞 Juftlashish arizasi"
+        )
+        return
+
+    if data.startswith("rel:owner:"):
+        if uid not in CAREER_OWNER_IDS:
+            await q.answer("Bu amal faqat bot egalari uchun.", show_alert=True)
+            return
+        parts = data.split(":")
+        answer, rid = parts[2], int(parts[3])
+        row = c.execute(
+            """SELECT request_type, requester_id, target_id, group_id, status
+               FROM pair_requests WHERE id=?""",
+            (rid,),
+        ).fetchone()
+        if not row or row[4] != "pending":
+            await q.answer("Ariza ko‘rib chiqilgan yoki topilmadi.", show_alert=True)
+            return
+
+        kind, requester, target, group_id, _ = row
+        if answer == "no":
+            with c:
+                c.execute(
+                    """UPDATE pair_requests SET status='rejected',
+                       decided_by=?, decided_at=? WHERE id=? AND status='pending'""",
+                    (uid, datetime.now().isoformat(timespec="seconds"), rid),
+                )
+            try:
+                await context.bot.send_message(requester, f"❌ {kind} arizangiz rad etildi.")
+            except TelegramError:
+                pass
+            await q.answer("Ariza rad etildi.")
+            await q.edit_message_text(f"❌ {rid}-ariza rad etildi.")
+            return
+
+        now = datetime.now().isoformat(timespec="seconds")
+        if kind == "pair":
+            if not target or active_pair(requester) or active_pair(target):
+                await q.answer("Ishtirokchilardan biri allaqachon juftlikda.", show_alert=True)
+                return
+            with c:
+                c.execute(
+                    """INSERT INTO pairs
+                       (user1_id, user2_id, group_id, started_at, status)
+                       VALUES (?, ?, ?, ?, 'active')""",
+                    (requester, target, group_id or 0, now),
+                )
+        elif kind == "divorce":
+            pair = active_pair(requester)
+            if (
+                not pair
+                or not target
+                or {pair[1], pair[2]} != {requester, target}
+            ):
+                await q.answer(
+                    "Faol juftlik mos kelmadi. Ariza tasdiqlanmadi.",
+                    show_alert=True,
+                )
+                return
+            with c:
+                c.execute(
+                    "UPDATE pairs SET status='ended', ended_at=? WHERE id=? AND status='active'",
+                    (now, pair[0]),
+                )
+        elif kind == "quit_job":
+            with c:
+                c.execute(
+                    "UPDATE users SET profession_id=NULL, profession_selected=0 WHERE user_id=?",
+                    (requester,),
+                )
+
+        with c:
+            c.execute(
+                """UPDATE pair_requests SET status='approved',
+                   decided_by=?, decided_at=? WHERE id=? AND status='pending'""",
+                (uid, now, rid),
+            )
+        try:
+            await context.bot.send_message(
+                requester, f"✅ Arizangiz tasdiqlandi: {kind}."
+            )
+        except TelegramError:
+            pass
+        if kind == "pair" and target:
+            try:
+                await context.bot.send_message(
+                    target, "💞 Juftlik arizasi tasdiqlandi! Endi siz juftlikdasiz."
+                )
+            except TelegramError:
+                pass
+        elif kind == "divorce" and target:
+            try:
+                await context.bot.send_message(target, "💔 Juftlik arizasi tasdiqlandi.")
+            except TelegramError:
+                pass
+        await q.answer("Tasdiqlandi!")
+        await q.edit_message_text(f"✅ {rid}-ariza tasdiqlandi.")
+        return
+
+    await q.answer()
 
 
 async def cmd_missiyalar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2481,6 +3071,30 @@ async def post_init(application: Application):
         logger.warning("Buyruqlar menyusini o'rnatib bo'lmadi: %s", e)
 
 
+
+    # Foydalanuvchilarga jins tanlash xabari: bir marta yuboriladi.
+    notice_key = "gender_notice_v1"
+    sent_before = db().execute(
+        "SELECT 1 FROM bot_notice_state WHERE notice_key=?", (notice_key,)
+    ).fetchone()
+    if not sent_before:
+        ids = [r[0] for r in db().execute("SELECT user_id FROM users").fetchall()]
+        for user_id in ids:
+            try:
+                await application.bot.send_message(
+                    chat_id=user_id,
+                    text="🆕 Son Bot yangilandi! Jinsingizni tanlang:",
+                    reply_markup=gender_keyboard(),
+                )
+            except TelegramError as e:
+                logger.info("Jins xabari yuborilmadi (%s): %s", user_id, e)
+        with db():
+            db().execute(
+                "INSERT OR IGNORE INTO bot_notice_state(notice_key, completed_at) VALUES (?, ?)",
+                (notice_key, datetime.now().isoformat(timespec="seconds")),
+            )
+
+
 async def post_shutdown(application: Application):
     for game in list(GAMES.values()):
         timer = game.get("timer")
@@ -2691,7 +3305,7 @@ async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(
             "✅ Tug‘ilgan sana saqlandi!\n\n"
             "💼 <b>Endi kasbingizni tanlang:</b>",
-            reply_markup=career_profession_kb(q.message.chat.id),
+            reply_markup=career_profession_kb(chat.id),
         )
         return
 
@@ -3555,6 +4169,10 @@ def main():
 
     commands = [
         (["start"], cmd_start),
+        (["menyu"], cmd_menyu),
+        (["juft"], cmd_juft),
+        (["juftim"], cmd_juftim),
+        (["juftliklar"], cmd_juftliklar),
         (["emps", "games", "oyin"], cmd_emps),
         (["stop"], cmd_stop),
         (["reyting", "rating"], cmd_reyting),
@@ -3582,6 +4200,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_xo_join, pattern=r"^xj$"))
     app.add_handler(CallbackQueryHandler(cb_xo_move, pattern=r"^xm:[0-8]$"))
     # Boshqa barcha callback'larga ham javob beramiz (spinner qotib qolmasin)
+    app.add_handler(CallbackQueryHandler(cb_relationship, pattern=r"^rel:"))
     app.add_handler(CallbackQueryHandler(cb_noop))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, career_private_text))
 

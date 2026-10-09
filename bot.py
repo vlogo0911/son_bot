@@ -5,6 +5,7 @@ Talab: python-telegram-bot >= 22   (pip install -r requirements.txt)
 Ishga tushirish:  BOT_TOKEN muhit o'zgaruvchisini o'rnating va `python bot.py`
 """
 
+import html
 import asyncio
 import logging
 from datetime import date, datetime
@@ -1321,6 +1322,315 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+def panel_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👤 Foydalanuvchilar", callback_data="panel:users"),
+            InlineKeyboardButton("🏘 Guruhlar", callback_data="panel:groups"),
+        ],
+        [
+            InlineKeyboardButton("🎮 Faol o'yinlar", callback_data="panel:active"),
+            InlineKeyboardButton("📊 Umumiy statistika", callback_data="panel:stats"),
+        ],
+        [
+            InlineKeyboardButton("🏆 O'yin turlari statistikasi", callback_data="panel:games"),
+        ],
+    ])
+
+
+def panel_group_ids(c):
+    ids = {
+        row[0] for row in c.execute(
+            "SELECT chat_id FROM group_languages WHERE chat_id < 0"
+        ).fetchall()
+    }
+    ids.update(
+        row[0] for row in c.execute(
+            "SELECT DISTINCT chat_id FROM chat_stats WHERE chat_id < 0"
+        ).fetchall()
+    )
+    return ids
+
+
+async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    user = update.effective_user
+
+    if not chat or not msg or not user:
+        return
+
+    if user.id not in CAREER_OWNER_IDS:
+        await msg.reply_text("⛔ Bu buyruq faqat bot egalari uchun.")
+        return
+
+    if chat.type != ChatType.PRIVATE:
+        await msg.reply_text("🔐 Panelni bot bilan shaxsiy chatda oching.")
+        return
+
+    c = db()
+    users_count = c.execute(
+        "SELECT COUNT(*) FROM users"
+    ).fetchone()[0]
+    group_ids = panel_group_ids(c)
+    total_games = c.execute(
+        "SELECT COALESCE(SUM(games), 0) FROM chat_stats"
+    ).fetchone()[0]
+
+    text = (
+        "🛠 <b>BOT EGASI PANELI</b>\n\n"
+        "Kerakli bo'limni tugma orqali tanlang.\n\n"
+        f"👤 Foydalanuvchilar: <b>{users_count}</b>\n"
+        f"🏘 Guruhlar: <b>{len(group_ids)}</b>\n"
+        f"🎮 Faol o'yinlar: <b>{len(GAMES)}</b>"
+    )
+
+    await msg.reply_text(text, reply_markup=panel_keyboard())
+
+
+
+async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+
+    if query.from_user.id not in CAREER_OWNER_IDS:
+        await query.answer(
+            "⛔ Bu bo'lim faqat bot egalari uchun.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer()
+
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else "home"
+
+    try:
+        page = max(0, int(parts[2])) if len(parts) > 2 else 0
+    except ValueError:
+        page = 0
+
+    c = db()
+    users_count = c.execute(
+        "SELECT COUNT(*) FROM users"
+    ).fetchone()[0]
+
+    group_ids = panel_group_ids(c)
+    total_games = c.execute(
+        "SELECT COALESCE(SUM(games), 0) FROM chat_stats"
+    ).fetchone()[0]
+
+    if action == "users":
+        per_page = 10
+        total_pages = max(1, (users_count + per_page - 1) // per_page)
+        page = min(page, total_pages - 1)
+
+        rows = c.execute(
+            """
+            SELECT user_id, username, first_name
+            FROM users
+            ORDER BY first_name COLLATE NOCASE, user_id
+            LIMIT ? OFFSET ?
+            """,
+            (per_page, page * per_page),
+        ).fetchall()
+
+        lines = [
+            "👤 <b>FOYDALANUVCHILAR RO'YXATI</b>",
+            "",
+            f"Jami: <b>{users_count}</b>",
+            f"Sahifa: <b>{page + 1}/{total_pages}</b>",
+            "",
+        ]
+
+        for index, (user_id, username, first_name) in enumerate(
+            rows, start=page * per_page + 1
+        ):
+            name = escape(first_name or username or str(user_id))
+            mention = (
+                f'<a href="tg://user?id={user_id}">{name}</a>'
+            )
+
+            if username:
+                mention += f" (@{escape(username)})"
+
+            lines.append(f"{index}. {mention}")
+
+        if not rows:
+            lines.append("Foydalanuvchilar topilmadi.")
+
+        buttons = []
+        nav = []
+
+        if page > 0:
+            nav.append(
+                InlineKeyboardButton(
+                    "⬅️ Oldingi",
+                    callback_data=f"panel:users:{page - 1}",
+                )
+            )
+
+        if page + 1 < total_pages:
+            nav.append(
+                InlineKeyboardButton(
+                    "Keyingi ➡️",
+                    callback_data=f"panel:users:{page + 1}",
+                )
+            )
+
+        if nav:
+            buttons.append(nav)
+
+        buttons.append([
+            InlineKeyboardButton(
+                "🏠 Panelga qaytish",
+                callback_data="panel:home",
+            )
+        ])
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    elif action == "groups":
+        lines = [
+            "🏘 <b>GURUHLAR RO'YXATI</b>",
+            "",
+            f"Guruhlar soni: <b>{len(group_ids)}</b>",
+            "",
+        ]
+
+        if not group_ids:
+            lines.append("Hozircha guruhlar qayd etilmagan.")
+        else:
+            for group_id in sorted(group_ids):
+                try:
+                    group = await context.bot.get_chat(group_id)
+                    title = escape(group.title or str(group_id))
+
+                    # Ommaviy guruh uchun username havolasi.
+                    # Yopiq guruh uchun faqat mavjud taklif havolasi.
+                    url = None
+                    if group.username:
+                        url = f"https://t.me/{group.username}"
+                    elif getattr(group, "invite_link", None):
+                        url = group.invite_link
+
+                    if url:
+                        safe_url = escape(url, quote=True)
+                        group_name = (
+                            f'<a href="{safe_url}">{title}</a>'
+                        )
+                    else:
+                        group_name = title
+
+                    lines.append(
+                        f"• {group_name}\n"
+                        f"  ID: <code>{group_id}</code>"
+                    )
+
+                    if not url:
+                        lines.append(
+                            "  <i>Guruh havolasi botga mavjud emas.</i>"
+                        )
+
+                except TelegramError:
+                    lines.append(
+                        f"• Nomi olinmadi\n"
+                        f"  ID: <code>{group_id}</code>"
+                    )
+
+        text = "\n\n".join(lines)
+
+    elif action == "active":
+        lines = [
+            "🎮 <b>FAOL O'YINLAR</b>",
+            "",
+            f"Hozir faol o'yinlar: <b>{len(GAMES)}</b>",
+            "",
+        ]
+
+        if not GAMES:
+            lines.append("Hozir faol o'yin yo'q.")
+        else:
+            for chat_id, game in GAMES.items():
+                kind = escape(str(game.get("type", "Noma'lum")))
+                lines.append(
+                    f"• Turi: <b>{kind}</b>\n"
+                    f"  Chat ID: <code>{chat_id}</code>"
+                )
+
+        text = "\n\n".join(lines)
+
+    elif action == "stats":
+        text = (
+            "📊 <b>UMUMIY STATISTIKA</b>\n\n"
+            f"👤 Foydalanuvchilar: <b>{users_count}</b>\n"
+            f"🏘 Qayd etilgan guruhlar: <b>{len(group_ids)}</b>\n"
+            f"🎮 Faol o'yinlar: <b>{len(GAMES)}</b>\n"
+            f"📈 Jami o'yin ishtiroklari: <b>{total_games}</b>\n\n"
+            "ℹ️ Ishtiroklar chat statistikasi asosida hisoblanadi."
+        )
+
+    elif action == "games":
+        counts = {}
+
+        for game in GAMES.values():
+            kind = str(game.get("type", "Noma'lum"))
+            counts[kind] = counts.get(kind, 0) + 1
+
+        lines = [
+            "🏆 <b>O'YIN TURLARI STATISTIKASI</b>",
+            "",
+            "Hozir faol o'yinlar bo'yicha:",
+            "",
+        ]
+
+        if counts:
+            for kind, count in sorted(counts.items()):
+                lines.append(f"• {escape(kind)}: <b>{count}</b>")
+        else:
+            lines.append("Hozir faol o'yin yo'q.")
+
+        lines.extend([
+            "",
+            "ℹ️ Tarixiy statistika hali saqlanmaydi.",
+        ])
+        text = "\n".join(lines)
+
+    else:
+        text = (
+            "🛠 <b>BOT EGASI PANELI</b>\n\n"
+            "Kerakli bo'limni tugma orqali tanlang.\n\n"
+            f"👤 Foydalanuvchilar: <b>{users_count}</b>\n"
+            f"🏘 Guruhlar: <b>{len(group_ids)}</b>\n"
+            f"🎮 Faol o'yinlar: <b>{len(GAMES)}</b>"
+        )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=panel_keyboard(),
+        )
+        return
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "⬅️ Panelga qaytish",
+                    callback_data="panel:home",
+                )
+            ]
+        ]),
+        disable_web_page_preview=True,
+    )
+
+
 async def cmd_emps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     msg = update.effective_message
@@ -1524,10 +1834,14 @@ def person_name(user_id):
         "SELECT first_name, username FROM users WHERE user_id=?",
         (user_id,),
     ).fetchone()
-    if not row:
-        return f"ID {user_id}"
-    return ("@" + row[1]) if row[1] else (row[0] or f"ID {user_id}")
 
+    if row:
+        display_name = row[0] or row[1] or "Foydalanuvchi"
+    else:
+        display_name = "Foydalanuvchi"
+
+    display_name = html.escape(str(display_name))
+    return f'<a href="tg://user?id={user_id}">{display_name}</a>'
 
 def gender_keyboard():
     return InlineKeyboardMarkup([[
@@ -1551,9 +1865,9 @@ async def notify_pair_owners(application, request_id, title):
     people = ""
     if row:
         people = (
-            f"\\n👤 Arizachi: {person_name(row[0])} (ID: {row[0]})"
+            f"\n👤 Arizachi: {person_name(row[0])} (ID: {row[0]})"
             + (
-                f"\\n👥 Ikkinchi tomon: {person_name(row[1])} (ID: {row[1]})"
+                f"\n👥 Ikkinchi tomon: {person_name(row[1])} (ID: {row[1]})"
                 if row[1] else ""
             )
         )
@@ -1563,7 +1877,7 @@ async def notify_pair_owners(application, request_id, title):
         try:
             await application.bot.send_message(
                 chat_id=owner_id,
-                text=f"📨 <b>{title}</b>\\nAriza raqami: {request_id}{people}",
+                text=f"📨 <b>{title}</b>\nAriza raqami: {request_id}{people}",
                 reply_markup=kb,
             )
             sent += 1
@@ -1605,7 +1919,7 @@ async def create_rel_request(application, request_type, requester_id,
         try:
             await application.bot.send_message(
                 chat_id=target_id,
-                text=f"💔 <b>Ajrashish so‘rovi</b>\\n"
+                text=f"💔 <b>Ajrashish so‘rovi</b>\n"
                      f"{person_name(requester_id)} siz bilan ajrashishni so‘radi. "
                      "Rozilik bildirasizmi?",
                 reply_markup=kb,
@@ -1737,27 +2051,50 @@ async def cmd_juftim(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_juftliklar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     msg = update.effective_message
+
     if not chat or not msg:
         return
+
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         await msg.reply_text("ℹ️ /juftliklar buyrug‘ini guruhda ishlating.")
         return
 
     rows = db().execute(
-        """SELECT user1_id, user2_id, started_at FROM pairs
-           WHERE group_id=? AND status='active'
-           ORDER BY started_at""",
-        (chat.id,),
+        """
+        SELECT user1_id, user2_id, started_at
+        FROM pairs
+        WHERE status='active'
+        ORDER BY started_at
+        """
     ).fetchall()
-    if not rows:
-        await msg.reply_text("💔 Bu guruhda hali juftliklar yo‘q.")
-        return
 
     lines = ["💞 <b>Guruh juftliklari</b>\n"]
-    for i, row in enumerate(rows, 1):
-        lines.append(f"{i}. {person_name(row[0])} ❤️ {person_name(row[1])}")
-    await msg.reply_text("\n".join(lines))
+    count = 0
 
+    for row in rows:
+        user1_id, user2_id = row[0], row[1]
+        present = False
+
+        for uid in (user1_id, user2_id):
+            try:
+                member = await context.bot.get_chat_member(chat.id, uid)
+                if member.status not in ("left", "kicked"):
+                    present = True
+                    break
+            except TelegramError:
+                continue
+
+        if present:
+            count += 1
+            lines.append(
+                f"{count}. {person_name(user1_id)} ❤️ {person_name(user2_id)}"
+            )
+
+    if count == 0:
+        await msg.reply_text("💔 Bu guruh a’zolari orasida faol juftlik topilmadi.")
+        return
+
+    await msg.reply_text("\n".join(lines))
 
 async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -2243,9 +2580,12 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         kb = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("4×4", callback_data="m:size:4"),
-                InlineKeyboardButton("6×6", callback_data="m:size:6"),
-            ]
+                InlineKeyboardButton("🐾 Hayvonlar", callback_data="m:cat:animals"),
+                InlineKeyboardButton("🍕 Taomlar", callback_data="m:cat:food"),
+            ],
+            [
+                InlineKeyboardButton("😀 Yuzlar", callback_data="m:cat:faces"),
+            ],
         ])
         await edit(
             context.bot, chat_id, msg.message_id,
@@ -2262,11 +2602,11 @@ MEMORY_LOBBY_TTL = 180
 MEMORY_GAME_TTL = 900
 MEMORY_HIDE_DELAY = 0.9
 
-MEMORY_EMOJIS = [
-    "🐶", "🐱", "🦊", "🐼", "🐸", "🐵", "🦁", "🐯", "🐨",
-    "🐷", "🐰", "🦄", "🐲", "🍎", "🍕", "🍔", "⚽", "🏀",
-    "🎲", "🎯", "🚀", "🌟", "🔥", "💎", "🎵", "🌈",
-]
+MEMORY_EMOJI_CATEGORIES = {
+    "animals": "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🐤 🦆 🦅 🦉 🦇 🐺 🐗 🐴 🦄 🐝 🪲 🐞 🦋 🐌 🐢 🐍 🦎 🦂 🦀 🦑 🐙 🦐 🐠 🐟 🐬 🐳 🦈 🐊 🐘 🦒 🦓 🦍 🦛 🦘 🐪 🐫 🦙 🦌 🐿️ 🦔 🦚 🦜 🦢 🦩 🦃 🪿 🦦 🦥 🦨 🦡 🦫 🦬 🦣 🐄 🐎 🐑 🐐 🐕 🐈 🐓 🦮".split(),
+    "food": "🍎 🍏 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍈 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🍆 🥑 🥦 🥬 🥒 🌶️ 🌽 🥕 🧄 🧅 🥔 🍠 🥐 🥯 🍞 🥖 🥨 🧀 🥚 🍳 🧈 🥞 🧇 🥓 🍗 🍖 🌭 🍔 🍟 🍕 🥪 🌮 🌯 🥙 🧆 🍝 🍜 🍲 🍛 🍣 🍱 🥟 🍤 🍙 🍚 🍘 🍥 🥮 🍢 🍡 🍧 🍨 🍦 🥧 🧁 🍰 🎂 🍮 🍭 🍬 🍫 🍿 🍩 🍪 🥛 🧋 ☕ 🍵 🧃 🥤 🧉 🥗 🥘 🫕 🥫 🥜 🌰 🍯 🥠 🥡".split(),
+    "faces": "😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 🫠 😉 😊 😇 🥰 😍 🤩 😘 😗 ☺️ 😚 😙 🥲 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🫢 🫣 🤫 🤔 🫡 🤐 🤨 😐 😑 😶 🫥 😏 😒 🙄 😬 😮‍💨 🤥 🫨 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🥵 🥶 🥴 😵 🤯 🤠 🥳 🥸 😎 🤓 🧐 😕 🫤 😟 🙁 ☹️ 😮 😯 😲 😳 🥺 🥹 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 ☠️ 💩 🤡 👻 👽 🤖 🎃".split(),
+}
 
 MEMORY_TEXT = {
     "uz": {
@@ -2370,13 +2710,15 @@ def memory_lobby_text(chat_id, game):
     )
 
 
-def memory_make_board(size):
+def memory_make_board(size, category="animals"):
     pairs = (size * size) // 2
-    emojis = random.sample(MEMORY_EMOJIS, pairs)
+    pool = MEMORY_EMOJI_CATEGORIES.get(
+        category, MEMORY_EMOJI_CATEGORIES["animals"]
+    )
+    emojis = random.sample(pool, pairs)
     values = emojis * 2
     random.shuffle(values)
     return values
-
 
 def memory_keyboard(game):
     size = game["size"]
@@ -2471,6 +2813,23 @@ async def memory_finish(context, chat_id, game):
 
 async def cb_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
+    if not q or not q.message:
+        return
+
+    chat_id = q.message.chat.id
+    game = GAMES.get(chat_id)
+
+    if not game or game.get("type") != "memory":
+        await _cb_memory_locked(update, context)
+        return
+
+    lock = game.setdefault("_callback_lock", asyncio.Lock())
+    async with lock:
+        await _cb_memory_locked(update, context)
+
+
+async def _cb_memory_locked(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
     chat_id = q.message.chat.id
     user = q.from_user
     data = q.data
@@ -2479,6 +2838,36 @@ async def cb_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not game:
         await q.answer(memory_t(chat_id, "waiting"), show_alert=True)
+        return
+
+    # Emoji kategoriyasini tanlash
+    if data.startswith("m:cat:"):
+        if game["state"] != "setup":
+            await q.answer("Bu o'yin bosqichi tugagan.", show_alert=True)
+            return
+
+        if user.id != game["owner"]:
+            await q.answer("Faqat o'yinni ochgan odam tanlay oladi.", show_alert=True)
+            return
+
+        category = data.rsplit(":", 1)[1]
+        if category not in MEMORY_EMOJI_CATEGORIES:
+            await q.answer("Kategoriya topilmadi.", show_alert=True)
+            return
+
+        game["category"] = category
+        await q.answer()
+
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("4×4", callback_data="m:size:4"),
+                InlineKeyboardButton("6×6", callback_data="m:size:6"),
+            ]
+        ])
+        await edit(
+            context.bot, chat_id, game["msg_id"],
+            memory_t(chat_id, "choose"), kb
+        )
         return
 
     # Maydon tanlash
@@ -2537,7 +2926,7 @@ async def cb_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         game["state"] = "play"
-        game["board"] = memory_make_board(game["size"])
+        game["board"] = memory_make_board(game["size"], game.get("category", "animals"))
         game["revealed"] = set()
         game["locked"] = set()
         game["scores"] = {uid: 0 for uid in game["names"]}
@@ -4168,6 +4557,7 @@ def main():
     )
 
     commands = [
+        (["panel"], cmd_panel),
         (["start"], cmd_start),
         (["menyu"], cmd_menyu),
         (["juft"], cmd_juft),
@@ -4186,6 +4576,7 @@ def main():
     for names, handler in commands:
         app.add_handler(CommandHandler(names, handler))
 
+    app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^panel:"))
     app.add_handler(CallbackQueryHandler(cb_memory, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|menu)$"))
     app.add_handler(InlineQueryHandler(secret_inline))

@@ -1314,7 +1314,7 @@ FAMILY_TEXT = {
         "ask_gender": "👶 Farzandingiz uchun jinsni tanlang:",
         "boy": "👦 O‘g‘il",
         "girl": "👧 Qiz",
-        "ask_name": "Ism tanlang:",
+        "ask_name": "👶 Farzandingizning ismini yozing:",
         "request": "👶 <b>Farzand so‘rovi</b>\n{parent} siz bilan farzand ko‘rishni taklif qilmoqda.\nJins: <b>{gender}</b>\nIsm: <b>{name}</b>\n\nRozimisiz? Rozilikdan so‘ng farzand 48 soat ichida yetkaziladi.",
         "yes": "✅ Roziman",
         "no": "❌ Rad etaman",
@@ -1336,7 +1336,7 @@ FAMILY_TEXT = {
         "ask_gender": "👶 Choose your child's gender:",
         "boy": "👦 Boy",
         "girl": "👧 Girl",
-        "ask_name": "Choose a name:",
+        "ask_name": "👶 Enter your child’s name:",
         "request": "👶 <b>Child request</b>\n{parent} wants to have a child with you.\nGender: <b>{gender}</b>\nName: <b>{name}</b>\n\nDo you agree? After consent, the child will arrive within 48 hours.",
         "yes": "✅ Agree",
         "no": "❌ Decline",
@@ -1358,7 +1358,7 @@ FAMILY_TEXT = {
         "ask_gender": "👶 Выберите пол ребёнка:",
         "boy": "👦 Мальчик",
         "girl": "👧 Девочка",
-        "ask_name": "Выберите имя:",
+        "ask_name": "👶 Напишите имя вашего ребёнка:",
         "request": "👶 <b>Предложение о ребёнке</b>\n{parent} предлагает завести ребёнка вместе.\nПол: <b>{gender}</b>\nИмя: <b>{name}</b>\n\nСогласны? После согласия ребёнок появится в течение 48 часов.",
         "yes": "✅ Согласен(на)",
         "no": "❌ Отказать",
@@ -1380,7 +1380,7 @@ FAMILY_TEXT = {
         "ask_gender": "👶 Баланың жынысын таңдаңыз:",
         "boy": "👦 Ұл",
         "girl": "👧 Қыз",
-        "ask_name": "Есім таңдаңыз:",
+        "ask_name": "👶 Балаңыздың атын жазыңыз:",
         "request": "👶 <b>Бала туралы ұсыныс</b>\n{parent} сізбен бірге бала сүюді ұсынады.\nЖынысы: <b>{gender}</b>\nЕсімі: <b>{name}</b>\n\nКелісесіз бе? Келісімнен кейін бала 48 сағат ішінде жеткізіледі.",
         "yes": "✅ Келісемін",
         "no": "❌ Бас тарту",
@@ -1480,13 +1480,7 @@ async def handle_family_start(update, context, payload):
             return True
         with db():
             db().execute("UPDATE child_requests SET gender=? WHERE id=?", (gender, rid))
-        lang = family_lang(user.id)
-        names = CHILD_NAMES[gender][lang]
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(name, url=family_url(context, f"childname_{rid}_{idx}"))]
-            for idx, name in enumerate(names)
-        ])
-        await msg.reply_text(family_text(user.id, "ask_name"), reply_markup=kb)
+        await msg.reply_text(family_text(user.id, "ask_name"))
         return True
     if payload.startswith("childname_"):
         parts = payload.split("_")
@@ -4677,8 +4671,94 @@ async def cmd_ariza(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat and update.effective_chat.type == ChatType.PRIVATE:
-        await career_handle_birth(update, context)
+    if not update.effective_chat or update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg or not msg.text:
+        return
+
+    child = db().execute(
+        """SELECT id,partner_id,pair_id,gender
+           FROM child_requests
+           WHERE requester_id=? AND status='selecting'
+           AND gender IN ('boy','girl') AND child_name IS NULL
+           ORDER BY id DESC LIMIT 1""",
+        (user.id,),
+    ).fetchone()
+
+    if child:
+        name = msg.text.strip()
+        if not name or len(name) > 40:
+            await msg.reply_text(family_text(user.id, "ask_name"))
+            return
+
+        rid, partner_id, pair_id, gender = child
+        pair = active_pair(user.id)
+        if not pair or pair[0] != pair_id or family_child_count(pair_id) >= 5:
+            await msg.reply_text(family_text(user.id, "no_pair"))
+            return
+
+        with db():
+            db().execute(
+                "UPDATE child_requests SET child_name=?,status='pending' WHERE id=?",
+                (name, rid),
+            )
+
+        request_text = family_text(
+            partner_id, "request",
+            parent=escape(person_name(user.id)),
+            gender=escape(child_gender_label(partner_id, gender)),
+            name=escape(name),
+        )
+
+        if user.id in CAREER_OWNER_IDS or partner_id in CAREER_OWNER_IDS:
+            request_text = request_text.replace(
+                "Rozilikdan so‘ng farzand 48 soat ichida yetkaziladi.",
+                "Owner juftliklari uchun rozilikdan so‘ng farzand kutishsiz yetkaziladi.",
+            )
+            request_text = request_text.replace(
+                "After consent, the child will arrive within 48 hours.",
+                "For owner couples, the child arrives without a 48-hour wait after consent.",
+            )
+            request_text = request_text.replace(
+                "После согласия ребёнок появится в течение 48 часов.",
+                "Для пар с владельцем ребёнок появится сразу после согласия.",
+            )
+            request_text = request_text.replace(
+                "Келісімнен кейін бала 48 сағат ішінде жеткізіледі.",
+                "Иесі бар жұптарға бала келісімнен кейін күтусіз жеткізіледі.",
+            )
+
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                family_text(partner_id, "yes"),
+                callback_data=f"family:consent:yes:{rid}",
+            ),
+            InlineKeyboardButton(
+                family_text(partner_id, "no"),
+                callback_data=f"family:consent:no:{rid}",
+            ),
+        ]])
+
+        try:
+            await context.bot.send_message(
+                partner_id, request_text, reply_markup=kb
+            )
+        except TelegramError:
+            with db():
+                db().execute(
+                    "UPDATE child_requests SET child_name=NULL,status='selecting' WHERE id=?",
+                    (rid,),
+                )
+            await msg.reply_text(family_text(user.id, "need_start"))
+            return
+
+        await msg.reply_text(family_text(user.id, "sent"))
+        return
+
+    await career_handle_birth(update, context)
 
 
 

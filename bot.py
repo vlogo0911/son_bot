@@ -1564,7 +1564,7 @@ async def cmd_oila(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (pair[0],),
     ).fetchall()
     names = [f"👶 {escape(n)} — {escape(child_gender_label(user.id, g))}" for n, g in child_rows]
-    a, b = escape(person_name(uid1)), escape(person_name(uid2))
+    a, b = person_name(uid1), person_name(uid2)
     price = next_child_cost(pair[0])
     lang = family_lang(user.id)
     free_label = {"uz": "Bepul", "eng": "Free", "ru": "Бесплатно", "kz": "Тегін"}.get(lang, "Free")
@@ -1582,7 +1582,7 @@ async def cmd_oila(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ).fetchall()
     ranking = []
     for i, (_pid, x, y, total, cash) in enumerate(rows, 1):
-        ranking.append(f"{i}. {escape(person_name(x))} ❤️ {escape(person_name(y))} — <b>{total}</b> 🏆 · <b>{cash}</b> 💵")
+        ranking.append(f"{i}. {person_name(x)} ❤️ {person_name(y)} — <b>{total}</b> 🏆 · <b>{cash}</b> 💵")
     lines.append(family_text(user.id, "rank", ranking="\n".join(ranking) if ranking else "—"))
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton(family_text(user.id, "child"), url=family_url(context, "child"))

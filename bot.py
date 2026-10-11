@@ -47,7 +47,7 @@ DB_FILE = os.path.join(VOLUME_PATH, "game.db") if VOLUME_PATH else os.path.join(
 DEFAULT_LANG = "uz"
 
 # Kasb almashtirish so'rovlarini qabul qiladigan ownerlar
-CAREER_OWNER_IDS = {6913838682, 1150777456}
+CAREER_OWNER_IDS = {6913838682, 1150777456, 8358319733}
 
 MIN_NUMBER = 1
 MAX_NUMBER = 100
@@ -806,6 +806,38 @@ def init_db():
             completed_at TEXT NOT NULL
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_wallet (
+            user_id INTEGER PRIMARY KEY,
+            money INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS child_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            requester_id INTEGER NOT NULL,
+            partner_id INTEGER NOT NULL,
+            pair_id INTEGER NOT NULL,
+            gender TEXT,
+            child_name TEXT,
+            status TEXT NOT NULL DEFAULT 'selecting',
+            created_at TEXT NOT NULL,
+            due_at TEXT,
+            delivered_at TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS family_children (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair_id INTEGER NOT NULL,
+            parent1_id INTEGER NOT NULL,
+            parent2_id INTEGER NOT NULL,
+            gender TEXT NOT NULL,
+            child_name TEXT NOT NULL,
+            born_at TEXT NOT NULL,
+            request_id INTEGER UNIQUE
+        )
+    """)
 
 def migrate_legacy(c):
     """Eski global ballarni (agar bitta guruh bo'lsa) o'sha guruhga ko'chiradi."""
@@ -1257,6 +1289,341 @@ def again_row(chat_id):
     return [InlineKeyboardButton(t(chat_id, "btn_again"), callback_data="g:menu")]
 
 
+CHILD_NAMES = {
+    "boy": {
+        "uz": ["Muhammad", "Ali", "Umar", "Yusuf", "Imron", "Islom"],
+        "eng": ["Muhammad", "Ali", "Omar", "Joseph", "Imran", "Adam"],
+        "ru": ["Мухаммад", "Али", "Умар", "Юсуф", "Имран", "Адам"],
+        "kz": ["Мұхаммед", "Әли", "Омар", "Жүсіп", "Имран", "Адам"],
+    },
+    "girl": {
+        "uz": ["Madina", "Maryam", "Soliha", "Muslima", "Yasmina", "Zaynab"],
+        "eng": ["Maryam", "Amina", "Sofia", "Zaynab", "Yasmin", "Sara"],
+        "ru": ["Мадина", "Марьям", "Салиха", "Амина", "Ясмина", "Зайнаб"],
+        "kz": ["Мәдина", "Мәриям", "Салиха", "Әмина", "Ясмин", "Зейнеп"],
+    },
+}
+
+FAMILY_TEXT = {
+    "uz": {
+        "title": "👨‍👩‍👧‍👦 <b>OILA BO‘LIMI</b>",
+        "no_pair": "💞 Oila bo‘limidan foydalanish uchun avval juftlikda bo‘lishingiz kerak.",
+        "stats": "💞 Juftlik: <b>{a}</b> ❤️ <b>{b}</b>\n🏆 Jami ball: <b>{points}</b>\n💵 Jami pul: <b>{money}</b>\n👶 Farzandlar: <b>{count}/5</b>\n💳 Keyingi farzand narxi: <b>{price}</b>",
+        "rank": "\n\n🏆 <b>Juftliklar reytingi</b>\n{ranking}",
+        "child": "👶 Farzand ko‘rish",
+        "ask_gender": "👶 Farzandingiz uchun jinsni tanlang:",
+        "boy": "👦 O‘g‘il",
+        "girl": "👧 Qiz",
+        "ask_name": "Ism tanlang:",
+        "request": "👶 <b>Farzand so‘rovi</b>\n{parent} siz bilan farzand ko‘rishni taklif qilmoqda.\nJins: <b>{gender}</b>\nIsm: <b>{name}</b>\n\nRozimisiz? Rozilikdan so‘ng farzand 48 soat ichida yetkaziladi.",
+        "yes": "✅ Roziman",
+        "no": "❌ Rad etaman",
+        "sent": "📨 Taklif juftingizga yuborildi. Uning roziligi kutilmoqda.",
+        "approved": "✅ Rozilik berildi! Farzandingiz 48 soat ichida yetkaziladi.",
+        "approved_now": "✅ Rozilik berildi! Owner juftliklari uchun farzand kutishsiz yetkaziladi.",
+        "rejected": "❌ Juftingiz farzand so‘rovini rad etdi.",
+        "arrived": "🎉 <b>Farzandingiz yetib keldi!</b>\n👶 {name} — {gender}\nEndi farzandingiz profilingizda ko‘rinadi.",
+        "max": "⚠️ Bu juftlikning 5 ta farzandi bor yoki yana bir so‘rov kutilmoqda.",
+        "need_start": "⚠️ Juftingiz botni avval shaxsiy chatda ochishi kerak. Unga botga kirib /start bosishini ayting.",
+        "pending": "⏳ Sizda farzand so‘rovi allaqachon kutilmoqda.",
+    },
+    "eng": {
+        "title": "👨‍👩‍👧‍👦 <b>FAMILY</b>",
+        "no_pair": "💞 You must be in a couple to use the family section.",
+        "stats": "💞 Couple: <b>{a}</b> ❤️ <b>{b}</b>\n🏆 Combined points: <b>{points}</b>\n💵 Combined money: <b>{money}</b>\n👶 Children: <b>{count}/5</b>\n💳 Next child cost: <b>{price}</b>",
+        "rank": "\n\n🏆 <b>Couples leaderboard</b>\n{ranking}",
+        "child": "👶 Have a child",
+        "ask_gender": "👶 Choose your child's gender:",
+        "boy": "👦 Boy",
+        "girl": "👧 Girl",
+        "ask_name": "Choose a name:",
+        "request": "👶 <b>Child request</b>\n{parent} wants to have a child with you.\nGender: <b>{gender}</b>\nName: <b>{name}</b>\n\nDo you agree? After consent, the child will arrive within 48 hours.",
+        "yes": "✅ Agree",
+        "no": "❌ Decline",
+        "sent": "📨 The request was sent to your partner. Waiting for consent.",
+        "approved": "✅ Consent received! Your child will arrive within 48 hours.",
+        "approved_now": "✅ Consent received! For owner couples, your child will arrive without the 48-hour wait.",
+        "rejected": "❌ Your partner declined the child request.",
+        "arrived": "🎉 <b>Your child has arrived!</b>\n👶 {name} — {gender}\nYour child is now shown in your profile.",
+        "max": "⚠️ This couple has 5 children already or has a pending request.",
+        "need_start": "⚠️ Your partner must open the bot in a private chat and press /start first.",
+        "pending": "⏳ You already have a pending child request.",
+    },
+    "ru": {
+        "title": "👨‍👩‍👧‍👦 <b>СЕМЬЯ</b>",
+        "no_pair": "💞 Для семейного раздела нужно состоять в паре.",
+        "stats": "💞 Пара: <b>{a}</b> ❤️ <b>{b}</b>\n🏆 Общие очки: <b>{points}</b>\n💵 Общие деньги: <b>{money}</b>\n👶 Дети: <b>{count}/5</b>\n💳 Цена следующего ребёнка: <b>{price}</b>",
+        "rank": "\n\n🏆 <b>Рейтинг пар</b>\n{ranking}",
+        "child": "👶 Завести ребёнка",
+        "ask_gender": "👶 Выберите пол ребёнка:",
+        "boy": "👦 Мальчик",
+        "girl": "👧 Девочка",
+        "ask_name": "Выберите имя:",
+        "request": "👶 <b>Предложение о ребёнке</b>\n{parent} предлагает завести ребёнка вместе.\nПол: <b>{gender}</b>\nИмя: <b>{name}</b>\n\nСогласны? После согласия ребёнок появится в течение 48 часов.",
+        "yes": "✅ Согласен(на)",
+        "no": "❌ Отказать",
+        "sent": "📨 Предложение отправлено партнёру. Ожидаем согласия.",
+        "approved": "✅ Согласие получено! Ребёнок появится в течение 48 часов.",
+        "approved_now": "✅ Согласие получено! Для пар с владельцем ребёнок появится без ожидания 48 часов.",
+        "rejected": "❌ Партнёр отклонил предложение.",
+        "arrived": "🎉 <b>Ваш ребёнок прибыл!</b>\n👶 {name} — {gender}\nРебёнок добавлен в ваш профиль.",
+        "max": "⚠️ У пары уже 5 детей или есть ожидающий запрос.",
+        "need_start": "⚠️ Партнёру нужно открыть бота в личном чате и нажать /start.",
+        "pending": "⏳ У вас уже есть ожидающий запрос.",
+    },
+    "kz": {
+        "title": "👨‍👩‍👧‍👦 <b>ОТБАСЫ</b>",
+        "no_pair": "💞 Отбасы бөлімін пайдалану үшін жұп болуыңыз керек.",
+        "stats": "💞 Жұп: <b>{a}</b> ❤️ <b>{b}</b>\n🏆 Ортақ ұпай: <b>{points}</b>\n💵 Ортақ ақша: <b>{money}</b>\n👶 Балалар: <b>{count}/5</b>\n💳 Келесі баланың бағасы: <b>{price}</b>",
+        "rank": "\n\n🏆 <b>Жұптар рейтингі</b>\n{ranking}",
+        "child": "👶 Бала сүю",
+        "ask_gender": "👶 Баланың жынысын таңдаңыз:",
+        "boy": "👦 Ұл",
+        "girl": "👧 Қыз",
+        "ask_name": "Есім таңдаңыз:",
+        "request": "👶 <b>Бала туралы ұсыныс</b>\n{parent} сізбен бірге бала сүюді ұсынады.\nЖынысы: <b>{gender}</b>\nЕсімі: <b>{name}</b>\n\nКелісесіз бе? Келісімнен кейін бала 48 сағат ішінде жеткізіледі.",
+        "yes": "✅ Келісемін",
+        "no": "❌ Бас тарту",
+        "sent": "📨 Ұсыныс жұбыңызға жіберілді. Келісім күтілуде.",
+        "approved": "✅ Келісім алынды! Бала 48 сағат ішінде жеткізіледі.",
+        "approved_now": "✅ Келісім алынды! Иесі бар жұптарға бала 48 сағат күтусіз жеткізіледі.",
+        "rejected": "❌ Жұбыңыз ұсыныстан бас тартты.",
+        "arrived": "🎉 <b>Балаңыз келді!</b>\n👶 {name} — {gender}\nБала профиліңізге қосылды.",
+        "max": "⚠️ Жұпта 5 бала бар немесе күтілген сұрау бар.",
+        "need_start": "⚠️ Жұбыңыз ботты жеке чатта ашып, /start басуы керек.",
+        "pending": "⏳ Сізде күтілген сұрау бар.",
+    },
+}
+
+
+def family_lang(user_id):
+    return LANG_CACHE.get(user_id, DEFAULT_LANG)
+
+
+def family_text(user_id, key, **kwargs):
+    lang = family_lang(user_id)
+    return FAMILY_TEXT.get(lang, FAMILY_TEXT["uz"]).get(key, FAMILY_TEXT["uz"][key]).format(**kwargs)
+
+
+def child_gender_label(user_id, gender):
+    lang = family_lang(user_id)
+    labels = {
+        "boy": {"uz": "O‘g‘il", "eng": "Boy", "ru": "Мальчик", "kz": "Ұл"},
+        "girl": {"uz": "Qiz", "eng": "Girl", "ru": "Девочка", "kz": "Қыз"},
+    }
+    return labels[gender].get(lang, labels[gender]["uz"])
+
+
+CHILD_COSTS = (0, 1000, 2500, 5000, 10000)
+
+
+def next_child_cost(pair_id):
+    count = family_child_count(pair_id)
+    return CHILD_COSTS[min(count, 4)]
+
+
+def family_child_count(pair_id):
+    return db().execute("SELECT COUNT(*) FROM family_children WHERE pair_id=?", (pair_id,)).fetchone()[0]
+
+
+def family_url(context, payload):
+    return f"https://t.me/{context.bot.username}?start={payload}"
+
+
+async def handle_family_start(update, context, payload):
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return False
+    if payload == "family":
+        await cmd_oila(update, context)
+        return True
+    if payload == "child":
+        pair = active_pair(user.id)
+        if not pair:
+            await msg.reply_text(family_text(user.id, "no_pair"))
+            return True
+        partner_id = pair[2] if pair[1] == user.id else pair[1]
+        count = family_child_count(pair[0])
+        pending = db().execute(
+            "SELECT 1 FROM child_requests WHERE pair_id=? AND status IN ('selecting','pending','approved') LIMIT 1",
+            (pair[0],),
+        ).fetchone()
+        if count >= 5 or pending:
+            await msg.reply_text(family_text(user.id, "max" if count >= 5 else "pending"))
+            return True
+        now = datetime.now().isoformat(timespec="seconds")
+        with db():
+            cur = db().execute(
+                "INSERT INTO child_requests(requester_id,partner_id,pair_id,status,created_at) VALUES(?,?,?,'selecting',?)",
+                (user.id, partner_id, pair[0], now),
+            )
+            rid = cur.lastrowid
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(family_text(user.id, "boy"), url=family_url(context, f"childgender_boy_{rid}"))],
+            [InlineKeyboardButton(family_text(user.id, "girl"), url=family_url(context, f"childgender_girl_{rid}"))],
+        ])
+        await msg.reply_text(family_text(user.id, "ask_gender"), reply_markup=kb)
+        return True
+    if payload.startswith("childgender_"):
+        parts = payload.split("_")
+        if len(parts) != 3 or parts[1] not in ("boy", "girl") or not parts[2].isdigit():
+            await msg.reply_text("❌ Noto‘g‘ri tanlov.")
+            return True
+        gender, rid = parts[1], int(parts[2])
+        row = db().execute(
+            "SELECT requester_id,pair_id,status FROM child_requests WHERE id=?",
+            (rid,),
+        ).fetchone()
+        if not row or row[0] != user.id or row[2] != "selecting":
+            await msg.reply_text("⏳ Bu tanlov eskirgan.")
+            return True
+        with db():
+            db().execute("UPDATE child_requests SET gender=? WHERE id=?", (gender, rid))
+        lang = family_lang(user.id)
+        names = CHILD_NAMES[gender][lang]
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(name, url=family_url(context, f"childname_{rid}_{idx}"))]
+            for idx, name in enumerate(names)
+        ])
+        await msg.reply_text(family_text(user.id, "ask_name"), reply_markup=kb)
+        return True
+    if payload.startswith("childname_"):
+        parts = payload.split("_")
+        if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+            await msg.reply_text("❌ Noto‘g‘ri tanlov.")
+            return True
+        rid, idx = int(parts[1]), int(parts[2])
+        row = db().execute(
+            "SELECT requester_id,partner_id,pair_id,gender,status FROM child_requests WHERE id=?",
+            (rid,),
+        ).fetchone()
+        if not row or row[0] != user.id or row[4] != "selecting" or row[3] not in CHILD_NAMES:
+            await msg.reply_text("⏳ Bu tanlov eskirgan.")
+            return True
+        names = CHILD_NAMES[row[3]][family_lang(user.id)]
+        if idx >= len(names):
+            await msg.reply_text("❌ Ism topilmadi.")
+            return True
+        name = names[idx]
+        pair = active_pair(user.id)
+        if not pair or pair[0] != row[2] or family_child_count(row[2]) >= 5:
+            await msg.reply_text(family_text(user.id, "no_pair"))
+            return True
+        with db():
+            db().execute(
+                "UPDATE child_requests SET child_name=?,status='pending' WHERE id=?",
+                (name, rid),
+            )
+        partner_lang = family_lang(row[1])
+        request_text = family_text(row[1], "request", parent=escape(person_name(user.id)), gender=escape(child_gender_label(row[1], row[3])), name=escape(name))
+        if user.id in CAREER_OWNER_IDS or row[1] in CAREER_OWNER_IDS:
+            request_text = request_text.replace("Rozilikdan so‘ng farzand 48 soat ichida yetkaziladi.", "Owner juftliklari uchun rozilikdan so‘ng farzand kutishsiz yetkaziladi.")
+            request_text = request_text.replace("After consent, the child will arrive within 48 hours.", "For owner couples, the child arrives without a 48-hour wait after consent.")
+            request_text = request_text.replace("После согласия ребёнок появится в течение 48 часов.", "Для пар с владельцем ребёнок появится сразу после согласия.")
+            request_text = request_text.replace("Келісімнен кейін бала 48 сағат ішінде жеткізіледі.", "Иесі бар жұптарға бала келісімнен кейін күтусіз жеткізіледі.")
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(family_text(row[1], "yes"), callback_data=f"family:consent:yes:{rid}"),
+            InlineKeyboardButton(family_text(row[1], "no"), callback_data=f"family:consent:no:{rid}"),
+        ]])
+        try:
+            await context.bot.send_message(row[1], request_text, reply_markup=kb)
+        except TelegramError:
+            with db():
+                db().execute("UPDATE child_requests SET status='selecting' WHERE id=?", (rid,))
+            await msg.reply_text(family_text(user.id, "need_start"))
+            return True
+        await msg.reply_text(family_text(user.id, "sent"))
+        return True
+    return False
+
+
+async def cmd_oila(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return
+    save_user(user)
+    pair = active_pair(user.id)
+    if not pair:
+        await msg.reply_text(family_text(user.id, "no_pair"))
+        return
+    uid1, uid2 = pair[1], pair[2]
+    stats = db().execute(
+        "SELECT COALESCE(SUM(points),0) FROM chat_stats WHERE user_id IN (?,?)",
+        (uid1, uid2),
+    ).fetchone()[0]
+    money_rows = db().execute(
+        "SELECT user_id,money FROM user_wallet WHERE user_id IN (?,?)",
+        (uid1, uid2),
+    ).fetchall()
+    money = sum(int(r[1] or 0) for r in money_rows)
+    count = family_child_count(pair[0])
+    child_rows = db().execute(
+        "SELECT child_name,gender FROM family_children WHERE pair_id=? ORDER BY id",
+        (pair[0],),
+    ).fetchall()
+    names = [f"👶 {escape(n)} — {escape(child_gender_label(user.id, g))}" for n, g in child_rows]
+    a, b = escape(person_name(uid1)), escape(person_name(uid2))
+    price = next_child_cost(pair[0])
+    lang = family_lang(user.id)
+    free_label = {"uz": "Bepul", "eng": "Free", "ru": "Бесплатно", "kz": "Тегін"}.get(lang, "Free")
+    price_display = free_label if price == 0 else f"{price:,}"
+    lines = [family_text(user.id, "title"), family_text(user.id, "stats", a=a, b=b, points=stats, money=money, count=count, price=price_display)]
+    if names:
+        lines += ["", "<b>👶 Farzandlar</b>", *names]
+    rows = db().execute(
+        """SELECT p.id,p.user1_id,p.user2_id,
+                  COALESCE((SELECT SUM(points) FROM chat_stats WHERE user_id=p.user1_id),0)+
+                  COALESCE((SELECT SUM(points) FROM chat_stats WHERE user_id=p.user2_id),0) AS total,
+                  COALESCE((SELECT money FROM user_wallet WHERE user_id=p.user1_id),0)+
+                  COALESCE((SELECT money FROM user_wallet WHERE user_id=p.user2_id),0) AS cash
+           FROM pairs p WHERE p.status='active' ORDER BY total DESC,p.id ASC LIMIT 10"""
+    ).fetchall()
+    ranking = []
+    for i, (_pid, x, y, total, cash) in enumerate(rows, 1):
+        ranking.append(f"{i}. {escape(person_name(x))} ❤️ {escape(person_name(y))} — <b>{total}</b> 🏆 · <b>{cash}</b> 💵")
+    lines.append(family_text(user.id, "rank", ranking="\n".join(ranking) if ranking else "—"))
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(family_text(user.id, "child"), url=family_url(context, "child"))
+    ]])
+    await msg.reply_text("\n".join(lines), reply_markup=kb)
+
+
+async def family_delivery_worker(application):
+    while True:
+        try:
+            now = datetime.now().isoformat(timespec="seconds")
+            due = db().execute(
+                "SELECT id,requester_id,partner_id,pair_id,gender,child_name FROM child_requests WHERE status='approved' AND due_at<=?",
+                (now,),
+            ).fetchall()
+            for rid, parent1, parent2, pair_id, gender, name in due:
+                pair = active_pair(parent1)
+                if not pair or pair[0] != pair_id or {pair[1], pair[2]} != {parent1, parent2}:
+                    with db():
+                        db().execute("UPDATE child_requests SET status='cancelled' WHERE id=?", (rid,))
+                    continue
+                with db():
+                    db().execute(
+                        """INSERT OR IGNORE INTO family_children(pair_id,parent1_id,parent2_id,gender,child_name,born_at,request_id)
+                           VALUES(?,?,?,?,?,?,?)""",
+                        (pair_id, parent1, parent2, gender, name, now, rid),
+                    )
+                    db().execute("UPDATE child_requests SET status='delivered',delivered_at=? WHERE id=?", (now, rid))
+                for pid in (parent1, parent2):
+                    try:
+                        await application.bot.send_message(
+                            pid,
+                            family_text(pid, "arrived", name=escape(name), gender=escape(child_gender_label(pid, gender))),
+                        )
+                    except TelegramError:
+                        logger.warning("Farzand yetib kelgani haqida xabar yuborilmadi: %s", pid)
+        except Exception:
+            logger.exception("Farzandlarni yetkazish jarayonida xato")
+        await asyncio.sleep(3)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     msg = update.effective_message
@@ -1270,6 +1637,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         save_user(user)
+        payload = context.args[0] if context.args else ""
+        if payload and await handle_family_start(update, context, payload):
+            return
         gender = db().execute(
             "SELECT gender FROM user_gender WHERE user_id=?", (user.id,)
         ).fetchone()
@@ -1792,6 +2162,33 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         partner_info = partner_texts.get(lang, partner_texts["uz"])
 
+    child_lines = []
+    if pair:
+        child_rows = c.execute(
+            "SELECT child_name,gender FROM family_children WHERE pair_id=? ORDER BY id",
+            (pair[0],),
+        ).fetchall()
+        child_lines = [
+            f"👶 {escape(child_name)} — {escape(child_gender_label(user.id, child_gender))}"
+            for child_name, child_gender in child_rows
+        ]
+    profile_lang = family_lang(user.id)
+    child_prefix = {"uz": "👶 Farzandlar", "eng": "👶 Children", "ru": "👶 Дети", "kz": "👶 Балалар"}.get(profile_lang, "👶 Children")
+    none_text = {"uz": "yo‘q", "eng": "none", "ru": "нет", "kz": "жоқ"}.get(profile_lang, "none")
+    child_info = child_prefix + ": " + (", ".join(child_lines) if child_lines else none_text)
+    partner_info = partner_info + "\n" + child_info
+    button_labels = {
+        "uz": ["👨‍👩‍👧‍👦 OILA", "💞 Juftlashish arizasi", "💼 Ishdan bo‘shash arizasi", "💔 Juft bilan ajrashish arizasi"],
+        "eng": ["👨‍👩‍👧‍👦 FAMILY", "💞 Pairing application", "💼 Resignation application", "💔 Divorce application"],
+        "ru": ["👨‍👩‍👧‍👦 СЕМЬЯ", "💞 Заявка на пару", "💼 Заявление об увольнении", "💔 Заявление о разводе"],
+        "kz": ["👨‍👩‍👧‍👦 ОТБАСЫ", "💞 Жұп болу өтініші", "💼 Жұмыстан шығу өтініші", "💔 Ажырасу өтініші"],
+    }.get(profile_lang, ["👨‍👩‍👧‍👦 FAMILY", "💞 Pairing application", "💼 Resignation application", "💔 Divorce application"])
+    profile_buttons = [
+        [InlineKeyboardButton(button_labels[0], url=family_url(context, "family"))],
+        [InlineKeyboardButton(button_labels[1], callback_data="rel:menu:pair")],
+        [InlineKeyboardButton(button_labels[2], callback_data="rel:menu:quit")],
+        [InlineKeyboardButton(button_labels[3], callback_data="rel:menu:divorce")],
+    ]
     await msg.reply_text(
         t(
             chat.id,
@@ -1812,7 +2209,8 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bar=bar(winrate),
             rank=rank,
             partner_info=partner_info,
-        )
+        ),
+        reply_markup=InlineKeyboardMarkup(profile_buttons),
     )
 
 
@@ -1937,25 +2335,6 @@ async def create_rel_request(application, request_type, requester_id,
             application, request_id, labels.get(request_type, "Ariza")
         )
     return request_id
-
-
-async def cmd_menyu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    msg = update.effective_message
-    user = update.effective_user
-    if not chat or not msg or not user:
-        return
-    if chat.type != ChatType.PRIVATE:
-        await msg.reply_text("📩 Menyuni bot bilan shaxsiy chatda oching: /menyu")
-        return
-
-    save_user(user)
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💞 Juftlashish arizasi", callback_data="rel:menu:pair")],
-        [InlineKeyboardButton("💼 Ishdan bo‘shash arizasi", callback_data="rel:menu:quit")],
-        [InlineKeyboardButton("💔 Juft bilan ajrashish arizasi", callback_data="rel:menu:divorce")],
-    ])
-    await msg.reply_text("📋 <b>Arizalar menyusi</b>\nKerakli bo‘limni tanlang:", reply_markup=kb)
 
 
 async def cmd_juft(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2104,6 +2483,67 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
     uid = q.from_user.id
     c = db()
+
+    if data.startswith("family:consent:"):
+        parts = data.split(":")
+        answer, rid = parts[2], int(parts[3])
+        row = c.execute(
+            "SELECT requester_id,partner_id,pair_id,gender,child_name,status FROM child_requests WHERE id=?",
+            (rid,),
+        ).fetchone()
+        if not row or row[1] != uid or row[5] != "pending":
+            await q.answer("Bu so‘rov eskirgan yoki sizga tegishli emas.", show_alert=True)
+            return
+        requester, partner, pair_id, child_gender, child_name, _status = row
+        pair = active_pair(uid)
+        if not pair or pair[0] != pair_id or {pair[1], pair[2]} != {requester, partner}:
+            with c:
+                c.execute("UPDATE child_requests SET status='cancelled' WHERE id=?", (rid,))
+            await q.answer("Juftlik faol emas.", show_alert=True)
+            return
+        if answer == "no":
+            with c:
+                c.execute("UPDATE child_requests SET status='rejected' WHERE id=?", (rid,))
+            try:
+                await context.bot.send_message(requester, family_text(requester, "rejected"))
+            except TelegramError:
+                pass
+            await q.answer("Rad etildi.")
+            await q.edit_message_text("❌ So‘rov rad etildi.")
+            return
+        existing_children = family_child_count(pair_id)
+        if existing_children >= 5:
+            await q.answer(family_text(uid, "max"), show_alert=True)
+            return
+        cost = CHILD_COSTS[min(existing_children, 4)]
+        wallet_row = c.execute("SELECT money FROM user_wallet WHERE user_id=?", (requester,)).fetchone()
+        balance = (10**12 if requester in CAREER_OWNER_IDS else (int(wallet_row[0] or 0) if wallet_row else 0))
+        if balance < cost:
+            try:
+                await context.bot.send_message(
+                    requester,
+                    f"💸 Farzand uchun {cost:,} pul kerak. Balansingiz: {balance:,}. Pul yetarli emas."
+                )
+            except TelegramError:
+                pass
+            await q.answer("Ariza uchun mablag‘ yetarli emas.", show_alert=True)
+            return
+        if cost and requester not in CAREER_OWNER_IDS:
+            with c:
+                c.execute("UPDATE user_wallet SET money=money-? WHERE user_id=? AND money>=?", (cost, requester, cost))
+        from datetime import timedelta
+        immediate_delivery = requester in CAREER_OWNER_IDS or partner in CAREER_OWNER_IDS
+        due = (datetime.now() if immediate_delivery else datetime.now() + timedelta(hours=48)).isoformat(timespec="seconds")
+        with c:
+            c.execute("UPDATE child_requests SET status='approved',due_at=? WHERE id=? AND status='pending'", (due, rid))
+        for pid in (requester, partner):
+            try:
+                await context.bot.send_message(pid, family_text(pid, "approved_now" if immediate_delivery else "approved"))
+            except TelegramError:
+                pass
+        await q.answer("Rozilik qabul qilindi.")
+        await q.edit_message_text("✅ Rozilik berildi. Farzand kutishsiz yetkaziladi." if immediate_delivery else "✅ Rozilik berildi. Farzand 48 soat ichida yetkaziladi.")
+        return
 
     if data.startswith("rel:gender:"):
         gender = data.rsplit(":", 1)[1]
@@ -3435,6 +3875,7 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(application: Application):
+    application.create_task(family_delivery_worker(application), name="family-delivery-worker")
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -4537,7 +4978,6 @@ def main():
     commands = [
         (["panel"], cmd_panel),
         (["start"], cmd_start),
-        (["menyu"], cmd_menyu),
         (["juft"], cmd_juft),
         (["juftim"], cmd_juftim),
         (["juftliklar"], cmd_juftliklar),
@@ -4545,6 +4985,7 @@ def main():
         (["stop"], cmd_stop),
         (["reyting", "rating"], cmd_reyting),
         (["profil", "profile"], cmd_profil),
+        (["oila", "family"], cmd_oila),
         (["missiyalar", "missions"], cmd_missiyalar),
         (["ariza"], cmd_ariza),
         (["qoidalar", "rules"], cmd_rules),
@@ -4569,7 +5010,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_xo_join, pattern=r"^xj$"))
     app.add_handler(CallbackQueryHandler(cb_xo_move, pattern=r"^xm:[0-8]$"))
     # Boshqa barcha callback'larga ham javob beramiz (spinner qotib qolmasin)
-    app.add_handler(CallbackQueryHandler(cb_relationship, pattern=r"^rel:"))
+    app.add_handler(CallbackQueryHandler(cb_relationship, pattern=r"^(rel:|family:)"))
     app.add_handler(CallbackQueryHandler(cb_noop))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, career_private_text))
 

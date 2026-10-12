@@ -29,6 +29,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     Defaults,
@@ -5489,6 +5490,8 @@ SHOP_GIFTS = {"ring": ("💍 Uzuk", 100), "bear": ("🧸 Ayiqcha", 75),
 def init_economy():
     c = db()
     c.executescript("""
+    CREATE TABLE IF NOT EXISTS contest_config (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS money_contests (
       id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
       owner_id INTEGER NOT NULL, amount INTEGER NOT NULL, winners INTEGER NOT NULL,
@@ -5771,6 +5774,27 @@ async def cmd_pul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{person_name(recipient.id)}: {amount}$ yuborildi."
     )
 
+async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    event = update.my_chat_member
+    if not event or event.chat.type != ChatType.CHANNEL:
+        return
+
+    member = event.new_chat_member
+    if (
+        member.status == ChatMemberStatus.ADMINISTRATOR
+        and getattr(member, "can_post_messages", False)
+    ):
+        c = db()
+        with c:
+            c.execute(
+                """INSERT INTO contest_config(key, value)
+                   VALUES('contest_channel_id', ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                (str(event.chat.id),),
+            )
+        logger.info("Konkurs kanali avtomatik saqlandi: %s", event.chat.id)
+
+
 async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     user = update.effective_user
@@ -5791,6 +5815,22 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if winners > 1000 or total > 10**9:
         await msg.reply_text("Konkurs miqdori juda katta.")
+        return
+
+    settings = db().execute(
+        "SELECT value FROM contest_config WHERE key='contest_channel_id'"
+    ).fetchone()
+    if not settings:
+        await msg.reply_text(
+            "Avval botni konkurs kanalingizga administrator qilib qo'shing "
+            "va post yuborish huquqini bering."
+        )
+        return
+
+    try:
+        contest_channel_id = int(settings[0])
+    except (ValueError, TypeError):
+        await msg.reply_text("Konkurs kanali ID si noto'g'ri. Botni kanalga qayta admin qiling.")
         return
 
     owner = is_money_owner(user.id)
@@ -5834,8 +5874,9 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]])
 
     try:
-        contest_message = await msg.reply_text(
-            f"🎉 <b>KONKURS</b>\n"
+        contest_message = await context.bot.send_message(
+            chat_id=contest_channel_id,
+            text=f"🎉 <b>KONKURS</b>\n"
             f"Har bir g‘olibga: <b>{amount}$</b>\n"
             f"G‘oliblar: <b>0/{winners}</b>\n"
             "\n🏆 G‘oliblar ro‘yxati: hozircha yo‘q\n"
@@ -5844,7 +5885,7 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
         )
         with c:
-            c.execute("UPDATE money_contests SET message_id=? WHERE id=?", (contest_message.message_id, cid))
+            c.execute("UPDATE money_contests SET chat_id=?, message_id=? WHERE id=?", (contest_message.chat.id, contest_message.message_id, cid))
         await log_money_event(
             context.bot,
             "🎉 <b>KONKURS OCHILDI</b>\n"
@@ -6048,6 +6089,7 @@ def main():
     for names, handler in commands:
         app.add_handler(CommandHandler(names, handler))
 
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(cb_shop, pattern=r"^shop:"))
     app.add_handler(CallbackQueryHandler(cb_contest, pattern=r"^contest:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^panel:"))

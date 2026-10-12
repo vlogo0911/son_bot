@@ -5118,7 +5118,7 @@ async def cmd_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
       [InlineKeyboardButton({"uz":"💞 Juftimga","eng":"💞 To my partner","ru":"💞 Моей паре","kz":"💞 Жұбыма"}.get(lang,"💞 Juftimga"), callback_data="shop:partner"),
        InlineKeyboardButton({"uz":"👤 Boshqaga","eng":"👤 Someone else","ru":"👤 Другому","kz":"👤 Басқаға"}.get(lang,"👤 Boshqaga"), callback_data="shop:other")]
     ])
-    await update.effective_message.reply_text(f"{labels.get(lang,labels['uz'])}\n\n{who}", reply_markup=kb)
+    await update.effective_message.reply_text(f"{labels.get(lang, labels['uz'])}\n\n{who.get(lang, who['uz'])}", reply_markup=kb)
 
 async def show_gifts(chat_id, context, recipient_id):
     lang = family_lang(chat_id)

@@ -5533,7 +5533,7 @@ def main():
         (["reyting", "rating"], cmd_reyting),
         (["profil", "profile"], cmd_profil),
         (["oila", "family"], cmd_oila),
-        (["do‘kon", "dokon", "shop"], cmd_shop),
+        (["shop"], cmd_shop),
         (["pul"], cmd_pul),
         (["konkurs"], cmd_konkurs),
         (["missiyalar", "missions"], cmd_missiyalar),

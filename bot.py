@@ -1705,6 +1705,13 @@ def panel_keyboard():
         [
             InlineKeyboardButton("🏆 O'yin turlari statistikasi", callback_data="panel:games"),
         ],
+        [
+            InlineKeyboardButton("💣 Bankrot qilish", callback_data="panel:bankrupt"),
+            InlineKeyboardButton("💸 Pul yuborish", callback_data="panel:give"),
+        ],
+        [InlineKeyboardButton("📢 Ommaviy xabar", callback_data="panel:broadcast")],
+        [
+        ],
     ])
 
 
@@ -1773,6 +1780,69 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
+    if query.data == "panel:broadcast":
+        context.user_data["panel_broadcast_state"] = "waiting_text"
+        context.user_data.pop("panel_broadcast_pending", None)
+        await query.edit_message_text(
+            "📢 Barcha foydalanuvchilarga yuboriladigan matnni yuboring.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:broadcast_cancel")
+            ]]),
+        )
+        return
+
+    if query.data == "panel:broadcast_cancel":
+        context.user_data.pop("panel_broadcast_state", None)
+        context.user_data.pop("panel_broadcast_pending", None)
+        await query.edit_message_text(
+            "❎ Ommaviy xabar bekor qilindi.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")
+            ]]),
+        )
+        return
+
+    if query.data == "panel:broadcast_confirm":
+        text_to_send = context.user_data.get("panel_broadcast_pending")
+        if not text_to_send:
+            await query.edit_message_text("Xabar topilmadi. Qaytadan boshlang.")
+            return
+
+        context.user_data.pop("panel_broadcast_pending", None)
+        context.user_data.pop("panel_broadcast_state", None)
+
+        c = db()
+        try:
+            recipients = c.execute("SELECT user_id FROM users").fetchall()
+        finally:
+            c.close()
+
+        sent = 0
+        failed = 0
+        await query.edit_message_text(
+            f"📢 Yuborish boshlandi: {len(recipients)} foydalanuvchi."
+        )
+
+        for row in recipients:
+            try:
+                await context.bot.send_message(chat_id=int(row[0]), text=text_to_send)
+                sent += 1
+            except TelegramError:
+                failed += 1
+            except Exception:
+                failed += 1
+
+        await query.edit_message_text(
+            "📢 Ommaviy xabar yakunlandi.\n\n"
+            f"👥 Jami: {len(recipients)}\n"
+            f"✅ Yuborildi: {sent}\n"
+            f"❌ Yuborilmadi: {failed}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")
+            ]]),
+        )
+        return
+
     parts = query.data.split(":")
     action = parts[1] if len(parts) > 1 else "home"
 
@@ -1780,6 +1850,139 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = max(0, int(parts[2])) if len(parts) > 2 else 0
     except ValueError:
         page = 0
+
+    if query.data in ("panel:bankrupt", "panel:give"):
+        kind = "bankrupt" if query.data == "panel:bankrupt" else "give"
+        title = "💣 Bankrot qilish" if kind == "bankrupt" else "💸 Pul yuborish"
+        await query.edit_message_text(
+            f"{title} — kimga?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👥 Hammaga", callback_data=f"panel:{kind}:all")],
+                [InlineKeyboardButton("👤 Bir kishiga", callback_data=f"panel:{kind}:one")],
+                [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
+            ]),
+        )
+        return
+
+    if query.data == "panel:money_cancel":
+        context.user_data.pop("panel_money_state", None)
+        context.user_data.pop("panel_money_pending", None)
+        context.user_data.pop("panel_money_target", None)
+        await query.edit_message_text(
+            "❎ Amal bekor qilindi.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")
+            ]]),
+        )
+        return
+
+    if query.data in (
+        "panel:bankrupt:all", "panel:bankrupt:one",
+        "panel:give:all", "panel:give:one",
+    ):
+        kind, who = query.data.split(":")[1:]
+        if kind == "bankrupt" and who == "all":
+            context.user_data["panel_money_pending"] = {"kind": "bankrupt_all"}
+            prompt = "⚠️ Barcha foydalanuvchilarning balansini 0 qilishni tasdiqlaysizmi?"
+            buttons = [[InlineKeyboardButton("✅ Tasdiqlash", callback_data="panel:money_confirm")]]
+        elif kind == "bankrupt":
+            context.user_data["panel_money_state"] = "bankrupt_target"
+            await query.edit_message_text(
+                "Foydalanuvchi Telegram ID sini yoki @username sini yuboring.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:money_cancel")
+                ]]),
+            )
+            return
+        elif who == "all":
+            context.user_data["panel_money_state"] = "give_all_amount"
+            await query.edit_message_text(
+                "Har bir foydalanuvchiga qancha pul qo‘shilsin? Faqat musbat butun son yuboring.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:money_cancel")
+                ]]),
+            )
+            return
+        else:
+            context.user_data["panel_money_state"] = "give_target"
+            await query.edit_message_text(
+                "Pul oluvchining Telegram ID sini yoki @username sini yuboring.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:money_cancel")
+                ]]),
+            )
+            return
+
+        context.user_data["panel_money_state"] = None
+        await query.edit_message_text(
+            prompt,
+            reply_markup=InlineKeyboardMarkup([
+                buttons[0],
+                [InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:money_cancel")],
+            ]),
+        )
+        return
+
+    if query.data == "panel:money_confirm":
+        pending = context.user_data.get("panel_money_pending")
+        if not pending:
+            await query.edit_message_text("⏳ Tasdiqlanadigan amal topilmadi.")
+            return
+
+        c = db()
+        kind = pending["kind"]
+        if kind == "bankrupt_all":
+            with c:
+                c.execute("UPDATE user_wallet SET money=0")
+            result = "Barcha balanslar 0 qilindi."
+        elif kind == "bankrupt_one":
+            with c:
+                c.execute(
+                    "INSERT OR IGNORE INTO user_wallet(user_id,money) VALUES (?,0)",
+                    (pending["user_id"],),
+                )
+                c.execute(
+                    "UPDATE user_wallet SET money=0 WHERE user_id=?",
+                    (pending["user_id"],),
+                )
+            result = f"{escape(pending['name'])} balansini 0 qilindi."
+        elif kind == "give_all":
+            with c:
+                c.execute(
+                    "INSERT OR IGNORE INTO user_wallet(user_id,money) "
+                    "SELECT user_id,0 FROM users"
+                )
+                cur = c.execute(
+                    "UPDATE user_wallet SET money=money+? "
+                    "WHERE user_id IN (SELECT user_id FROM users)",
+                    (pending["amount"],),
+                )
+            result = f"{pending['amount']} puldan {cur.rowcount} foydalanuvchiga qo‘shildi."
+        elif kind == "give_one":
+            with c:
+                c.execute(
+                    "INSERT OR IGNORE INTO user_wallet(user_id,money) VALUES (?,0)",
+                    (pending["user_id"],),
+                )
+                c.execute(
+                    "UPDATE user_wallet SET money=money+? WHERE user_id=?",
+                    (pending["amount"], pending["user_id"]),
+                )
+            result = f"{escape(pending['name'])} hisobiga {pending['amount']} pul qo‘shildi."
+        else:
+            await query.edit_message_text("❌ Noma’lum amal.")
+            return
+
+        context.user_data.pop("panel_money_pending", None)
+        context.user_data.pop("panel_money_state", None)
+        context.user_data.pop("panel_money_target", None)
+        await query.edit_message_text(
+            "✅ " + result,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")
+            ]]),
+        )
+        return
 
     c = db()
     users_count = c.execute(
@@ -4689,6 +4892,125 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.effective_message
     if not user or not msg or not msg.text:
         return
+
+    if user.id in CAREER_OWNER_IDS:
+        raw = msg.text.strip()
+
+        if context.user_data.get("panel_broadcast_state") == "waiting_text":
+            if not raw:
+                await msg.reply_text("Xabar matni bo‘sh bo‘lmasin.")
+                return
+            if len(raw) > 4096:
+                await msg.reply_text("Xabar 4096 belgidan oshmasin.")
+                return
+
+            context.user_data["panel_broadcast_pending"] = raw
+            context.user_data.pop("panel_broadcast_state", None)
+            await msg.reply_text(
+                "📢 Xabarni tekshiring:\n\n"
+                f"{escape(raw)}\n\nYuborishni tasdiqlaysizmi?",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Tasdiqlash va yuborish", callback_data="panel:broadcast_confirm")],
+                    [InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:broadcast_cancel")],
+                ]),
+            )
+            return
+
+        state = context.user_data.get("panel_money_state")
+        raw = msg.text.strip()
+
+        if state in ("bankrupt_target", "give_target"):
+            target_row = None
+            c = db()
+            if raw.startswith("@"):
+                target_row = c.execute(
+                    "SELECT user_id, username, first_name FROM users "
+                    "WHERE lower(username)=lower(?)",
+                    (raw[1:],),
+                ).fetchone()
+            else:
+                try:
+                    target_id = int(raw)
+                    target_row = c.execute(
+                        "SELECT user_id, username, first_name FROM users WHERE user_id=?",
+                        (target_id,),
+                    ).fetchone()
+                except ValueError:
+                    pass
+
+            if not target_row:
+                await msg.reply_text(
+                    "❌ Foydalanuvchi bazadan topilmadi. ID yoki @username ni tekshiring."
+                )
+                return
+
+            target_id, username, first_name = target_row
+            name = first_name or (f"@{username}" if username else str(target_id))
+            context.user_data.pop("panel_money_state", None)
+
+            if state == "bankrupt_target":
+                context.user_data["panel_money_pending"] = {
+                    "kind": "bankrupt_one", "user_id": target_id, "name": name
+                }
+                prompt = f"⚠️ {escape(name)} balansini 0 qilishni tasdiqlaysizmi?"
+                buttons = [[InlineKeyboardButton("✅ Tasdiqlash", callback_data="panel:money_confirm")]]
+            else:
+                context.user_data["panel_money_target"] = {
+                    "user_id": target_id, "name": name
+                }
+                context.user_data["panel_money_state"] = "give_one_amount"
+                await msg.reply_text(
+                    f"💸 {escape(name)} ga qancha pul yuborilsin? Faqat musbat butun son yuboring.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:money_cancel")
+                    ]]),
+                )
+                return
+
+            await msg.reply_text(
+                prompt,
+                reply_markup=InlineKeyboardMarkup([
+                    buttons[0],
+                    [InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:money_cancel")],
+                ]),
+            )
+            return
+
+        if state in ("give_all_amount", "give_one_amount"):
+            try:
+                amount = int(raw)
+                if amount < 1 or amount > 1000000000:
+                    raise ValueError
+            except ValueError:
+                await msg.reply_text("❌ 1 dan 1 000 000 000 gacha musbat butun son yuboring.")
+                return
+
+            if state == "give_all_amount":
+                pending = {"kind": "give_all", "amount": amount}
+                prompt = f"⚠️ Har bir foydalanuvchiga {amount} pul qo‘shilsinmi?"
+            else:
+                target = context.user_data.get("panel_money_target")
+                if not target:
+                    context.user_data.pop("panel_money_state", None)
+                    await msg.reply_text("❌ Oluvchi topilmadi. Amalni qaytadan boshlang.")
+                    return
+                pending = {
+                    "kind": "give_one", "amount": amount,
+                    "user_id": target["user_id"], "name": target["name"],
+                }
+                prompt = f"⚠️ {escape(target['name'])} hisobiga {amount} pul qo‘shilsinmi?"
+
+            context.user_data["panel_money_pending"] = pending
+            context.user_data.pop("panel_money_state", None)
+            await msg.reply_text(
+                prompt,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Tasdiqlash", callback_data="panel:money_confirm")],
+                    [InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:money_cancel")],
+                ]),
+            )
+            return
 
     if context.user_data.get("shop_state") == "recipient":
         raw = msg.text.strip()

@@ -1823,14 +1823,21 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📢 Yuborish boshlandi: {len(recipients)} foydalanuvchi."
         )
 
-        for row in recipients:
+        for index, row in enumerate(recipients):
             try:
-                await context.bot.send_message(chat_id=int(row[0]), text=text_to_send)
+                await context.bot.send_message(
+                    chat_id=int(row[0]),
+                    text=text_to_send,
+                )
                 sent += 1
             except TelegramError:
                 failed += 1
             except Exception:
                 failed += 1
+
+            # Har bir keyingi xabardan oldin taxminan 2,7 soniya kutish.
+            if index + 1 < len(recipients):
+                await asyncio.sleep(2.7)
 
         await query.edit_message_text(
             "📢 Ommaviy xabar yakunlandi.\n\n"

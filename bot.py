@@ -5875,7 +5875,7 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         contest_message = await context.bot.send_message(
-            chat_id=contest_channel_id,
+            chat_id=msg.chat.id,
             text=f"🎉 <b>KONKURS</b>\n"
             f"Har bir g‘olibga: <b>{amount}$</b>\n"
             f"G‘oliblar: <b>0/{winners}</b>\n"

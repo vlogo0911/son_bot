@@ -1632,6 +1632,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_user(user)
         payload = context.args[0] if context.args else ""
+        if payload and payload.startswith("shop_"):
+            if payload == "shop_catalog":
+                await cmd_shop(update, context)
+            return
         if payload and await handle_family_start(update, context, payload):
             return
         gender = db().execute(

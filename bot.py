@@ -45,6 +45,7 @@ VOLUME_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
 DB_FILE = os.path.join(VOLUME_PATH, "game.db") if VOLUME_PATH else os.path.join(BASE_DIR, "game.db")
 
 DEFAULT_LANG = "uz"
+MONEY_LOG_CHAT_ID = -1004430776232
 
 # Kasb almashtirish so'rovlarini qabul qiladigan ownerlar
 CAREER_OWNER_IDS = {6913838682, 1150777456, 8358319733}
@@ -881,9 +882,9 @@ def set_group_lang(chat_id, language):
 
 
 def save_user(user):
+    # Har safar DB bilan sinxronlaymiz: _SEEN yozuvi bazada foydalanuvchi
+    # borligini kafolatlamaydi (masalan, DB yangilanganda yoki yozuv o‘chirilganda).
     key = (user.username, user.first_name)
-    if _SEEN.get(user.id) == key:
-        return
     c = db()
     with c:
         c.execute(
@@ -1980,6 +1981,23 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Noma’lum amal.")
             return
 
+        if kind in ("give_one", "give_all"):
+            if kind == "give_one":
+                await log_money_event(
+                    context.bot,
+                    "🛡 <b>OWNER PUL QO‘SHDI</b>\n"
+                    f"Owner: <code>{query.from_user.id}</code>\n"
+                    f"Kimga: {escape(pending.get('name', str(pending.get('user_id'))))} "
+                    f"(ID: <code>{pending.get('user_id')}</code>)\n"
+                    f"Miqdor: <b>{pending['amount']}$</b>"
+                )
+            else:
+                await log_money_event(
+                    context.bot,
+                    "🛡 <b>OWNER OMMAVIY PUL QO‘SHDI</b>\n"
+                    f"Owner: <code>{query.from_user.id}</code>\n"
+                    f"Har bir foydalanuvchiga: <b>{pending['amount']}$</b>\nNatija: {escape(result)}"
+                )
         context.user_data.pop("panel_money_pending", None)
         context.user_data.pop("panel_money_state", None)
         context.user_data.pop("panel_money_target", None)
@@ -2743,14 +2761,43 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             await q.answer("Ariza uchun mablag‘ yetarli emas.", show_alert=True)
             return
-        if cost and requester not in CAREER_OWNER_IDS:
-            with c:
-                c.execute("UPDATE user_wallet SET money=money-? WHERE user_id=? AND money>=?", (cost, requester, cost))
         from datetime import timedelta
         immediate_delivery = requester in CAREER_OWNER_IDS or partner in CAREER_OWNER_IDS
         due = (datetime.now() if immediate_delivery else datetime.now() + timedelta(hours=48)).isoformat(timespec="seconds")
+        debit_failed = False
+        request_updated = False
         with c:
-            c.execute("UPDATE child_requests SET status='approved',due_at=? WHERE id=? AND status='pending'", (due, rid))
+            if cost and requester not in CAREER_OWNER_IDS:
+                debit = c.execute(
+                    "UPDATE user_wallet SET money=money-? WHERE user_id=? AND money>=?",
+                    (cost, requester, cost),
+                )
+                debit_failed = debit.rowcount != 1
+            if not debit_failed:
+                updated = c.execute(
+                    "UPDATE child_requests SET status='approved',due_at=? WHERE id=? AND status='pending'",
+                    (due, rid),
+                )
+                request_updated = updated.rowcount == 1
+                if not request_updated and cost and requester not in CAREER_OWNER_IDS:
+                    c.execute(
+                        "UPDATE user_wallet SET money=money+? WHERE user_id=?",
+                        (cost, requester),
+                    )
+        if debit_failed:
+            await q.answer("Ariza uchun mablag‘ yetarli emas.", show_alert=True)
+            return
+        if not request_updated:
+            await q.answer("So‘rov avval qayta ishlangan.", show_alert=True)
+            return
+        if cost and requester not in CAREER_OWNER_IDS:
+            await log_money_event(
+                context.bot,
+                "👶 <b>FARZAND UCHUN TO‘LOV</b>\n"
+                f"To‘lovchi: {escape(person_name(requester))} (ID: <code>{requester}</code>)\n"
+                f"Jufti: {escape(person_name(partner))} (ID: <code>{partner}</code>)\n"
+                f"Narx: <b>{cost}$</b>\nFarzand: {escape(child_name)} — {escape(child_gender_label(requester, child_gender))}"
+            )
         for pid in (requester, partner):
             try:
                 await context.bot.send_message(pid, family_text(pid, "approved_now" if immediate_delivery else "approved"))
@@ -5022,17 +5069,41 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     if context.user_data.get("shop_state") == "recipient":
         raw = msg.text.strip()
         target = None
+        c = db()
         try:
             if raw.startswith("@"):
-                chat = await context.bot.get_chat(raw)
-                target = chat.id
+                username = raw[1:].strip()
+                if not username or not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+                    raise ValueError("invalid username")
+                row = c.execute(
+                    """SELECT user_id FROM users
+                       WHERE lower(trim(username))=lower(?) LIMIT 1""",
+                    (username,),
+                ).fetchone()
+                if row:
+                    target = int(row[0])
+                else:
+                    # Username DBda eskirgan yoki yozuv tushib qolgan bo‘lishi mumkin.
+                    # Telegram topa olsa, foydalanuvchi ma’lumotini DB bilan sinxronlaymiz.
+                    chat = await context.bot.get_chat("@" + username)
+                    if getattr(chat, "type", None) == ChatType.PRIVATE:
+                        save_user(chat)
+                        target = int(chat.id)
             else:
-                target = int(raw)
-                await context.bot.get_chat(target)
+                if not re.fullmatch(r"[1-9]\d{4,19}", raw):
+                    raise ValueError("invalid id")
+                target_id = int(raw)
+                row = c.execute("SELECT user_id FROM users WHERE user_id=?", (target_id,)).fetchone()
+                if row:
+                    target = target_id
+            if target is None:
+                raise ValueError("not started or not found")
+            if target == user.id:
+                await msg.reply_text("O‘zingizga sovg‘a yubora olmaysiz.")
+                return
         except (TelegramError, ValueError):
             await msg.reply_text(
-                "Foydalanuvchi topilmadi. Bot bilan avval shaxsiy chatda /start qilgan bo‘lishi kerak. "
-                "ID yoki @username ni qayta yuboring."
+                "Foydalanuvchi topilmadi yoki botda /start bosmagan. ID yoki @username ni tekshiring."
             )
             return
         context.user_data.pop("shop_state", None)
@@ -5428,6 +5499,19 @@ def wallet_balance(user_id):
 def is_money_owner(user_id):
     return user_id in CAREER_OWNER_IDS
 
+
+async def log_money_event(bot, text):
+    """Moliyaviy hodisani audit chatiga yuboradi; log xatosi asosiy amalni bekor qilmaydi."""
+    try:
+        await bot.send_message(
+            chat_id=MONEY_LOG_CHAT_ID,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except TelegramError as exc:
+        logger.warning("Moliyaviy log chatiga xabar yuborilmadi: %s", exc)
+
 def wallet_change(user_id, delta):
     c = db()
     c.execute("INSERT OR IGNORE INTO user_wallet(user_id,money) VALUES(?,0)", (user_id,))
@@ -5580,6 +5664,14 @@ async def cb_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    await log_money_event(
+        context.bot,
+        "🎁 <b>SOVG‘A O‘TKAZMASI</b>\n"
+        f"Kimdan: {escape(person_name(user.id))} (ID: <code>{user.id}</code>)\n"
+        f"Kimga: {escape(person_name(recipient))} (ID: <code>{recipient}</code>)\n"
+        f"Sovg‘a: {escape(name)}\nNarxi: <b>{price}$</b>\n"
+        f"To‘lovchi owner: {'ha' if owner else 'yo‘q'}"
+    )
     await q.message.reply_text(f"✅ {name} yuborildi!")
 
 async def cmd_pul(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5647,6 +5739,13 @@ async def cmd_pul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Hisobingizda yetarli pul mavjud emas.")
         return
 
+    await log_money_event(
+        context.bot,
+        "💸 <b>PUL O‘TKAZMASI</b>\n"
+        f"Kimdan: {escape(person_name(sender.id))} (ID: <code>{sender.id}</code>)\n"
+        f"Kimga: {escape(person_name(recipient.id))} (ID: <code>{recipient.id}</code>)\n"
+        f"Miqdor: <b>{amount}$</b>\nOwner orqali: {'ha' if owner else 'yo‘q'}"
+    )
     await msg.reply_text(
         f"💸 {person_name(sender.id)} → "
         f"{person_name(recipient.id)}: {amount}$ yuborildi."
@@ -5718,6 +5817,14 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(
             f"🎉 {amount}$ dan {winners} kishiga pul tarqatish boshlandi!",
             reply_markup=kb,
+        )
+        await log_money_event(
+            context.bot,
+            "🎉 <b>KONKURS OCHILDI</b>\n"
+            f"Tashkilotchi: {escape(person_name(user.id))} (ID: <code>{user.id}</code>)\n"
+            f"Chat: <code>{msg.chat.id}</code>\n"
+            f"Har bir g‘olibga: <b>{amount}$</b>\nG‘oliblar soni: <b>{winners}</b>\n"
+            f"Jami mukofot: <b>{total}$</b>\nOwner orqali: {'ha' if owner else 'yo‘q'}"
         )
     except TelegramError:
         # Xabar yuborilmasa, konkursni bekor qilib, to‘lovni qaytaramiz.
@@ -5823,6 +5930,18 @@ async def cb_contest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await q.answer(f"✅ {amount}$ hisobingizga qo‘shildi!", show_alert=True)
+    contest_owner = db().execute(
+        "SELECT owner_id,chat_id FROM money_contests WHERE id=?", (contest_id,)
+    ).fetchone()
+    await log_money_event(
+        context.bot,
+        "🏆 <b>KONKURS MUKOFOTI O‘TKAZILDI</b>\n"
+        f"Konkurs ID: <code>{contest_id}</code>\n"
+        f"Tashkilotchi: {escape(person_name(contest_owner[0])) if contest_owner else 'Noma’lum'} "
+        f"(ID: <code>{contest_owner[0] if contest_owner else 0}</code>)\n"
+        f"G‘olib: {escape(person_name(user.id))} (ID: <code>{user.id}</code>)\n"
+        f"Mukofot: <b>{amount}$</b>\nQolgan o‘rinlar: <b>{remaining}</b>"
+    )
     if remaining == 0:
         try:
             await q.edit_message_reply_markup(reply_markup=None)

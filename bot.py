@@ -1510,7 +1510,7 @@ async def handle_family_start(update, context, payload):
                 (name, rid),
             )
         partner_lang = family_lang(row[1])
-        request_text = family_text(row[1], "request", parent=escape(person_name(user.id)), gender=escape(child_gender_label(row[1], row[3])), name=escape(name))
+        request_text = family_text(row[1], "request", parent=f'<a href="tg://user?id={user.id}">{escape(person_name(user.id))}</a>', gender=escape(child_gender_label(row[1], row[3])), name=escape(name))
         if user.id in CAREER_OWNER_IDS or row[1] in CAREER_OWNER_IDS:
             request_text = request_text.replace("Rozilikdan so‘ng farzand 48 soat ichida yetkaziladi.", "Owner juftliklari uchun rozilikdan so‘ng farzand kutishsiz yetkaziladi.")
             request_text = request_text.replace("After consent, the child will arrive within 48 hours.", "For owner couples, the child arrives without a 48-hour wait after consent.")
@@ -1521,7 +1521,7 @@ async def handle_family_start(update, context, payload):
             InlineKeyboardButton(family_text(row[1], "no"), callback_data=f"family:consent:no:{rid}"),
         ]])
         try:
-            await context.bot.send_message(row[1], request_text, reply_markup=kb)
+            await context.bot.send_message(row[1], request_text, reply_markup=kb, parse_mode="HTML")
         except TelegramError:
             with db():
                 db().execute("UPDATE child_requests SET status='selecting' WHERE id=?", (rid,))
@@ -4708,7 +4708,7 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         request_text = family_text(
             partner_id, "request",
-            parent=escape(person_name(user.id)),
+            parent=f'<a href="tg://user?id={user.id}">{escape(person_name(user.id))}</a>',
             gender=escape(child_gender_label(partner_id, gender)),
             name=escape(name),
         )
@@ -4744,7 +4744,7 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         try:
             await context.bot.send_message(
-                partner_id, request_text, reply_markup=kb
+                partner_id, request_text, reply_markup=kb, parse_mode="HTML"
             )
         except TelegramError:
             with db():

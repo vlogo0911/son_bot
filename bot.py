@@ -5783,6 +5783,8 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if (
         member.status == ChatMemberStatus.ADMINISTRATOR
         and getattr(member, "can_post_messages", False)
+        and event.from_user
+        and is_money_owner(event.from_user.id)
     ):
         c = db()
         with c:
@@ -5798,13 +5800,23 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     user = update.effective_user
+    chat = update.effective_chat
 
-    if not msg or not user or msg.chat.type not in (
-        ChatType.GROUP, ChatType.SUPERGROUP
+    if not msg or not chat or chat.type not in (
+        ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL
     ):
         return
 
-    raw = context.args[0] if context.args else ""
+    is_channel = chat.type == ChatType.CHANNEL
+    # Kanal postlarida yuboruvchi (user) bo'lmaydi.
+    if not is_channel and not user:
+        return
+
+    args = context.args
+    if not args and msg.text:
+        parts = msg.text.split()
+        args = parts[1:]
+    raw = args[0] if args else ""
     m = re.fullmatch(r"([1-9]\d{0,8})-([1-9]\d{0,3})", raw)
     if not m:
         await msg.reply_text("Format: /konkurs 100-5")
@@ -5817,23 +5829,23 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Konkurs miqdori juda katta.")
         return
 
-    settings = db().execute(
-        "SELECT value FROM contest_config WHERE key='contest_channel_id'"
-    ).fetchone()
-    if not settings:
-        await msg.reply_text(
-            "Avval botni konkurs kanalingizga administrator qilib qo'shing "
-            "va post yuborish huquqini bering."
-        )
-        return
+    if is_channel:
+        # Kanalda kim yozganini bilib bo'lmaydi: faqat owner ro'yxatdan o'tkazgan
+        # kanallarda (bot owner tomonidan admin qilingan) ishlaydi, pul hisobdan yechilmaydi.
+        row = db().execute(
+            "SELECT value FROM contest_config WHERE key='contest_channel_id'"
+        ).fetchone()
+        if not row or str(row[0]) != str(chat.id):
+            await msg.reply_text(
+                "Bu kanal ruxsat etilmagan. Botni kanalga owner administrator qilib qo'shishi kerak."
+            )
+            return
+        owner_id = next(iter(CAREER_OWNER_IDS))
+        owner = True
+    else:
+        owner_id = user.id
+        owner = is_money_owner(user.id)
 
-    try:
-        contest_channel_id = int(settings[0])
-    except (ValueError, TypeError):
-        await msg.reply_text("Konkurs kanali ID si noto'g'ri. Botni kanalga qayta admin qiling.")
-        return
-
-    owner = is_money_owner(user.id)
     c = db()
     cid = None
     insufficient = False
@@ -5844,7 +5856,7 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur = c.execute(
                     "UPDATE user_wallet SET money=money-? "
                     "WHERE user_id=? AND money>=?",
-                    (total, user.id, total),
+                    (total, owner_id, total),
                 )
                 if cur.rowcount != 1:
                     insufficient = True
@@ -5855,7 +5867,7 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "(chat_id,owner_id,amount,winners,remaining,active,created_at) "
                     "VALUES(?,?,?,?,?,1,?)",
                     (
-                        msg.chat.id, user.id, amount, winners, winners,
+                        msg.chat.id, owner_id, amount, winners, winners,
                         datetime.now().isoformat(timespec="seconds"),
                     ),
                 )
@@ -5875,7 +5887,7 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         contest_message = await context.bot.send_message(
-            chat_id=msg.chat.id,
+            chat_id=chat.id,
             text=f"🎉 <b>KONKURS</b>\n"
             f"Har bir g‘olibga: <b>{amount}$</b>\n"
             f"G‘oliblar: <b>0/{winners}</b>\n"
@@ -5889,12 +5901,13 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_money_event(
             context.bot,
             "🎉 <b>KONKURS OCHILDI</b>\n"
-            f"Tashkilotchi: {person_name(user.id)} (ID: <code>{user.id}</code>)\n"
+            f"Tashkilotchi: {person_name(owner_id)} (ID: <code>{owner_id}</code>)\n"
             f"Chat: <code>{msg.chat.id}</code>\n"
             f"Har bir g‘olibga: <b>{amount}$</b>\nG‘oliblar soni: <b>{winners}</b>\n"
             f"Jami mukofot: <b>{total}$</b>\nOwner orqali: {'ha' if owner else 'yo‘q'}"
         )
-    except TelegramError:
+    except TelegramError as exc:
+        logger.error("Konkurs xabarini yuborib bo'lmadi: %s", exc)
         # Xabar yuborilmasa, konkursni bekor qilib, to‘lovni qaytaramiz.
         try:
             with c:
@@ -5905,7 +5918,7 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not owner:
                     c.execute(
                         "UPDATE user_wallet SET money=money+? WHERE user_id=?",
-                        (total, user.id),
+                        (total, owner_id),
                     )
         except sqlite3.Error:
             await msg.reply_text(
@@ -6087,7 +6100,14 @@ def main():
         (["lang"], cmd_lang),
     ]
     for names, handler in commands:
-        app.add_handler(CommandHandler(names, handler))
+        if names == ["konkurs"]:
+            # /konkurs guruhda ham, kanalda ham ishlashi uchun channel_post'larni ham qabul qilamiz
+            app.add_handler(CommandHandler(
+                names, handler,
+                filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS,
+            ))
+        else:
+            app.add_handler(CommandHandler(names, handler))
 
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(cb_shop, pattern=r"^shop:"))

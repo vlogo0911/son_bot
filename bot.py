@@ -2810,8 +2810,8 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await log_money_event(
                 context.bot,
                 "👶 <b>FARZAND UCHUN TO‘LOV</b>\n"
-                f"To‘lovchi: {escape(person_name(requester))} (ID: <code>{requester}</code>)\n"
-                f"Jufti: {escape(person_name(partner))} (ID: <code>{partner}</code>)\n"
+                f"To‘lovchi: {person_name(requester)} (ID: <code>{requester}</code>)\n"
+                f"Jufti: {person_name(partner)} (ID: <code>{partner}</code>)\n"
                 f"Narx: <b>{cost}$</b>\nFarzand: {escape(child_name)} — {escape(child_gender_label(requester, child_gender))}"
             )
         for pid in (requester, partner):
@@ -5967,7 +5967,7 @@ async def cb_contest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (contest_id,),
         ).fetchall()
         winner_lines = [
-            f'{i}. <a href="tg://user?id={int(row[0])}">{escape(person_name(int(row[0])))}</a> — {contest_owner[3]}$'
+            f'{i}. {person_name(int(row[0]))} — {contest_owner[3]}$'
             for i, row in enumerate(winner_rows, 1)
         ]
         progress_text = (

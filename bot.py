@@ -2187,6 +2187,13 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(button_labels[2], callback_data="rel:menu:quit")],
         [InlineKeyboardButton(button_labels[3], callback_data="rel:menu:divorce")],
     ]
+    shop_label = {
+        "uz": "🛍 DO‘KON", "eng": "🛍 SHOP",
+        "ru": "🛍 МАГАЗИН", "kz": "🛍 ДҮКЕН",
+    }.get(profile_lang, "🛍 DO‘KON")
+    profile_buttons.insert(0, [
+        InlineKeyboardButton(shop_label, callback_data="shop:open")
+    ])
     await msg.reply_text(
         t(
             chat.id,
@@ -4683,6 +4690,26 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not user or not msg or not msg.text:
         return
 
+    if context.user_data.get("shop_state") == "recipient":
+        raw = msg.text.strip()
+        target = None
+        try:
+            if raw.startswith("@"):
+                chat = await context.bot.get_chat(raw)
+                target = chat.id
+            else:
+                target = int(raw)
+                await context.bot.get_chat(target)
+        except (TelegramError, ValueError):
+            await msg.reply_text(
+                "Foydalanuvchi topilmadi. Bot bilan avval shaxsiy chatda /start qilgan bo‘lishi kerak. "
+                "ID yoki @username ni qayta yuboring."
+            )
+            return
+        context.user_data.pop("shop_state", None)
+        await show_gifts(user.id, context, target)
+        return
+
     child = db().execute(
         """SELECT id,partner_id,pair_id,gender
            FROM child_requests
@@ -5039,6 +5066,441 @@ async def secret_callback(
 
 
 
+
+SHOP_GIFTS = {"ring": ("💍 Uzuk", 100), "bear": ("🧸 Ayiqcha", 75),
+              "bouquet": ("💐 Guldasta", 50), "rose": ("🌹 Atirgul", 25)}
+
+def init_economy():
+    c = db()
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS money_contests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
+      owner_id INTEGER NOT NULL, amount INTEGER NOT NULL, winners INTEGER NOT NULL,
+      remaining INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS money_contest_claims (
+      contest_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+      PRIMARY KEY(contest_id,user_id));
+    CREATE TABLE IF NOT EXISTS gift_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, sender_id INTEGER NOT NULL,
+      recipient_id INTEGER NOT NULL, gift_key TEXT NOT NULL, price INTEGER NOT NULL,
+      created_at TEXT NOT NULL);
+    """)
+    c.commit()
+
+def wallet_balance(user_id):
+    c = db()
+    row = c.execute(
+        "SELECT money FROM user_wallet WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+def is_money_owner(user_id):
+    return user_id in CAREER_OWNER_IDS
+
+def wallet_change(user_id, delta):
+    c = db()
+    c.execute("INSERT OR IGNORE INTO user_wallet(user_id,money) VALUES(?,0)", (user_id,))
+    c.execute("UPDATE user_wallet SET money=money+? WHERE user_id=?", (int(delta), user_id))
+    c.commit()
+
+def shop_url(context, payload):
+    return f"https://t.me/{context.bot.username}?start=shop_{payload}"
+
+async def cmd_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user: return
+    lang = family_lang(user.id)
+    labels = {"uz":"🛍 DO‘KON","eng":"🛍 SHOP","ru":"🛍 МАГАЗИН","kz":"🛍 ДҮКЕН"}
+    who = {"uz":"Kimga yubormoqchisiz?","eng":"Who do you want to send it to?","ru":"Кому хотите отправить?","kz":"Кімге жібергіңіз келеді?"}
+    kb = InlineKeyboardMarkup([
+      [InlineKeyboardButton({"uz":"💞 Juftimga","eng":"💞 To my partner","ru":"💞 Моей паре","kz":"💞 Жұбыма"}.get(lang,"💞 Juftimga"), callback_data="shop:partner"),
+       InlineKeyboardButton({"uz":"👤 Boshqaga","eng":"👤 Someone else","ru":"👤 Другому","kz":"👤 Басқаға"}.get(lang,"👤 Boshqaga"), callback_data="shop:other")]
+    ])
+    await update.effective_message.reply_text(f"{labels.get(lang,labels['uz'])}\n\n{who}", reply_markup=kb)
+
+async def show_gifts(chat_id, context, recipient_id):
+    lang = family_lang(chat_id)
+    title = {"uz":"🎁 Sovg‘ani tanlang:","eng":"🎁 Choose a gift:","ru":"🎁 Выберите подарок:","kz":"🎁 Сыйлықты таңдаңыз:"}.get(lang,"🎁 Sovg‘ani tanlang:")
+    rows=[]
+    for key,(name,price) in SHOP_GIFTS.items():
+        localized = {
+          "ring":{"uz":"💍 Uzuk","eng":"💍 Ring","ru":"💍 Кольцо","kz":"💍 Сақина"},
+          "bear":{"uz":"🧸 Ayiqcha","eng":"🧸 Teddy bear","ru":"🧸 Мишка","kz":"🧸 Қонжық"},
+          "bouquet":{"uz":"💐 Guldasta","eng":"💐 Bouquet","ru":"💐 Букет","kz":"💐 Гүл шоғы"},
+          "rose":{"uz":"🌹 Atirgul","eng":"🌹 Rose","ru":"🌹 Роза","kz":"🌹 Раушан"}
+        }[key].get(lang,name)
+        rows.append([InlineKeyboardButton(f"{localized} — {price}$", callback_data=f"shop:gift:{recipient_id}:{key}")])
+    rows.append([InlineKeyboardButton({"uz":"🎁 Sovg‘alar","eng":"🎁 Gifts","ru":"🎁 Подарки","kz":"🎁 Сыйлықтар"}.get(lang,"🎁 Sovg‘alar"), url=shop_url(context,"catalog"))])
+    await context.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(rows))
+
+async def cb_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    user = q.from_user
+    await q.answer()
+    parts = q.data.split(":")
+
+    if len(parts) < 2:
+        return
+
+    if parts[1] == "open":
+        await cmd_shop(update, context)
+        return
+
+    if parts[1] == "partner":
+        pair = active_pair(user.id)
+        if not pair:
+            await q.message.reply_text(family_text(user.id, "no_pair"))
+            return
+        recipient = pair[2] if pair[1] == user.id else pair[1]
+        await show_gifts(user.id, context, recipient)
+        return
+
+    if parts[1] == "other":
+        context.user_data["shop_state"] = "recipient"
+        await q.message.reply_text({
+            "uz": "Qabul qiluvchining Telegram ID raqami yoki @username'ini yuboring.",
+            "eng": "Send recipient Telegram ID or @username.",
+            "ru": "Отправьте Telegram ID или @username получателя.",
+            "kz": "Алушының Telegram ID-сін немесе @username жіберіңіз.",
+        }.get(family_lang(user.id), "ID yoki @username yuboring."))
+        return
+
+    if parts[1] != "gift" or len(parts) != 4:
+        return
+
+    try:
+        recipient = int(parts[2])
+    except ValueError:
+        return
+
+    key = parts[3]
+    if key not in SHOP_GIFTS or recipient == user.id:
+        await q.message.reply_text("Sovg‘a oluvchisi noto‘g‘ri.")
+        return
+
+    name, price = SHOP_GIFTS[key]
+    c = db()
+    owner = is_money_owner(user.id)
+    gift_id = None
+
+    try:
+        with c:
+            if not owner:
+                cur = c.execute(
+                    "UPDATE user_wallet SET money=money-? "
+                    "WHERE user_id=? AND money>=?",
+                    (price, user.id, price),
+                )
+                if cur.rowcount != 1:
+                    insufficient = True
+                else:
+                    insufficient = False
+            else:
+                insufficient = False
+
+            if not insufficient:
+                cur = c.execute(
+                    "INSERT INTO gift_log"
+                    "(sender_id,recipient_id,gift_key,price,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (
+                        user.id, recipient, key, price,
+                        datetime.now().isoformat(timespec="seconds"),
+                    ),
+                )
+                gift_id = cur.lastrowid
+    except sqlite3.Error:
+        await q.message.reply_text("Xatolik yuz berdi. Qayta urinib ko‘ring.")
+        return
+
+    if insufficient:
+        await q.message.reply_text({
+            "uz": "Hisobingizda yetarli pul mavjud emas.",
+            "eng": "Insufficient balance.",
+            "ru": "Недостаточно средств на счёте.",
+            "kz": "Шотыңызда қаражат жеткіліксіз.",
+        }.get(family_lang(user.id), "Hisobingizda yetarli pul mavjud emas."))
+        return
+
+    try:
+        await context.bot.send_message(
+            recipient,
+            f"🎁 {person_name(user.id)} sizga {name} sovg‘a qildi!",
+        )
+    except TelegramError:
+        try:
+            with c:
+                c.execute("DELETE FROM gift_log WHERE id=?", (gift_id,))
+                if not owner:
+                    c.execute(
+                        "UPDATE user_wallet SET money=money+? WHERE user_id=?",
+                        (price, user.id),
+                    )
+        except sqlite3.Error:
+            await q.message.reply_text(
+                "Sovg‘a yuborilmadi. Pulni avtomatik qaytarishda xatolik yuz berdi; "
+                "balansni tekshirish kerak."
+            )
+            return
+
+        await q.message.reply_text(
+            "Sovg‘a yuborilmadi. Qabul qiluvchi bot bilan shaxsiy chatda /start "
+            "qilishi kerak. To‘lov qaytarildi."
+        )
+        return
+
+    await q.message.reply_text(f"✅ {name} yuborildi!")
+
+async def cmd_pul(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    sender = update.effective_user
+
+    if not msg or not sender or msg.chat.type not in (
+        ChatType.GROUP, ChatType.SUPERGROUP
+    ):
+        return
+
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        await msg.reply_text(
+            "Pul yuborish uchun odamning xabariga reply qiling: /pul 200"
+        )
+        return
+
+    try:
+        amount = int(context.args[0]) if context.args else 0
+    except (ValueError, TypeError):
+        amount = 0
+
+    if amount <= 0 or amount > 10**9:
+        await msg.reply_text("Miqdor noto‘g‘ri. Masalan: /pul 200")
+        return
+
+    recipient = msg.reply_to_message.from_user
+    if recipient.is_bot or recipient.id == sender.id:
+        await msg.reply_text("O‘zingizga yoki botga pul yuborib bo‘lmaydi.")
+        return
+
+    c = db()
+    owner = is_money_owner(sender.id)
+    try:
+        with c:
+            if not owner:
+                # Pul faqat balans yetarli bo‘lsa yechiladi.
+                cur = c.execute(
+                    "UPDATE user_wallet SET money=money-? "
+                    "WHERE user_id=? AND money>=?",
+                    (amount, sender.id, amount),
+                )
+                if cur.rowcount != 1:
+                    failed = True
+                else:
+                    failed = False
+            else:
+                failed = False
+
+            if not failed:
+                c.execute(
+                    "INSERT OR IGNORE INTO user_wallet(user_id,money) "
+                    "VALUES(?,0)",
+                    (recipient.id,),
+                )
+                c.execute(
+                    "UPDATE user_wallet SET money=money+? WHERE user_id=?",
+                    (amount, recipient.id),
+                )
+    except sqlite3.Error:
+        await msg.reply_text("Pul o‘tkazishda xatolik. Qayta urinib ko‘ring.")
+        return
+
+    if failed:
+        await msg.reply_text("Hisobingizda yetarli pul mavjud emas.")
+        return
+
+    await msg.reply_text(
+        f"💸 {person_name(sender.id)} → "
+        f"{person_name(recipient.id)}: {amount}$ yuborildi."
+    )
+
+async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    user = update.effective_user
+
+    if not msg or not user or msg.chat.type not in (
+        ChatType.GROUP, ChatType.SUPERGROUP
+    ):
+        return
+
+    raw = context.args[0] if context.args else ""
+    m = re.fullmatch(r"([1-9]\d{0,8})-([1-9]\d{0,3})", raw)
+    if not m:
+        await msg.reply_text("Format: /konkurs 100-5")
+        return
+
+    amount, winners = map(int, m.groups())
+    total = amount * winners
+
+    if winners > 1000 or total > 10**9:
+        await msg.reply_text("Konkurs miqdori juda katta.")
+        return
+
+    owner = is_money_owner(user.id)
+    c = db()
+    cid = None
+    insufficient = False
+
+    try:
+        with c:
+            if not owner:
+                cur = c.execute(
+                    "UPDATE user_wallet SET money=money-? "
+                    "WHERE user_id=? AND money>=?",
+                    (total, user.id, total),
+                )
+                if cur.rowcount != 1:
+                    insufficient = True
+
+            if not insufficient:
+                cur = c.execute(
+                    "INSERT INTO money_contests"
+                    "(chat_id,owner_id,amount,winners,remaining,active,created_at) "
+                    "VALUES(?,?,?,?,?,1,?)",
+                    (
+                        msg.chat.id, user.id, amount, winners, winners,
+                        datetime.now().isoformat(timespec="seconds"),
+                    ),
+                )
+                cid = cur.lastrowid
+
+    except sqlite3.Error:
+        await msg.reply_text("Xatolik yuz berdi. Qayta urinib ko‘ring.")
+        return
+
+    if insufficient:
+        await msg.reply_text("Hisobingizda yetarli pul mavjud emas.")
+        return
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("💰 Pulni olish", callback_data=f"contest:{cid}")
+    ]])
+
+    try:
+        await msg.reply_text(
+            f"🎉 {amount}$ dan {winners} kishiga pul tarqatish boshlandi!",
+            reply_markup=kb,
+        )
+    except TelegramError:
+        # Xabar yuborilmasa, konkursni bekor qilib, to‘lovni qaytaramiz.
+        try:
+            with c:
+                c.execute(
+                    "UPDATE money_contests SET active=0, remaining=0 WHERE id=?",
+                    (cid,),
+                )
+                if not owner:
+                    c.execute(
+                        "UPDATE user_wallet SET money=money+? WHERE user_id=?",
+                        (total, user.id),
+                    )
+        except sqlite3.Error:
+            await msg.reply_text(
+                "Konkurs xabari yuborilmadi va pulni qaytarishda xatolik yuz berdi. "
+                "Balansni tekshirish kerak."
+            )
+
+async def cb_contest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    user = q.from_user
+    try:
+        contest_id = int(q.data.split(":")[1])
+    except (ValueError, IndexError):
+        await q.answer("Konkurs ma’lumoti noto‘g‘ri.", show_alert=True)
+        return
+
+    c = db()
+    amount = None
+    remaining = None
+
+    try:
+        # Bitta tranzaksiyada joyni band qilish va mukofotni berish.
+        with c:
+            row = c.execute(
+                "SELECT amount, remaining, active FROM money_contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+
+            if not row or not row[2] or row[1] <= 0:
+                status = "ended"
+            else:
+                cur = c.execute(
+                    "INSERT OR IGNORE INTO money_contest_claims(contest_id,user_id) "
+                    "VALUES(?,?)",
+                    (contest_id, user.id),
+                )
+                if cur.rowcount == 0:
+                    status = "claimed"
+                else:
+                    amount = int(row[0])
+                    cur = c.execute(
+                        "UPDATE money_contests SET remaining=remaining-1 "
+                        "WHERE id=? AND active=1 AND remaining>0",
+                        (contest_id,),
+                    )
+                    if cur.rowcount != 1:
+                        # Undo this user's claim if no place remained.
+                        c.execute(
+                            "DELETE FROM money_contest_claims "
+                            "WHERE contest_id=? AND user_id=?",
+                            (contest_id, user.id),
+                        )
+                        status = "ended"
+                        amount = None
+                    else:
+                        c.execute(
+                            "INSERT OR IGNORE INTO user_wallet(user_id,money) "
+                            "VALUES(?,0)",
+                            (user.id,),
+                        )
+                        c.execute(
+                            "UPDATE user_wallet SET money=money+? WHERE user_id=?",
+                            (amount, user.id),
+                        )
+                        c.execute(
+                            "UPDATE money_contests SET active=0 "
+                            "WHERE id=? AND remaining<=0",
+                            (contest_id,),
+                        )
+                        remaining = c.execute(
+                            "SELECT remaining FROM money_contests WHERE id=?",
+                            (contest_id,),
+                        ).fetchone()[0]
+                        status = "ok"
+    except sqlite3.Error:
+        await q.answer(
+            "Xatolik yuz berdi. Qayta urinib ko‘ring.",
+            show_alert=True,
+        )
+        return
+
+    if status == "ended":
+        await q.answer("Konkurs tugagan.", show_alert=True)
+        return
+    if status == "claimed":
+        await q.answer(
+            "Siz pulni oldingiz yoki allaqachon olgansiz.",
+            show_alert=True,
+        )
+        return
+
+    await q.answer(f"✅ {amount}$ hisobingizga qo‘shildi!", show_alert=True)
+    if remaining == 0:
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
         print(
@@ -5049,6 +5511,7 @@ def main():
         return
 
     init_db()
+    init_economy()
 
     app = (
         Application.builder()
@@ -5070,6 +5533,9 @@ def main():
         (["reyting", "rating"], cmd_reyting),
         (["profil", "profile"], cmd_profil),
         (["oila", "family"], cmd_oila),
+        (["do‘kon", "dokon", "shop"], cmd_shop),
+        (["pul"], cmd_pul),
+        (["konkurs"], cmd_konkurs),
         (["missiyalar", "missions"], cmd_missiyalar),
         (["ariza"], cmd_ariza),
         (["qoidalar", "rules"], cmd_rules),
@@ -5079,6 +5545,8 @@ def main():
     for names, handler in commands:
         app.add_handler(CommandHandler(names, handler))
 
+    app.add_handler(CallbackQueryHandler(cb_shop, pattern=r"^shop:"))
+    app.add_handler(CallbackQueryHandler(cb_contest, pattern=r"^contest:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^panel:"))
     app.add_handler(CallbackQueryHandler(cb_memory, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|menu)$"))

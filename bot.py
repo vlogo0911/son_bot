@@ -1511,7 +1511,7 @@ async def handle_family_start(update, context, payload):
                 (name, rid),
             )
         partner_lang = family_lang(row[1])
-        request_text = family_text(row[1], "request", parent=f'<a href="tg://user?id={user.id}">{escape(person_name(user.id))}</a>', gender=escape(child_gender_label(row[1], row[3])), name=escape(name))
+        request_text = family_text(row[1], "request", parent=f'<a href="tg://user?id={user.id}">{person_name(user.id)}</a>', gender=escape(child_gender_label(row[1], row[3])), name=escape(name))
         if user.id in CAREER_OWNER_IDS or row[1] in CAREER_OWNER_IDS:
             request_text = request_text.replace("Rozilikdan so‘ng farzand 48 soat ichida yetkaziladi.", "Owner juftliklari uchun rozilikdan so‘ng farzand kutishsiz yetkaziladi.")
             request_text = request_text.replace("After consent, the child will arrive within 48 hours.", "For owner couples, the child arrives without a 48-hour wait after consent.")
@@ -2422,28 +2422,44 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     profile_buttons.insert(0, [
         InlineKeyboardButton(shop_label, callback_data="shop:open")
     ])
+    profile_text = t(
+        chat.id,
+        "profile",
+        name=uname(user),
+        birth_date=birth_display,
+        age=age_display,
+        level=level_name(chat.id, points),
+        points=points,
+        money=money,
+        profession=profession,
+        career_xp=career_xp,
+        games=games,
+        wins=wins,
+        losses=losses,
+        draws=draws,
+        winrate=winrate,
+        bar=bar(winrate),
+        rank=rank,
+        partner_info=partner_info,
+    )
+    # Received gifts are shown directly in the profile (newest first).
+    gift_count = c.execute(
+        "SELECT COUNT(*) FROM gift_log WHERE recipient_id=?", (user.id,)
+    ).fetchone()[0]
+    gift_rows = c.execute(
+        "SELECT sender_id,gift_key,price FROM gift_log WHERE recipient_id=? ORDER BY id DESC LIMIT 5",
+        (user.id,),
+    ).fetchall()
+    gift_titles = {"uz": "🎁 Qabul qilingan sovg‘alar", "eng": "🎁 Received gifts", "ru": "🎁 Полученные подарки", "kz": "🎁 Алған сыйлықтар"}
+    no_gifts = {"uz": "Hozircha yo‘q", "eng": "None yet", "ru": "Пока нет", "kz": "Әзірге жоқ"}
+    gift_lines = [f"{escape(SHOP_GIFTS.get(key, (key, price))[0])} — {person_name(sender_id)} ({price}$)" for sender_id, key, price in gift_rows]
+    if gift_count > len(gift_rows):
+        gift_lines.append({"uz": f"… va yana {gift_count-len(gift_rows)} ta", "eng": f"… and {gift_count-len(gift_rows)} more", "ru": f"… и ещё {gift_count-len(gift_rows)}", "kz": f"… және тағы {gift_count-len(gift_rows)}"}.get(profile_lang, f"… {gift_count-len(gift_rows)} more"))
+    profile_text += "\n\n" + gift_titles.get(profile_lang, gift_titles["uz"]) + ":\n" + ("\n".join(gift_lines) if gift_lines else no_gifts.get(profile_lang, no_gifts["uz"]))
     await msg.reply_text(
-        t(
-            chat.id,
-            "profile",
-            name=uname(user),
-            birth_date=birth_display,
-            age=age_display,
-            level=level_name(chat.id, points),
-            points=points,
-            money=money,
-            profession=profession,
-            career_xp=career_xp,
-            games=games,
-            wins=wins,
-            losses=losses,
-            draws=draws,
-            winrate=winrate,
-            bar=bar(winrate),
-            rank=rank,
-            partner_info=partner_info,
-        ),
+        profile_text,
         reply_markup=InlineKeyboardMarkup(profile_buttons),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -5139,7 +5155,7 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         request_text = family_text(
             partner_id, "request",
-            parent=f'<a href="tg://user?id={user.id}">{escape(person_name(user.id))}</a>',
+            parent=f'<a href="tg://user?id={user.id}">{person_name(user.id)}</a>',
             gender=escape(child_gender_label(partner_id, gender)),
             name=escape(name),
         )
@@ -5477,7 +5493,7 @@ def init_economy():
       id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
       owner_id INTEGER NOT NULL, amount INTEGER NOT NULL, winners INTEGER NOT NULL,
       remaining INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL);
+      created_at TEXT NOT NULL, message_id INTEGER);
     CREATE TABLE IF NOT EXISTS money_contest_claims (
       contest_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
       PRIMARY KEY(contest_id,user_id));
@@ -5486,6 +5502,10 @@ def init_economy():
       recipient_id INTEGER NOT NULL, gift_key TEXT NOT NULL, price INTEGER NOT NULL,
       created_at TEXT NOT NULL);
     """)
+    # Existing DB migration: remember the public contest message so it can be edited live.
+    contest_columns = {row[1] for row in c.execute("PRAGMA table_info(money_contests)").fetchall()}
+    if "message_id" not in contest_columns:
+        c.execute("ALTER TABLE money_contests ADD COLUMN message_id INTEGER")
     c.commit()
 
 def wallet_balance(user_id):
@@ -5667,8 +5687,8 @@ async def cb_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await log_money_event(
         context.bot,
         "🎁 <b>SOVG‘A O‘TKAZMASI</b>\n"
-        f"Kimdan: {escape(person_name(user.id))} (ID: <code>{user.id}</code>)\n"
-        f"Kimga: {escape(person_name(recipient))} (ID: <code>{recipient}</code>)\n"
+        f"Kimdan: {person_name(user.id)} (ID: <code>{user.id}</code>)\n"
+        f"Kimga: {person_name(recipient)} (ID: <code>{recipient}</code>)\n"
         f"Sovg‘a: {escape(name)}\nNarxi: <b>{price}$</b>\n"
         f"To‘lovchi owner: {'ha' if owner else 'yo‘q'}"
     )
@@ -5742,8 +5762,8 @@ async def cmd_pul(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await log_money_event(
         context.bot,
         "💸 <b>PUL O‘TKAZMASI</b>\n"
-        f"Kimdan: {escape(person_name(sender.id))} (ID: <code>{sender.id}</code>)\n"
-        f"Kimga: {escape(person_name(recipient.id))} (ID: <code>{recipient.id}</code>)\n"
+        f"Kimdan: {person_name(sender.id)} (ID: <code>{sender.id}</code>)\n"
+        f"Kimga: {person_name(recipient.id)} (ID: <code>{recipient.id}</code>)\n"
         f"Miqdor: <b>{amount}$</b>\nOwner orqali: {'ha' if owner else 'yo‘q'}"
     )
     await msg.reply_text(
@@ -5814,14 +5834,21 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]])
 
     try:
-        await msg.reply_text(
-            f"🎉 {amount}$ dan {winners} kishiga pul tarqatish boshlandi!",
+        contest_message = await msg.reply_text(
+            f"🎉 <b>KONKURS</b>\n"
+            f"Har bir g‘olibga: <b>{amount}$</b>\n"
+            f"G‘oliblar: <b>0/{winners}</b>\n"
+            "\n🏆 G‘oliblar ro‘yxati: hozircha yo‘q\n"
+            "\n👇 Mukofotni olish uchun tugmani bosing!",
             reply_markup=kb,
+            parse_mode=ParseMode.HTML,
         )
+        with c:
+            c.execute("UPDATE money_contests SET message_id=? WHERE id=?", (contest_message.message_id, cid))
         await log_money_event(
             context.bot,
             "🎉 <b>KONKURS OCHILDI</b>\n"
-            f"Tashkilotchi: {escape(person_name(user.id))} (ID: <code>{user.id}</code>)\n"
+            f"Tashkilotchi: {person_name(user.id)} (ID: <code>{user.id}</code>)\n"
             f"Chat: <code>{msg.chat.id}</code>\n"
             f"Har bir g‘olibga: <b>{amount}$</b>\nG‘oliblar soni: <b>{winners}</b>\n"
             f"Jami mukofot: <b>{total}$</b>\nOwner orqali: {'ha' if owner else 'yo‘q'}"
@@ -5931,15 +5958,43 @@ async def cb_contest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await q.answer(f"✅ {amount}$ hisobingizga qo‘shildi!", show_alert=True)
     contest_owner = db().execute(
-        "SELECT owner_id,chat_id FROM money_contests WHERE id=?", (contest_id,)
+        "SELECT owner_id,chat_id,message_id,amount,winners FROM money_contests WHERE id=?", (contest_id,)
     ).fetchone()
+    # Update the original contest post after every successful claim, showing the actual winners.
+    if contest_owner:
+        winner_rows = db().execute(
+            "SELECT user_id FROM money_contest_claims WHERE contest_id=? ORDER BY rowid",
+            (contest_id,),
+        ).fetchall()
+        winner_lines = [
+            f'{i}. <a href="tg://user?id={int(row[0])}">{escape(person_name(int(row[0])))}</a> — {contest_owner[3]}$'
+            for i, row in enumerate(winner_rows, 1)
+        ]
+        progress_text = (
+            "🎉 <b>KONKURS</b>\n"
+            f"Har bir g‘olibga: <b>{contest_owner[3]}$</b>\n"
+            f"G‘oliblar: <b>{len(winner_rows)}/{contest_owner[4]}</b>\n\n"
+            "🏆 <b>G‘oliblar ro‘yxati:</b>\n" + ("\n".join(winner_lines) if winner_lines else "Hozircha yo‘q")
+        )
+        progress_kb = None if remaining == 0 else InlineKeyboardMarkup([[
+            InlineKeyboardButton("💰 Pulni olish", callback_data=f"contest:{contest_id}")
+        ]])
+        if contest_owner[2]:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=contest_owner[1], message_id=contest_owner[2],
+                    text=progress_text, parse_mode=ParseMode.HTML,
+                    reply_markup=progress_kb, disable_web_page_preview=True,
+                )
+            except TelegramError as exc:
+                logger.warning("Konkurs xabarini yangilab bo‘lmadi: %s", exc)
     await log_money_event(
         context.bot,
         "🏆 <b>KONKURS MUKOFOTI O‘TKAZILDI</b>\n"
         f"Konkurs ID: <code>{contest_id}</code>\n"
-        f"Tashkilotchi: {escape(person_name(contest_owner[0])) if contest_owner else 'Noma’lum'} "
+        f"Tashkilotchi: {person_name(contest_owner[0]) if contest_owner else 'Noma’lum'} "
         f"(ID: <code>{contest_owner[0] if contest_owner else 0}</code>)\n"
-        f"G‘olib: {escape(person_name(user.id))} (ID: <code>{user.id}</code>)\n"
+        f"G‘olib: {person_name(user.id)} (ID: <code>{user.id}</code>)\n"
         f"Mukofot: <b>{amount}$</b>\nQolgan o‘rinlar: <b>{remaining}</b>"
     )
     if remaining == 0:

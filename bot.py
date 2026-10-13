@@ -1803,9 +1803,9 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for key, label in gifts
         ]
         text = (
-            "🎁 <b>SOVG'ALAR STATISTIKASI</b>\\n\\n"
-            + "\\n".join(lines)
-            + f"\\n\\n📦 Jami yuborilgan: <b>{total} ta</b>"
+            "🎁 <b>SOVG'ALAR STATISTIKASI</b>\n\n"
+            + "\n".join(lines)
+            + f"\n\n📦 Jami yuborilgan: <b>{total} ta</b>"
         )
         await query.edit_message_text(
             text,
@@ -3090,9 +3090,22 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with c:
             c.execute(
                 """UPDATE pair_requests SET status='approved',
-                   decided_by=?, decided_at=? WHERE id=? AND status='pending'""",
+                   decided_by=?, decided_at=?
+                   WHERE id=? AND status='pending'""",
                 (uid, now, rid),
             )
+            if kind == "divorce" and target:
+                c.execute(
+                    """UPDATE pair_requests
+                       SET status='approved', decided_by=?, decided_at=?
+                       WHERE request_type='divorce'
+                         AND status IN ('pending', 'partner_consent')
+                         AND (
+                           (requester_id=? AND target_id=?)
+                           OR (requester_id=? AND target_id=?)
+                         )""",
+                    (uid, now, requester, target, target, requester),
+                )
         try:
             await context.bot.send_message(
                 requester, f"✅ Arizangiz tasdiqlandi: {kind}."
@@ -3113,6 +3126,23 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         await q.answer("Tasdiqlandi!")
         await q.edit_message_text(f"✅ {rid}-ariza tasdiqlandi.")
+
+        if kind == "divorce":
+            for owner_id in CAREER_OWNER_IDS:
+                if owner_id == uid:
+                    continue
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_id,
+                        text=f"✅ <b>Ajrashish arizasi tasdiqlandi</b>\n"
+                             f"Ariza raqami: {rid}\n"
+                             f"Tasdiqlagan owner ID: {uid}",
+                    )
+                except TelegramError as e:
+                    logger.warning(
+                        "Tasdiq xabari egaga yuborilmadi (%s): %s",
+                        owner_id, e
+                    )
         return
 
     await q.answer()
@@ -6095,6 +6125,185 @@ async def cb_contest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+
+
+async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.effective_message
+
+    if not user or not msg:
+        return
+
+    if user.id not in CAREER_OWNER_IDS:
+        await msg.reply_text("⛔ Bu buyruq faqat bot egalari uchun.")
+        return
+
+    c = db()
+    now = datetime.now().isoformat(timespec="seconds")
+    approved = 0
+    skipped = 0
+    details = []
+
+    # Kasb almashtirish arizalari
+    career_rows = c.execute(
+        """SELECT id, user_id, requested_profession_id
+           FROM career_requests
+           WHERE status='pending'
+           ORDER BY id"""
+    ).fetchall()
+
+    for rid, target_user, profession_id in career_rows:
+        with c:
+            current = c.execute(
+                "SELECT status FROM career_requests WHERE id=?", (rid,)
+            ).fetchone()
+            if not current or current[0] != "pending":
+                continue
+
+            c.execute(
+                """UPDATE users
+                   SET profession_id=?, profession_selected=1
+                   WHERE user_id=?""",
+                (profession_id, target_user),
+            )
+            changed = c.execute(
+                """UPDATE career_requests
+                   SET status='approved', decided_by=?, decided_at=?
+                   WHERE id=? AND status='pending'""",
+                (user.id, now, rid),
+            )
+
+        if changed.rowcount == 1:
+            approved += 1
+            try:
+                await context.bot.send_message(
+                    chat_id=target_user,
+                    text="✅ Kasb almashtirish arizangiz bot egasi tomonidan tasdiqlandi.",
+                )
+            except TelegramError:
+                pass
+        else:
+            skipped += 1
+
+    # Juftlashish, ajrashish va ishdan bo‘shash arizalari
+    rows = c.execute(
+        """SELECT id, request_type, requester_id, target_id, group_id
+           FROM pair_requests
+           WHERE status='pending'
+           ORDER BY id"""
+    ).fetchall()
+
+    for rid, kind, requester, target, group_id in rows:
+        current = c.execute(
+            "SELECT status FROM pair_requests WHERE id=?", (rid,)
+        ).fetchone()
+        if not current or current[0] != "pending":
+            continue
+
+        try:
+            with c:
+                if kind == "pair":
+                    if not target or active_pair(requester) or active_pair(target):
+                        skipped += 1
+                        details.append(f"#{rid}: juftlik holati mos emas")
+                        continue
+
+                    c.execute(
+                        """INSERT INTO pairs
+                           (user1_id, user2_id, group_id, started_at, status)
+                           VALUES (?, ?, ?, ?, 'active')""",
+                        (requester, target, group_id or 0, now),
+                    )
+
+                elif kind == "divorce":
+                    pair = active_pair(requester)
+                    if (
+                        not pair or not target
+                        or {pair[1], pair[2]} != {requester, target}
+                    ):
+                        skipped += 1
+                        details.append(f"#{rid}: faol juftlik topilmadi")
+                        continue
+
+                    c.execute(
+                        """UPDATE pairs SET status='ended', ended_at=?
+                           WHERE id=? AND status='active'""",
+                        (now, pair[0]),
+                    )
+
+                    # Shu juftlikning boshqa ochiq ajrashish arizalari
+                    # ham kutilyotgan holatda qolmasin.
+                    c.execute(
+                        """UPDATE pair_requests SET status='cancelled'
+                           WHERE request_type='divorce'
+                             AND id<>?
+                             AND status IN ('pending','partner_consent')
+                             AND (
+                               (requester_id=? AND target_id=?)
+                               OR (requester_id=? AND target_id=?)
+                             )""",
+                        (rid, requester, target, target, requester),
+                    )
+
+                elif kind == "quit_job":
+                    c.execute(
+                        """UPDATE users
+                           SET profession_id=NULL, profession_selected=0
+                           WHERE user_id=?""",
+                        (requester,),
+                    )
+                else:
+                    skipped += 1
+                    details.append(f"#{rid}: noma’lum ariza turi")
+                    continue
+
+                changed = c.execute(
+                    """UPDATE pair_requests
+                       SET status='approved', decided_by=?, decided_at=?
+                       WHERE id=? AND status='pending'""",
+                    (user.id, now, rid),
+                )
+
+            if changed.rowcount != 1:
+                skipped += 1
+                continue
+
+            approved += 1
+            try:
+                await context.bot.send_message(
+                    chat_id=requester,
+                    text=f"✅ Arizangiz tasdiqlandi. Ariza raqami: {rid}",
+                )
+            except TelegramError:
+                pass
+
+            if target and kind in ("pair", "divorce"):
+                try:
+                    notice = (
+                        "💞 Juftlik arizasi tasdiqlandi."
+                        if kind == "pair"
+                        else "💔 Ajrashish arizasi tasdiqlandi."
+                    )
+                    await context.bot.send_message(target, notice)
+                except TelegramError:
+                    pass
+
+        except Exception:
+            logger.exception("/tasdiq: #%s arizasini ko‘rib chiqishda xato", rid)
+            skipped += 1
+            details.append(f"#{rid}: xatolik, ariza tekshirish uchun qoldirildi")
+
+    result = (
+        "📋 <b>KUTILAYOTGAN ARIZALAR</b>\n\n"
+        f"✅ Tasdiqlangan: <b>{approved} ta</b>\n"
+        f"⚠️ O‘tkazib yuborilgan: <b>{skipped} ta</b>"
+    )
+    if details:
+        result += "\n\n" + "\n".join(details[:15])
+
+    await msg.reply_text(result)
+
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
         print(
@@ -6118,6 +6327,7 @@ def main():
 
     commands = [
         (["panel"], cmd_panel),
+        (["tasdiq"], cmd_tasdiq),
         (["start"], cmd_start),
         (["juft"], cmd_juft),
         (["juftim"], cmd_juftim),

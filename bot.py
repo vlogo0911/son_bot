@@ -1708,6 +1708,9 @@ def panel_keyboard():
             InlineKeyboardButton("🏆 O'yin turlari statistikasi", callback_data="panel:games"),
         ],
         [
+            InlineKeyboardButton("🎁 Sovg'alar statistikasi", callback_data="panel:gifts"),
+        ],
+        [
             InlineKeyboardButton("💣 Bankrot qilish", callback_data="panel:bankrupt"),
             InlineKeyboardButton("💸 Pul yuborish", callback_data="panel:give"),
         ],
@@ -1781,6 +1784,39 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.answer()
+
+    if query.data == "panel:gifts":
+        c = db()
+        counts = dict(c.execute(
+            "SELECT gift_key, COUNT(*) FROM gift_log GROUP BY gift_key"
+        ).fetchall())
+
+        gifts = [
+            ("ring", "💍 Uzuk"),
+            ("bear", "🧸 Ayiqcha"),
+            ("bouquet", "💐 Guldasta"),
+            ("rose", "🌹 Atirgul"),
+        ]
+        total = sum(int(counts.get(key, 0)) for key, _ in gifts)
+        lines = [
+            f"{label}: <b>{int(counts.get(key, 0))} ta</b>"
+            for key, label in gifts
+        ]
+        text = (
+            "🎁 <b>SOVG'ALAR STATISTIKASI</b>\\n\\n"
+            + "\\n".join(lines)
+            + f"\\n\\n📦 Jami yuborilgan: <b>{total} ta</b>"
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "⬅️ Panelga qaytish",
+                    callback_data="panel:home"
+                )
+            ]]),
+        )
+        return
 
     if query.data == "panel:broadcast":
         context.user_data["panel_broadcast_state"] = "waiting_text"

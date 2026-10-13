@@ -5929,6 +5929,7 @@ async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_contest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     user = q.from_user
+    save_user(user)
     try:
         contest_id = int(q.data.split(":")[1])
     except (ValueError, IndexError):

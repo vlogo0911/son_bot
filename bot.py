@@ -6,6 +6,7 @@ Ishga tushirish:  BOT_TOKEN muhit o'zgaruvchisini o'rnating va `python bot.py`
 """
 
 import html
+import math
 import asyncio
 import logging
 from datetime import date, datetime
@@ -14,6 +15,7 @@ import random
 import sqlite3
 import re
 import secrets
+import time
 from html import escape
 
 from telegram import (
@@ -1257,6 +1259,8 @@ def arm(app, chat_id, game, seconds):
 
 
 def end_game(chat_id, game):
+    if game.get("type") == "crash":
+        crash_refund(game)
     if GAMES.get(chat_id) is game:
         del GAMES[chat_id]
     timer = game.get("timer")
@@ -1317,6 +1321,7 @@ def menu_kb(chat_id):
         [InlineKeyboardButton(t(chat_id, "btn_rsp"), callback_data="g:rsp")],
         [InlineKeyboardButton(t(chat_id, "btn_xo"), callback_data="g:xo")],
         [InlineKeyboardButton(memory_t(chat_id, "btn"), callback_data="g:memory")],
+        [InlineKeyboardButton(cr_t(chat_id, "btn"), callback_data="g:crash")],
     ])
 
 
@@ -3711,6 +3716,20 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         arm(app, chat_id, game, MEMORY_SETUP_TTL)
 
+    elif kind == "crash":
+        game = new_game(
+            chat_id, "crash", user.id,
+            state="lobby", msg_id=msg.message_id,
+            players={}, dropped=[], cp=None, t0=None, t_crash=None,
+            charged=False, settled=False,
+        )
+        await edit(
+            context.bot, chat_id, msg.message_id,
+            cr_t(chat_id, "lobby", min=CRASH_MIN_BET, sec=CRASH_COUNTDOWN),
+            crash_kb(chat_id, game),
+        )
+        arm(app, chat_id, game, CRASH_LOBBY_TTL)
+
 
 
 # ───────────────────────────── 🧠 Juftini top ─────────────────────────────
@@ -4536,6 +4555,516 @@ async def cb_xo_move(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await edit(context.bot, chat_id, game["msg_id"], xo_turn_text(chat_id, game), xo_keyboard(chat_id, game))
     arm(context.application, chat_id, game, XO_MOVE_TTL)
 
+
+#   6. Oxirida kim qancha yutgani/yutqazgani {mention} bilan chiqadi.
+
+CRASH_MIN_BET = 50          # minimal depozit ($)
+CRASH_STEP = 50             # ➕ tugmasi har bosilganda qo'shiladigan summa ($)
+CRASH_COUNTDOWN = 20        # birinchi o'yinchi qo'shilgach teskari sanoq (soniya)
+CRASH_LOBBY_TTL = 120       # hech kim qo'shilmasa o'yin bekor bo'ladigan vaqt (soniya)
+CRASH_GROWTH = 0.10         # koeffitsiyent = e^(CRASH_GROWTH * soniya)
+CRASH_RTP = 0.97            # 0.97 → uzoq muddatda ~3% bot foydasi
+CRASH_MAX_MULT = 100.0      # eng katta koeffitsiyent
+CRASH_TICK = 1.0            # parvoz paytida xabar yangilanish oralig'i (soniya)
+CRASH_LIST_LIMIT = 25       # xabarda ko'rsatiladigan o'yinchilar soni (ro'yxat boshiga)
+_CRASH_RNG = secrets.SystemRandom()
+
+CRASH_TEXT = {
+    "uz": {
+        "btn": "🚀 Crash",
+        "lobby": (
+            "🚀 <b>CRASH</b>\n\n"
+            "Roket uchadi va koeffitsiyent oshib boradi. Portlashdan oldin pulni olishga ulguring!\n\n"
+            "💵 Minimal depozit: <b>{min}$</b>\n\n"
+            "👇 Qo‘shilish uchun tugmani bosing — shundan keyin {sec} soniyalik sanoq boshlanadi."
+        ),
+        "count": (
+            "🚀 <b>CRASH</b>\n\n"
+            "⏳ Boshlanishiga: <b>{left}</b> soniya\n\n"
+            "👥 O‘yinchilar:\n{players}\n\n"
+            "➕ Depozitni oshiring (+{step}$) yoki 🔽 {min}$ ga tushiring."
+        ),
+        "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Portlashdan oldin pulni oling!",
+        "result": (
+            "💥 <b>Roket x{cp} da portladi!</b>\n\n"
+            "🏆 <b>Yutganlar:</b>\n{winners}\n\n"
+            "😔 <b>Yutqazganlar:</b>\n{losers}"
+        ),
+        "win_line": "✅ {mention} — x{mult} → <b>+{profit}$</b>",
+        "lose_line": "❌ {mention} — <b>−{bet}$</b>",
+        "cancelled": "🚀 <b>CRASH</b>\n\n😕 O‘yin bekor qilindi: depozit uchun mablag‘ yetmadi.",
+        "b_join": "✅ Qo‘shilish",
+        "b_plus": "➕ Depozit +{step}$",
+        "b_min": "🔽 Minimal {min}$",
+        "b_cash": "💰 Pulni olish",
+        "joined": "✅ Qo‘shildingiz! Depozit: {bet}$",
+        "already": "Siz allaqachon qo‘shilgansiz.",
+        "no_funds": "💸 Balansingiz yetarli emas (kamida {min}$ kerak).",
+        "no_more": "💸 Balansingizda bundan ortiq pul yo‘q ({bal}$).",
+        "closed": "⌛ Bu raund uchun vaqt tugadi.",
+        "not_in": "Avval «Qo‘shilish» tugmasini bosing.",
+        "not_in_round": "Siz bu raundda qatnashmayapsiz.",
+        "bet_set": "💵 Depozit: {bet}$",
+        "cashed": "✅ x{mult} da oldingiz: +{profit}$",
+        "already_cashed": "Siz pulni allaqachon olgansiz.",
+        "late": "💥 Kech qoldingiz — roket portladi!",
+        "dropped": "\n\n⚠️ Mablag‘ yetmagani uchun chiqarildi: {names}",
+        "none": "—",
+        "error": "⚠️ Xatolik. Qayta urinib ko‘ring.",
+    },
+    "eng": {
+        "btn": "🚀 Crash",
+        "lobby": (
+            "🚀 <b>CRASH</b>\n\n"
+            "The rocket takes off and the multiplier keeps growing. Cash out before it crashes!\n\n"
+            "💵 Minimum deposit: <b>{min}$</b>\n\n"
+            "👇 Press the button to join — a {sec}-second countdown starts after that."
+        ),
+        "count": (
+            "🚀 <b>CRASH</b>\n\n"
+            "⏳ Starts in: <b>{left}</b> sec\n\n"
+            "👥 Players:\n{players}\n\n"
+            "➕ Raise your deposit (+{step}$) or 🔽 drop it to {min}$."
+        ),
+        "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Cash out before it crashes!",
+        "result": (
+            "💥 <b>The rocket crashed at x{cp}!</b>\n\n"
+            "🏆 <b>Winners:</b>\n{winners}\n\n"
+            "😔 <b>Losers:</b>\n{losers}"
+        ),
+        "win_line": "✅ {mention} — x{mult} → <b>+{profit}$</b>",
+        "lose_line": "❌ {mention} — <b>−{bet}$</b>",
+        "cancelled": "🚀 <b>CRASH</b>\n\n😕 Round cancelled: not enough funds for the deposit.",
+        "b_join": "✅ Join",
+        "b_plus": "➕ Deposit +{step}$",
+        "b_min": "🔽 Minimum {min}$",
+        "b_cash": "💰 Cash out",
+        "joined": "✅ You joined! Deposit: {bet}$",
+        "already": "You have already joined.",
+        "no_funds": "💸 Not enough balance (at least {min}$ needed).",
+        "no_more": "💸 You don't have more money than that ({bal}$).",
+        "closed": "⌛ Time is up for this round.",
+        "not_in": "Press “Join” first.",
+        "not_in_round": "You are not in this round.",
+        "bet_set": "💵 Deposit: {bet}$",
+        "cashed": "✅ Cashed out at x{mult}: +{profit}$",
+        "already_cashed": "You have already cashed out.",
+        "late": "💥 Too late — the rocket crashed!",
+        "dropped": "\n\n⚠️ Removed (not enough funds): {names}",
+        "none": "—",
+        "error": "⚠️ Error. Please try again.",
+    },
+    "ru": {
+        "btn": "🚀 Crash",
+        "lobby": (
+            "🚀 <b>CRASH</b>\n\n"
+            "Ракета взлетает, множитель растёт. Успейте забрать деньги до взрыва!\n\n"
+            "💵 Минимальный депозит: <b>{min}$</b>\n\n"
+            "👇 Нажмите кнопку, чтобы войти — после этого начнётся отсчёт {sec} сек."
+        ),
+        "count": (
+            "🚀 <b>CRASH</b>\n\n"
+            "⏳ До старта: <b>{left}</b> сек\n\n"
+            "👥 Игроки:\n{players}\n\n"
+            "➕ Увеличьте депозит (+{step}$) или 🔽 снизьте до {min}$."
+        ),
+        "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Заберите деньги до взрыва!",
+        "result": (
+            "💥 <b>Ракета взорвалась на x{cp}!</b>\n\n"
+            "🏆 <b>Выиграли:</b>\n{winners}\n\n"
+            "😔 <b>Проиграли:</b>\n{losers}"
+        ),
+        "win_line": "✅ {mention} — x{mult} → <b>+{profit}$</b>",
+        "lose_line": "❌ {mention} — <b>−{bet}$</b>",
+        "cancelled": "🚀 <b>CRASH</b>\n\n😕 Раунд отменён: не хватило средств на депозит.",
+        "b_join": "✅ Войти",
+        "b_plus": "➕ Депозит +{step}$",
+        "b_min": "🔽 Минимум {min}$",
+        "b_cash": "💰 Забрать",
+        "joined": "✅ Вы в игре! Депозит: {bet}$",
+        "already": "Вы уже в игре.",
+        "no_funds": "💸 Недостаточно средств (нужно минимум {min}$).",
+        "no_more": "💸 На балансе нет больше ({bal}$).",
+        "closed": "⌛ Время этого раунда истекло.",
+        "not_in": "Сначала нажмите «Войти».",
+        "not_in_round": "Вы не участвуете в этом раунде.",
+        "bet_set": "💵 Депозит: {bet}$",
+        "cashed": "✅ Забрали на x{mult}: +{profit}$",
+        "already_cashed": "Вы уже забрали деньги.",
+        "late": "💥 Опоздали — ракета взорвалась!",
+        "dropped": "\n\n⚠️ Исключены (не хватило средств): {names}",
+        "none": "—",
+        "error": "⚠️ Ошибка. Попробуйте ещё раз.",
+    },
+    "kz": {
+        "btn": "🚀 Crash",
+        "lobby": (
+            "🚀 <b>CRASH</b>\n\n"
+            "Зымыран ұшады, коэффициент өсе береді. Жарылғанға дейін ақшаны алып үлгеріңіз!\n\n"
+            "💵 Ең аз депозит: <b>{min}$</b>\n\n"
+            "👇 Қосылу үшін батырманы басыңыз — содан кейін {sec} секундтық санақ басталады."
+        ),
+        "count": (
+            "🚀 <b>CRASH</b>\n\n"
+            "⏳ Басталуына: <b>{left}</b> сек\n\n"
+            "👥 Ойыншылар:\n{players}\n\n"
+            "➕ Депозитті көбейтіңіз (+{step}$) немесе 🔽 {min}$ дейін түсіріңіз."
+        ),
+        "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Жарылғанға дейін ақшаны алыңыз!",
+        "result": (
+            "💥 <b>Зымыран x{cp} кезінде жарылды!</b>\n\n"
+            "🏆 <b>Ұтқандар:</b>\n{winners}\n\n"
+            "😔 <b>Ұтылғандар:</b>\n{losers}"
+        ),
+        "win_line": "✅ {mention} — x{mult} → <b>+{profit}$</b>",
+        "lose_line": "❌ {mention} — <b>−{bet}$</b>",
+        "cancelled": "🚀 <b>CRASH</b>\n\n😕 Раунд тоқтатылды: депозитке қаражат жетпеді.",
+        "b_join": "✅ Қосылу",
+        "b_plus": "➕ Депозит +{step}$",
+        "b_min": "🔽 Ең аз {min}$",
+        "b_cash": "💰 Ақшаны алу",
+        "joined": "✅ Қосылдыңыз! Депозит: {bet}$",
+        "already": "Сіз қосылып қойғансыз.",
+        "no_funds": "💸 Баланс жеткіліксіз (кемінде {min}$ керек).",
+        "no_more": "💸 Балансыңызда одан көп ақша жоқ ({bal}$).",
+        "closed": "⌛ Бұл раундтың уақыты бітті.",
+        "not_in": "Алдымен «Қосылу» батырмасын басыңыз.",
+        "not_in_round": "Сіз бұл раундқа қатыспайсыз.",
+        "bet_set": "💵 Депозит: {bet}$",
+        "cashed": "✅ x{mult} кезінде алдыңыз: +{profit}$",
+        "already_cashed": "Сіз ақшаны алып қойғансыз.",
+        "late": "💥 Кеш қалдыңыз — зымыран жарылды!",
+        "dropped": "\n\n⚠️ Қаражат жетпегендіктен шығарылды: {names}",
+        "none": "—",
+        "error": "⚠️ Қате. Қайта көріңіз.",
+    },
+}
+
+
+def cr_t(chat_id, key, **kwargs):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    text = CRASH_TEXT.get(lang, CRASH_TEXT["uz"]).get(key)
+    if text is None:
+        text = CRASH_TEXT["uz"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def crash_point():
+    """Roket portlaydigan koeffitsiyent (raund boshida bir marta aniqlanadi)."""
+    r = _CRASH_RNG.random()  # [0, 1)
+    cp = math.floor(CRASH_RTP / (1.0 - r) * 100) / 100
+    return min(CRASH_MAX_MULT, max(1.0, cp))
+
+
+def crash_mult(elapsed):
+    """Parvoz boshlanganidan beri `elapsed` soniya o'tgandagi koeffitsiyent."""
+    return math.floor(math.exp(CRASH_GROWTH * elapsed) * 100) / 100
+
+
+def crash_payout(bet, mult):
+    """Depozit × koeffitsiyent (butun songa, kasr yo'qotilmaydi)."""
+    return bet * int(round(mult * 100)) // 100
+
+
+def crash_mention(uid, player):
+    return f'<a href="tg://user?id={uid}">{player["name"]}</a>'
+
+
+def crash_players_text(chat_id, game):
+    items = list(game["players"].items())
+    if not items:
+        return cr_t(chat_id, "none")
+    lines = []
+    for uid, p in items[:CRASH_LIST_LIMIT]:
+        line = f"👤 {crash_mention(uid, p)} — <b>{p['bet']}$</b>"
+        if p["cash"] is not None:
+            line += f" ✅ x{p['cash']:.2f}"
+        lines.append(line)
+    if len(items) > CRASH_LIST_LIMIT:
+        lines.append(f"… +{len(items) - CRASH_LIST_LIMIT}")
+    return "\n".join(lines)
+
+
+def crash_kb(chat_id, game):
+    if game["state"] == "fly":
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(cr_t(chat_id, "b_cash"), callback_data="cr:cash")
+        ]])
+    rows = [[InlineKeyboardButton(cr_t(chat_id, "b_join"), callback_data="cr:join")]]
+    if game["state"] == "count":
+        rows.append([
+            InlineKeyboardButton(cr_t(chat_id, "b_plus", step=CRASH_STEP), callback_data="cr:plus"),
+            InlineKeyboardButton(cr_t(chat_id, "b_min", min=CRASH_MIN_BET), callback_data="cr:min"),
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+def crash_fly_text(chat_id, game, mult):
+    dropped = ""
+    if game["dropped"]:
+        dropped = cr_t(chat_id, "dropped", names=", ".join(game["dropped"]))
+    return cr_t(
+        chat_id, "fly",
+        mult=f"{mult:.2f}", players=crash_players_text(chat_id, game), dropped=dropped,
+    )
+
+
+def crash_charge(game):
+    """Depozitlarni hamyondan yechadi (atomik). Puli yetmaganlar o'yindan chiqariladi."""
+    c = db()
+    for uid in list(game["players"]):
+        p = game["players"][uid]
+        try:
+            with c:
+                cur = c.execute(
+                    "UPDATE user_wallet SET money=money-? WHERE user_id=? AND money>=?",
+                    (p["bet"], uid, p["bet"]),
+                )
+            paid = cur.rowcount == 1
+        except sqlite3.Error:
+            logger.exception("Crash: depozitni yechib bo'lmadi (user %s)", uid)
+            paid = False
+        if paid:
+            p["paid"] = True
+        else:
+            game["dropped"].append(crash_mention(uid, p))
+            del game["players"][uid]
+    game["charged"] = True
+
+
+def crash_refund(game):
+    """Natijalanmagan depozitlarni takroriy to'lovsiz qaytaradi."""
+    if not game.get("charged") or game.get("settled"):
+        return
+
+    failed = False
+    for uid, p in game["players"].items():
+        if not p.get("paid") or p.get("cash") is not None:
+            continue
+        if p.get("refunded", False):
+            continue
+
+        try:
+            wallet_change(uid, p["bet"])
+            p["refunded"] = True
+        except Exception:
+            failed = True
+            logger.exception(
+                "Crash: depozitni qaytarib bo'lmadi (user %s)", uid
+            )
+
+    if not failed:
+        pending = any(
+            p.get("paid")
+            and p.get("cash") is None
+            and not p.get("refunded", False)
+            for p in game["players"].values()
+        )
+        if not pending:
+            game["settled"] = True
+
+async def crash_round(app, chat_id, game):
+    bot = app.bot
+    try:
+        # 1) Umumiy teskari sanoq (hamma uchun bir xil vaqt)
+        deadline = time.monotonic() + CRASH_COUNTDOWN
+        last = None
+        while True:
+            if GAMES.get(chat_id) is not game:
+                return  # /stop yoki boshqa sabab bilan to'xtatilgan
+            left = math.ceil(deadline - time.monotonic())
+            if left <= 0:
+                break
+            if left != last:
+                last = left
+                await edit(
+                    bot, chat_id, game["msg_id"],
+                    cr_t(
+                        chat_id, "count", left=left,
+                        players=crash_players_text(chat_id, game),
+                        step=CRASH_STEP, min=CRASH_MIN_BET,
+                    ),
+                    crash_kb(chat_id, game),
+                )
+            until_next = deadline - (left - 1) - time.monotonic()
+            await asyncio.sleep(max(0.05, until_next))
+
+        if GAMES.get(chat_id) is not game:
+            return
+
+        # 2) Depozitlarni yechish va parvozni boshlash (await yo'q — poyga holati bo'lmaydi)
+        crash_charge(game)
+        if not game["players"]:
+            game["state"] = "end"
+            end_game(chat_id, game)
+            await edit(
+                bot, chat_id, game["msg_id"], cr_t(chat_id, "cancelled"),
+                InlineKeyboardMarkup([again_row(chat_id)]),
+            )
+            return
+
+        game["cp"] = crash_point()
+        game["t_crash"] = math.log(game["cp"]) / CRASH_GROWTH
+        game["t0"] = time.monotonic()
+        game["state"] = "fly"
+
+        # 3) Parvoz
+        if game["t_crash"] > 0:
+            await edit(
+                bot, chat_id, game["msg_id"],
+                crash_fly_text(chat_id, game, 1.0), crash_kb(chat_id, game),
+            )
+        while True:
+            elapsed = time.monotonic() - game["t0"]
+            if elapsed >= game["t_crash"]:
+                break
+            await asyncio.sleep(min(CRASH_TICK, game["t_crash"] - elapsed))
+            if GAMES.get(chat_id) is not game:
+                return  # /stop — depozitlar finally ichida qaytariladi
+            elapsed = time.monotonic() - game["t0"]
+            if elapsed >= game["t_crash"]:
+                break
+            await edit(
+                bot, chat_id, game["msg_id"],
+                crash_fly_text(chat_id, game, crash_mult(elapsed)), crash_kb(chat_id, game),
+            )
+
+        # 4) Portlash va natijalar
+        game["state"] = "end"
+        game["settled"] = True
+        end_game(chat_id, game)
+
+        winners, losers, log_lines = [], [], []
+        for uid, p in game["players"].items():
+            mention = crash_mention(uid, p)
+            if p["cash"] is not None:
+                profit = crash_payout(p["bet"], p["cash"]) - p["bet"]
+                winners.append(cr_t(
+                    chat_id, "win_line",
+                    mention=mention, mult=f"{p['cash']:.2f}", profit=profit,
+                ))
+                outcome = "win"
+                log_lines.append(f"{person_name(uid)}: +{profit}$ (x{p['cash']:.2f})")
+            else:
+                losers.append(cr_t(chat_id, "lose_line", mention=mention, bet=p["bet"]))
+                outcome = "loss"
+                log_lines.append(f"{person_name(uid)}: −{p['bet']}$")
+            try:
+                record(chat_id, uid, outcome, 0)
+            except sqlite3.Error:
+                logger.exception("Crash: statistikani yozib bo'lmadi (user %s)", uid)
+
+        def _cut(lines):
+            if not lines:
+                return cr_t(chat_id, "none")
+            extra = len(lines) - CRASH_LIST_LIMIT
+            shown = lines[:CRASH_LIST_LIMIT] + ([f"… +{extra}"] if extra > 0 else [])
+            return "\n".join(shown)
+
+        await edit(
+            bot, chat_id, game["msg_id"],
+            cr_t(chat_id, "result", cp=f"{game['cp']:.2f}", winners=_cut(winners), losers=_cut(losers)),
+            InlineKeyboardMarkup([again_row(chat_id)]),
+        )
+        await log_money_event(
+            bot,
+            "🚀 <b>CRASH</b>\n"
+            f"Chat: <code>{chat_id}</code>\n"
+            f"Portlash: <b>x{game['cp']:.2f}</b>\n" + "\n".join(log_lines),
+        )
+    except Exception:  # noqa: BLE001 — raund xatosi botni yiqitmasin
+        logger.exception("Crash raundida xato")
+    finally:
+        crash_refund(game)
+        end_game(chat_id, game)
+
+
+async def cb_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id = q.message.chat.id
+    user = q.from_user
+    action = q.data.split(":", 1)[1]
+    game = active(q, "crash")
+
+    # ── Qo'shilish ──
+    if action == "join":
+        if not game or game["state"] not in ("lobby", "count"):
+            await q.answer(cr_t(chat_id, "closed"), show_alert=True)
+            return
+        if user.id in game["players"]:
+            await q.answer(cr_t(chat_id, "already"), show_alert=True)
+            return
+        if wallet_balance(user.id) < CRASH_MIN_BET:
+            await q.answer(cr_t(chat_id, "no_funds", min=CRASH_MIN_BET), show_alert=True)
+            return
+        save_user(user)
+        game["players"][user.id] = {
+            "name": uname(user), "bet": CRASH_MIN_BET, "cash": None, "paid": False, "refunded": False,
+        }
+        if game["state"] == "lobby":
+            # Birinchi o'yinchi — umumiy sanoqni boshlaymiz
+            game["state"] = "count"
+            timer = game.get("timer")
+            if timer and not timer.done():
+                timer.cancel()
+            game["timer"] = None
+            task = asyncio.create_task(crash_round(context.application, chat_id, game))
+            BG_TASKS.add(task)
+            task.add_done_callback(BG_TASKS.discard)
+        await q.answer(cr_t(chat_id, "joined", bet=CRASH_MIN_BET))
+        return
+
+    # ── Depozitni o'zgartirish ──
+    if action in ("plus", "min"):
+        if not game or game["state"] != "count":
+            await q.answer(cr_t(chat_id, "closed"), show_alert=True)
+            return
+        p = game["players"].get(user.id)
+        if not p:
+            await q.answer(cr_t(chat_id, "not_in"), show_alert=True)
+            return
+        if action == "plus":
+            new_bet = p["bet"] + CRASH_STEP
+            balance = wallet_balance(user.id)
+            if new_bet > balance:
+                await q.answer(cr_t(chat_id, "no_more", bal=balance), show_alert=True)
+                return
+            p["bet"] = new_bet
+        else:
+            p["bet"] = CRASH_MIN_BET
+        await q.answer(cr_t(chat_id, "bet_set", bet=p["bet"]))
+        return
+
+    # ── Pulni olish ──
+    if action == "cash":
+        if not game or game["state"] != "fly":
+            await q.answer(cr_t(chat_id, "closed"), show_alert=True)
+            return
+        p = game["players"].get(user.id)
+        if not p:
+            await q.answer(cr_t(chat_id, "not_in_round"), show_alert=True)
+            return
+        if p["cash"] is not None:
+            await q.answer(cr_t(chat_id, "already_cashed"), show_alert=True)
+            return
+        elapsed = time.monotonic() - game["t0"]
+        if elapsed >= game["t_crash"]:
+            await q.answer(cr_t(chat_id, "late"), show_alert=True)
+            return
+        mult = crash_mult(elapsed)
+        payout = crash_payout(p["bet"], mult)
+        p["cash"] = mult
+        try:
+            wallet_change(user.id, payout)
+        except sqlite3.Error:
+            logger.exception("Crash: yutuqni yozib bo'lmadi (user %s)", user.id)
+            p["cash"] = None
+            await q.answer(cr_t(chat_id, "error"), show_alert=True)
+            return
+        await q.answer(cr_t(chat_id, "cashed", mult=f"{mult:.2f}", profit=payout - p["bet"]))
+        return
+
+    await q.answer()
 
 # ───────────────────────────── Boshqa callback'lar ─────────────────────────────
 
@@ -7323,7 +7852,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_hadya, pattern=r"^hadya:claim:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^panel:"))
     app.add_handler(CallbackQueryHandler(cb_memory, pattern=r"^m:"))
-    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|menu)$"))
+    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|menu)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))
     app.add_handler(
@@ -7337,6 +7866,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_xo_move, pattern=r"^xm:[0-8]$"))
     # Boshqa barcha callback'larga ham javob beramiz (spinner qotib qolmasin)
     app.add_handler(CallbackQueryHandler(cb_relationship, pattern=r"^(rel:|family:)"))
+    app.add_handler(CallbackQueryHandler(cb_crash, pattern=r"^cr:"))
     app.add_handler(CallbackQueryHandler(cb_noop))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, career_private_text))
 

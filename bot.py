@@ -843,6 +843,13 @@ def init_db():
             delivered_at TEXT
         )
     """)
+    # Migrate older databases safely: CREATE TABLE does not add columns to existing tables.
+    child_cols = {row[1] for row in c.execute("PRAGMA table_info(child_requests)").fetchall()}
+    if "due_at" not in child_cols:
+        c.execute("ALTER TABLE child_requests ADD COLUMN due_at TEXT")
+    if "delivered_at" not in child_cols:
+        c.execute("ALTER TABLE child_requests ADD COLUMN delivered_at TEXT")
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS family_children (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1605,10 +1612,12 @@ async def family_delivery_worker(application):
     while True:
         try:
             now = datetime.now().isoformat(timespec="seconds")
-            due = db().execute(
-                "SELECT id,requester_id,partner_id,pair_id,gender,child_name FROM child_requests WHERE status='approved' AND due_at<=?",
-                (now,),
-            ).fetchall()
+            with db() as conn:
+                due = conn.execute(
+                    "SELECT id,requester_id,partner_id,pair_id,gender,child_name "
+                    "FROM child_requests WHERE status='approved' AND due_at IS NOT NULL AND due_at<=?",
+                    (now,),
+                ).fetchall()
             for rid, parent1, parent2, pair_id, gender, name in due:
                 pair = active_pair(parent1)
                 if not pair or pair[0] != pair_id or {pair[1], pair[2]} != {parent1, parent2}:
@@ -1711,12 +1720,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 PANEL_PERMISSIONS = {
-    "users": "users",
-    "groups": "groups",
-    "active": "active",
-    "stats": "stats",
-    "games": "games",
-    "gifts": "gifts",
+    "users": "users", "groups": "groups", "active": "active",
+    "stats": "stats", "games": "games", "gifts": "gifts",
+    "broadcast": "broadcast", "economy": "economy", "hadya": "hadya",
+    "child_instant": "child_instant", "admin_management": "admin_management",
 }
 
 
@@ -1746,9 +1753,12 @@ def panel_permission_for_callback(data):
     if data == "panel:home":
         return None
     action = data.split(":")[1] if ":" in data else ""
-    if action in ("broadcast", "money_cancel", "money_confirm",
-                  "give", "bankrupt"):
-        return "owner_only"
+    if action in ("broadcast", "broadcast_cancel", "broadcast_confirm"):
+        return "broadcast"
+    if action in ("give", "money_cancel", "money_confirm", "bankrupt"):
+        return "economy"
+    if action in ("admin", "admins"):
+        return "admin_management"
     if action in PANEL_PERMISSIONS:
         return PANEL_PERMISSIONS[action]
     return "owner_only"
@@ -1804,22 +1814,17 @@ def panel_keyboard(user_id=None):
             "🎁 Sovg'alar statistikasi", callback_data="panel:gifts"
         )])
 
-    if is_owner:
-        rows.extend([
-            [
-                InlineKeyboardButton("💣 Bankrot qilish", callback_data="panel:bankrupt"),
-                InlineKeyboardButton("💸 Pul yuborish", callback_data="panel:give"),
-            ],
-            [InlineKeyboardButton("📢 Ommaviy xabar", callback_data="panel:broadcast")],
-        ])
-
-    if is_owner:
+    if "economy" in available:
         rows.append([
-            InlineKeyboardButton(
-                "🛡 Adminlarni boshqarish",
-                callback_data="panel:admins",
-            )
+            InlineKeyboardButton("💣 Bankrot qilish", callback_data="panel:bankrupt"),
+            InlineKeyboardButton("💸 Pul yuborish", callback_data="panel:give"),
         ])
+    if "broadcast" in available:
+        rows.append([InlineKeyboardButton("📢 Ommaviy xabar", callback_data="panel:broadcast")])
+    if "child_instant" in available:
+        rows.append([InlineKeyboardButton("👶 Farzandni kutishsiz olish", callback_data="panel:child_instant")])
+    if "admin_management" in available:
+        rows.append([InlineKeyboardButton("🛡 Adminlarni boshqarish", callback_data="panel:admins")])
 
     return InlineKeyboardMarkup(rows or [[
         InlineKeyboardButton("🔄 Panelni yangilash", callback_data="panel:home")
@@ -1891,20 +1896,13 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     required = panel_permission_for_callback(query.data)
-    if required == "owner_only" and uid not in CAREER_OWNER_IDS:
-        await query.answer(
-            "⛔ Bu amal faqat bot egalari uchun.",
-            show_alert=True,
-        )
-        return
-
-    if required and required != "owner_only":
-        if not panel_has_permission(uid, required):
-            await query.answer(
-                "⛔ Bu bo‘lim uchun ruxsat yo‘q.",
-                show_alert=True,
-            )
+    if required == "owner_only":
+        if uid not in CAREER_OWNER_IDS:
+            await query.answer("⛔ Bu amal faqat bot egalari uchun.", show_alert=True)
             return
+    elif required and not panel_has_permission(uid, required):
+        await query.answer("⛔ Bu bo‘lim uchun ruxsat yo‘q.", show_alert=True)
+        return
 
     await query.answer()
 
@@ -2018,6 +2016,11 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "stats": "📊 Umumiy statistika",
             "games": "🏆 O‘yin statistikasi",
             "gifts": "🎁 Sovg‘alar statistikasi",
+            "broadcast": "📢 Ommaviy xabar",
+            "economy": "💸 Pul yuborish / bankrot",
+            "hadya": "🎁 Hadya yaratish",
+            "child_instant": "👶 Farzandni kutishsiz olish",
+            "admin_management": "🛡 Adminlarni boshqarish",
         }
         buttons = []
         for perm, label in labels.items():
@@ -2054,7 +2057,8 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Admin ID noto‘g‘ri.")
             return
         perm = parts[4]
-        allowed = {"users", "groups", "active", "stats", "games", "gifts"}
+        allowed = {"users", "groups", "active", "stats", "games", "gifts",
+                   "broadcast", "economy", "hadya", "child_instant", "admin_management"}
         if perm not in allowed:
             await query.edit_message_text("❌ Ruxsat turi noto‘g‘ri.")
             return
@@ -3125,7 +3129,11 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Ariza uchun mablag‘ yetarli emas.", show_alert=True)
             return
         from datetime import timedelta
-        immediate_delivery = requester in CAREER_OWNER_IDS or partner in CAREER_OWNER_IDS
+        immediate_delivery = (
+            requester in CAREER_OWNER_IDS or partner in CAREER_OWNER_IDS
+            or panel_has_permission(requester, "child_instant")
+            or panel_has_permission(partner, "child_instant")
+        )
         due = (datetime.now() if immediate_delivery else datetime.now() + timedelta(hours=48)).isoformat(timespec="seconds")
         debit_failed = False
         request_updated = False
@@ -5340,43 +5348,44 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not user or not msg or not msg.text:
         return
 
-    if user.id in CAREER_OWNER_IDS:
-        raw = msg.text.strip()
-        if context.user_data.get("panel_admin_add_state") == "waiting_id":
-            try:
-                aid = int(raw)
-                if aid <= 0:
-                    raise ValueError
-            except ValueError:
-                await msg.reply_text("❌ Telegram ID musbat son bo‘lishi kerak. Qaytadan yuboring.")
-                return
-
-            if aid in CAREER_OWNER_IDS:
-                await msg.reply_text("ℹ️ Bu foydalanuvchi allaqachon bot egasi.")
-                return
-
-            c = db()
-            c.execute(
-                "INSERT OR IGNORE INTO bot_panel_admins (user_id, added_by) VALUES (?, ?)",
-                (aid, user.id),
-            )
-            c.commit()
-            context.user_data.pop("panel_admin_add_state", None)
-
-            if c.execute(
-                "SELECT 1 FROM bot_panel_admins WHERE user_id = ?", (aid,)
-            ).fetchone():
-                await msg.reply_text(
-                    f"✅ <code>{aid}</code> adminlar ro‘yxatida.\n"
-                    "Bo‘lim ruxsatlarini adminlar ro‘yxatidan sozlang.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🛡 Admin boshqaruvi", callback_data="panel:admins")
-                    ]]),
-                )
+    raw = msg.text.strip()
+    if context.user_data.get("panel_admin_add_state") == "waiting_id" and (
+        user.id in CAREER_OWNER_IDS or panel_has_permission(user.id, "admin_management")
+    ):
+        try:
+            aid = int(raw)
+            if aid <= 0:
+                raise ValueError
+        except ValueError:
+            await msg.reply_text("❌ Telegram ID musbat son bo‘lishi kerak. Qaytadan yuboring.")
             return
 
+        if aid in CAREER_OWNER_IDS:
+            await msg.reply_text("ℹ️ Bu foydalanuvchi allaqachon bot egasi.")
+            return
 
+        c = db()
+        c.execute(
+            "INSERT OR IGNORE INTO bot_panel_admins (user_id, added_by) VALUES (?, ?)",
+            (aid, user.id),
+        )
+        c.commit()
+        context.user_data.pop("panel_admin_add_state", None)
+
+        if c.execute(
+            "SELECT 1 FROM bot_panel_admins WHERE user_id = ?", (aid,)
+        ).fetchone():
+            await msg.reply_text(
+                f"✅ <code>{aid}</code> adminlar ro‘yxatida.\\n"
+                "Bo‘lim ruxsatlarini adminlar ro‘yxatidan sozlang.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🛡 Admin boshqaruvi", callback_data="panel:admins")
+                ]]),
+            )
+        return
+
+    if user.id in CAREER_OWNER_IDS:
         if context.user_data.get("panel_broadcast_state") == "waiting_text":
             if not raw:
                 await msg.reply_text("Xabar matni bo‘sh bo‘lmasin.")
@@ -6329,9 +6338,11 @@ async def cmd_hadya(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         try:
             member = await context.bot.get_chat_member(chat.id, user.id)
-            if user.id not in CAREER_OWNER_IDS and member.status not in (
-                ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER
-            ):
+            if (user.id not in CAREER_OWNER_IDS
+                and not panel_has_permission(user.id, "hadya")
+                and member.status not in (
+                    ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER
+                )):
                 await context.bot.send_message(
                     chat_id=chat.id,
                     text="⛔ Hadya boshlash uchun guruh administratori bo‘lishingiz kerak."

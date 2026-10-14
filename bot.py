@@ -1836,6 +1836,8 @@ def panel_keyboard(user_id=None):
         rows.append([InlineKeyboardButton("👶 Farzandni kutishsiz olish", callback_data="panel:child_instant")])
     if "admin_management" in available:
         rows.append([InlineKeyboardButton("🛡 Adminlarni boshqarish", callback_data="panel:admins")])
+    if is_owner:
+        rows.append([InlineKeyboardButton("✨ Premium emoji", callback_data="panel:pemoji")])
 
     return InlineKeyboardMarkup(rows or [[
         InlineKeyboardButton("🔄 Panelni yangilash", callback_data="panel:home")
@@ -1972,6 +1974,10 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.answer()
+
+    if query.data == "panel:pemoji" or query.data.startswith("panel:pemoji:"):
+        await pemoji_callback(query, context)
+        return
 
     # Admin boshqaruvi: faqat bot egalari.
     if query.data == "panel:admins":
@@ -2800,6 +2806,7 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rank=rank,
         partner_info=partner_info,
     )
+    profile_text = profile_emojify(profile_text)
     # Received gifts are shown directly in the profile (newest first).
     gift_count = c.execute(
         "SELECT COUNT(*) FROM gift_log WHERE recipient_id=?", (user.id,)
@@ -2810,10 +2817,10 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ).fetchall()
     gift_titles = {"uz": "🎁 Qabul qilingan sovg‘alar", "eng": "🎁 Received gifts", "ru": "🎁 Полученные подарки", "kz": "🎁 Алған сыйлықтар"}
     no_gifts = {"uz": "Hozircha yo‘q", "eng": "None yet", "ru": "Пока нет", "kz": "Әзірге жоқ"}
-    gift_lines = [f"{escape(SHOP_GIFTS.get(key, (key, price))[0])} — {person_name(sender_id)} ({price}$)" for sender_id, key, price in gift_rows]
+    gift_lines = [f"{gift_label_html(key, SHOP_GIFTS.get(key, (key, price))[0])} — {person_name(sender_id)} ({price}$)" for sender_id, key, price in gift_rows]
     if gift_count > len(gift_rows):
         gift_lines.append({"uz": f"… va yana {gift_count-len(gift_rows)} ta", "eng": f"… and {gift_count-len(gift_rows)} more", "ru": f"… и ещё {gift_count-len(gift_rows)}", "kz": f"… және тағы {gift_count-len(gift_rows)}"}.get(profile_lang, f"… {gift_count-len(gift_rows)} more"))
-    profile_text += "\n\n" + gift_titles.get(profile_lang, gift_titles["uz"]) + ":\n" + ("\n".join(gift_lines) if gift_lines else no_gifts.get(profile_lang, no_gifts["uz"]))
+    profile_text += "\n\n" + profile_emojify(gift_titles.get(profile_lang, gift_titles["uz"])) + ":\n" + ("\n".join(gift_lines) if gift_lines else no_gifts.get(profile_lang, no_gifts["uz"]))
     await msg.reply_text(
         profile_text,
         reply_markup=InlineKeyboardMarkup(profile_buttons),
@@ -5392,6 +5399,10 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         return
 
+    if user.id in CAREER_OWNER_IDS and context.user_data.get("pemoji_state"):
+        if await pemoji_handle_text(update, context):
+            return
+
     if user.id in CAREER_OWNER_IDS:
         if context.user_data.get("panel_broadcast_state") == "waiting_text":
             if not raw:
@@ -5942,6 +5953,12 @@ def init_economy():
             created_at TEXT NOT NULL,
             message_id INTEGER
         );
+        CREATE TABLE IF NOT EXISTS premium_emoji (
+            scope TEXT NOT NULL,
+            key TEXT NOT NULL,
+            emoji_id TEXT NOT NULL,
+            PRIMARY KEY (scope, key)
+        );
         CREATE TABLE IF NOT EXISTS hadya_claims (
             contest_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
@@ -5957,6 +5974,293 @@ def init_economy():
     if "message_id" not in contest_columns:
         c.execute("ALTER TABLE money_contests ADD COLUMN message_id INTEGER")
     c.commit()
+
+
+# ───────────────────── Premium emoji (Telegram custom emoji) ─────────────────────
+# Owner paneldan sozlanadi: "✨ Premium emoji". Ikki alohida bo'lim:
+#   • gift    — sovg'alar (uzuk, ayiqcha, ...) uchun premium emoji
+#   • profile — profil matnidagi oddiy emojilarni almashtirish
+# Premium emoji ID egasi premium emojini botga yuborganda avtomatik olinadi.
+
+PEMOJI_GIFT_KEYS = ["ring", "bear", "bouquet", "rose", "diamond"]
+_FE0F = "️"
+
+
+def pemoji_enabled(scope):
+    row = db().execute(
+        "SELECT value FROM contest_config WHERE key=?", (f"pemoji_{scope}",)
+    ).fetchone()
+    return bool(row and str(row[0]) == "1")
+
+
+def pemoji_set_enabled(scope, value):
+    c = db()
+    with c:
+        c.execute(
+            "INSERT INTO contest_config(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (f"pemoji_{scope}", "1" if value else "0"),
+        )
+
+
+def pemoji_get(scope, key):
+    row = db().execute(
+        "SELECT emoji_id FROM premium_emoji WHERE scope=? AND key=?",
+        (scope, key),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def pemoji_save(scope, key, emoji_id):
+    c = db()
+    with c:
+        c.execute(
+            "INSERT INTO premium_emoji(scope, key, emoji_id) VALUES(?,?,?) "
+            "ON CONFLICT(scope, key) DO UPDATE SET emoji_id=excluded.emoji_id",
+            (scope, key, str(emoji_id)),
+        )
+
+
+def pemoji_delete(scope, key):
+    c = db()
+    with c:
+        c.execute("DELETE FROM premium_emoji WHERE scope=? AND key=?", (scope, key))
+
+
+def pemoji_tag(emoji_id, fallback):
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
+
+def gift_label_html(key, label=None):
+    """Sovg'a nomi (HTML). Premium emoji yoqilgan bo'lsa, boshidagi emoji almashadi."""
+    if label is None:
+        label = SHOP_GIFTS.get(key, (key, 0))[0]
+    safe = escape(label)
+    try:
+        if key in SHOP_GIFTS and pemoji_enabled("gift"):
+            emoji_id = pemoji_get("gift", key)
+            if emoji_id:
+                first, sep, rest = label.partition(" ")
+                if sep:
+                    return pemoji_tag(emoji_id, first) + " " + escape(rest)
+                return pemoji_tag(emoji_id, first)
+    except sqlite3.Error:
+        logger.exception("Premium emoji (gift) o'qishda xato")
+    return safe
+
+
+def profile_emojify(text):
+    """Profil matnidagi sozlangan oddiy emojilarni premium emojiga almashtiradi."""
+    try:
+        if not pemoji_enabled("profile"):
+            return text
+        rows = db().execute(
+            "SELECT key, emoji_id FROM premium_emoji WHERE scope='profile'"
+        ).fetchall()
+    except sqlite3.Error:
+        logger.exception("Premium emoji (profile) o'qishda xato")
+        return text
+    if not rows:
+        return text
+    mapping = {k: i for k, i in rows}
+    pattern = "|".join(
+        re.escape(k) + _FE0F + "?"
+        for k in sorted(mapping, key=len, reverse=True)
+    )
+
+    def repl(m):
+        ch = m.group(0).replace(_FE0F, "")
+        return pemoji_tag(mapping[ch], m.group(0)) if ch in mapping else m.group(0)
+
+    return re.sub(pattern, repl, text)
+
+
+def pemoji_menu_markup():
+    g_on = pemoji_enabled("gift")
+    p_on = pemoji_enabled("profile")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎁 Sovg‘alar emojisi " + ("✅" if g_on else "❌"),
+                              callback_data="panel:pemoji:gifts")],
+        [InlineKeyboardButton("👤 Profil emojilari " + ("✅" if p_on else "❌"),
+                              callback_data="panel:pemoji:profile")],
+        [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
+    ])
+
+
+PEMOJI_NOTE = (
+    "ℹ️ Premium emoji ko‘rinishi uchun: ID ni emojini <b>Premium akkauntdan</b> "
+    "yuborganingizda bot o‘zi oladi. Telegram qoidasiga ko‘ra botning matnlarida "
+    "premium emoji ko‘rinishi uchun bot egasi Premium bo‘lishi yoki botda qo‘shimcha "
+    "username (Fragment) bo‘lishi kerak. Aks holda oddiy emoji ko‘rinaveradi."
+)
+
+
+async def _pemoji_edit(query, text, markup):
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            raise
+
+
+async def pemoji_show_gifts(query):
+    lines = [
+        "🎁 <b>SOVG‘ALAR — PREMIUM EMOJI</b>",
+        "",
+        "Sovg‘ani tanlang va unga premium emoji yuboring.",
+        "Holati: " + ("✅ yoqilgan" if pemoji_enabled("gift") else "❌ o‘chirilgan"),
+        "",
+    ]
+    buttons = []
+    for key in PEMOJI_GIFT_KEYS:
+        label = SHOP_GIFTS[key][0]
+        emoji_id = pemoji_get("gift", key)
+        lines.append(f"{escape(label)} — " + (f"✅ <code>{emoji_id}</code>" if emoji_id else "❌ o‘rnatilmagan"))
+        row = [InlineKeyboardButton(("✏️ " if emoji_id else "➕ ") + label,
+                                    callback_data=f"panel:pemoji:gset:{key}")]
+        if emoji_id:
+            row.append(InlineKeyboardButton("🗑", callback_data=f"panel:pemoji:gdel:{key}"))
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(
+        "🔴 O‘chirish" if pemoji_enabled("gift") else "🟢 Yoqish",
+        callback_data="panel:pemoji:gtoggle")])
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:pemoji")])
+    lines += ["", PEMOJI_NOTE]
+    await _pemoji_edit(query, "\n".join(lines), InlineKeyboardMarkup(buttons))
+
+
+async def pemoji_show_profile(query):
+    rows = db().execute(
+        "SELECT key, emoji_id FROM premium_emoji WHERE scope='profile' ORDER BY rowid"
+    ).fetchall()
+    lines = [
+        "👤 <b>PROFIL — PREMIUM EMOJI</b>",
+        "",
+        "Profil matnidagi oddiy emoji o‘rniga premium emoji ko‘rsatiladi.",
+        "Holati: " + ("✅ yoqilgan" if pemoji_enabled("profile") else "❌ o‘chirilgan"),
+        "",
+    ]
+    buttons = []
+    if rows:
+        for idx, (key, emoji_id) in enumerate(rows):
+            lines.append(f"{escape(key)} → <code>{emoji_id}</code>")
+            buttons.append([InlineKeyboardButton(
+                f"🗑 {key} ni o‘chirish", callback_data=f"panel:pemoji:pdel:{idx}")])
+    else:
+        lines.append("Hozircha emoji qo‘shilmagan.")
+    buttons.insert(0, [InlineKeyboardButton("➕ Premium emoji qo‘shish",
+                                            callback_data="panel:pemoji:padd")])
+    buttons.append([InlineKeyboardButton(
+        "🔴 O‘chirish" if pemoji_enabled("profile") else "🟢 Yoqish",
+        callback_data="panel:pemoji:ptoggle")])
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:pemoji")])
+    lines += ["", PEMOJI_NOTE]
+    await _pemoji_edit(query, "\n".join(lines), InlineKeyboardMarkup(buttons))
+
+
+async def pemoji_callback(query, context):
+    """panel:pemoji... callbacklari (faqat bot egalari)."""
+    data = query.data
+    context.user_data.pop("pemoji_state", None)
+    parts = data.split(":")  # panel:pemoji[:action[:arg]]
+    action = parts[2] if len(parts) > 2 else ""
+    arg = parts[3] if len(parts) > 3 else ""
+
+    if action == "":
+        await _pemoji_edit(
+            query,
+            "✨ <b>PREMIUM EMOJI SOZLAMALARI</b>\n\nQaysi bo‘limni sozlaysiz?",
+            pemoji_menu_markup(),
+        )
+    elif action == "gifts":
+        await pemoji_show_gifts(query)
+    elif action == "profile":
+        await pemoji_show_profile(query)
+    elif action == "gtoggle":
+        pemoji_set_enabled("gift", not pemoji_enabled("gift"))
+        await pemoji_show_gifts(query)
+    elif action == "ptoggle":
+        pemoji_set_enabled("profile", not pemoji_enabled("profile"))
+        await pemoji_show_profile(query)
+    elif action == "gdel" and arg in SHOP_GIFTS:
+        pemoji_delete("gift", arg)
+        await pemoji_show_gifts(query)
+    elif action == "pdel":
+        rows = db().execute(
+            "SELECT key FROM premium_emoji WHERE scope='profile' ORDER BY rowid"
+        ).fetchall()
+        try:
+            pemoji_delete("profile", rows[int(arg)][0])
+        except (ValueError, IndexError):
+            pass
+        await pemoji_show_profile(query)
+    elif action == "gset" and arg in SHOP_GIFTS:
+        context.user_data["pemoji_state"] = {"scope": "gift", "key": arg}
+        await _pemoji_edit(
+            query,
+            f"{escape(SHOP_GIFTS[arg][0])} uchun <b>premium emoji</b> yuboring "
+            "(bitta emoji bo‘lgan xabar).",
+            InlineKeyboardMarkup([[InlineKeyboardButton(
+                "❌ Bekor qilish", callback_data="panel:pemoji:gifts")]]),
+        )
+    elif action == "padd":
+        context.user_data["pemoji_state"] = {"scope": "profile", "key": None}
+        await _pemoji_edit(
+            query,
+            "Premium emoji(lar)ni yuboring. Bot ularning oddiy ko‘rinishini topib, "
+            "profilda shu oddiy emoji o‘rniga premium emojini qo‘yadi.\n"
+            "Masalan, 💞 ning premium variantini yuborsangiz — profildagi barcha 💞 almashadi.",
+            InlineKeyboardMarkup([[InlineKeyboardButton(
+                "❌ Bekor qilish", callback_data="panel:pemoji:profile")]]),
+        )
+    else:
+        await _pemoji_edit(query, "✨ <b>PREMIUM EMOJI SOZLAMALARI</b>", pemoji_menu_markup())
+
+
+async def pemoji_handle_text(update, context):
+    """Owner premium emoji yuborganda ID ni saqlaydi. Qayta ishlangan bo'lsa True."""
+    state = context.user_data.get("pemoji_state")
+    msg = update.effective_message
+    if not state or not msg:
+        return False
+
+    entities = [e for e in (msg.entities or []) if e.type == "custom_emoji"]
+    if not entities:
+        await msg.reply_text(
+            "❌ Xabarda premium emoji topilmadi. Premium akkauntdan premium emoji yuboring.",
+        )
+        return True
+
+    if state["scope"] == "gift":
+        pemoji_save("gift", state["key"], entities[0].custom_emoji_id)
+        context.user_data.pop("pemoji_state", None)
+        pemoji_set_enabled("gift", True)
+        await msg.reply_text(
+            f"✅ {escape(SHOP_GIFTS[state['key']][0])} uchun premium emoji saqlandi "
+            "va sovg‘alar premium emoji yoqildi.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                "🎁 Sovg‘alar emojisi", callback_data="panel:pemoji:gifts")]]),
+        )
+        return True
+
+    saved = []
+    for e in entities:
+        fallback = msg.parse_entity(e).replace(_FE0F, "")
+        if not fallback:
+            continue
+        pemoji_save("profile", fallback, e.custom_emoji_id)
+        saved.append(fallback)
+    context.user_data.pop("pemoji_state", None)
+    if saved:
+        pemoji_set_enabled("profile", True)
+    await msg.reply_text(
+        ("✅ Saqlandi: " + " ".join(escape(x) for x in saved) + "\nProfil premium emoji yoqildi.")
+        if saved else "❌ Emoji aniqlanmadi.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+            "👤 Profil emojilari", callback_data="panel:pemoji:profile")]]),
+    )
+    return True
+
 
 def wallet_balance(user_id):
     c = db()
@@ -6111,7 +6415,7 @@ async def cb_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             recipient,
-            f"🎁 {person_name(user.id)} sizga {name} sovg‘a qildi!",
+            f"🎁 {person_name(user.id)} sizga {gift_label_html(key, name)} sovg‘a qildi!",
         )
     except TelegramError:
         try:
@@ -6143,7 +6447,7 @@ async def cb_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Sovg‘a: {escape(name)}\nNarxi: <b>{price}$</b>\n"
         f"To‘lovchi owner: {'ha' if owner else 'yo‘q'}"
     )
-    await q.message.reply_text(f"✅ {name} yuborildi!")
+    await q.message.reply_text(f"✅ {gift_label_html(key, name)} yuborildi!")
 
 async def cmd_pul(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -6288,15 +6592,8 @@ def hadya_post_text(contest_id):
     ]
     if claims:
         lines.append("<b>🏆 G‘oliblar:</b>")
-        labels = {
-            "ring": "💍 Uzuk",
-            "bear": "🧸 Ayiqcha",
-            "bouquet": "💐 Guldasta",
-            "rose": "🌹 Atirgul",
-            "diamond": "💎 Olmos",
-        }
         for name, key in claims:
-            lines.append(f"• {escape(name)} — {labels.get(key, escape(key))}")
+            lines.append(f"• {escape(name)} — {gift_label_html(key) if key in SHOP_GIFTS else escape(key)}")
     else:
         lines.append("🎉 Birinchi bo‘lib sovg‘ani oling!")
 

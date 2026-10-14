@@ -701,6 +701,21 @@ def db():
 
 def init_db():
     c = db()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS bot_panel_admins (
+            user_id INTEGER PRIMARY KEY,
+            added_by INTEGER NOT NULL,
+            added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS bot_panel_admin_permissions (
+            user_id INTEGER NOT NULL,
+            permission TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, permission)
+        )
+    """)
     with c:
         c.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -1694,30 +1709,121 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-def panel_keyboard():
-    return InlineKeyboardMarkup([
-        [
+
+PANEL_PERMISSIONS = {
+    "users": "users",
+    "groups": "groups",
+    "active": "active",
+    "stats": "stats",
+    "games": "games",
+    "gifts": "gifts",
+}
+
+
+def is_panel_admin(user_id):
+    if user_id in CAREER_OWNER_IDS:
+        return True
+    c = db()
+    return c.execute(
+        "SELECT 1 FROM bot_panel_admins WHERE user_id = ?",
+        (int(user_id),),
+    ).fetchone() is not None
+
+
+def panel_has_permission(user_id, permission):
+    if user_id in CAREER_OWNER_IDS:
+        return True
+    c = db()
+    row = c.execute(
+        """SELECT enabled FROM bot_panel_admin_permissions
+           WHERE user_id = ? AND permission = ?""",
+        (int(user_id), permission),
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def panel_permission_for_callback(data):
+    if data == "panel:home":
+        return None
+    action = data.split(":")[1] if ":" in data else ""
+    if action in ("broadcast", "money_cancel", "money_confirm",
+                  "give", "bankrupt"):
+        return "owner_only"
+    if action in PANEL_PERMISSIONS:
+        return PANEL_PERMISSIONS[action]
+    return "owner_only"
+
+
+def panel_keyboard(user_id=None):
+    rows = []
+    is_owner = user_id in CAREER_OWNER_IDS
+    available = {
+        permission for permission in PANEL_PERMISSIONS
+        if is_owner or (
+            user_id is not None
+            and panel_has_permission(user_id, permission)
+        )
+    }
+
+    if "users" in available and "groups" in available:
+        rows.append([
             InlineKeyboardButton("👤 Foydalanuvchilar", callback_data="panel:users"),
             InlineKeyboardButton("🏘 Guruhlar", callback_data="panel:groups"),
-        ],
-        [
+        ])
+    else:
+        if "users" in available:
+            rows.append([InlineKeyboardButton(
+                "👤 Foydalanuvchilar", callback_data="panel:users"
+            )])
+        if "groups" in available:
+            rows.append([InlineKeyboardButton(
+                "🏘 Guruhlar", callback_data="panel:groups"
+            )])
+
+    if "active" in available and "stats" in available:
+        rows.append([
             InlineKeyboardButton("🎮 Faol o'yinlar", callback_data="panel:active"),
             InlineKeyboardButton("📊 Umumiy statistika", callback_data="panel:stats"),
-        ],
-        [
-            InlineKeyboardButton("🏆 O'yin turlari statistikasi", callback_data="panel:games"),
-        ],
-        [
-            InlineKeyboardButton("🎁 Sovg'alar statistikasi", callback_data="panel:gifts"),
-        ],
-        [
-            InlineKeyboardButton("💣 Bankrot qilish", callback_data="panel:bankrupt"),
-            InlineKeyboardButton("💸 Pul yuborish", callback_data="panel:give"),
-        ],
-        [InlineKeyboardButton("📢 Ommaviy xabar", callback_data="panel:broadcast")],
-        [
-        ],
-    ])
+        ])
+    else:
+        if "active" in available:
+            rows.append([InlineKeyboardButton(
+                "🎮 Faol o'yinlar", callback_data="panel:active"
+            )])
+        if "stats" in available:
+            rows.append([InlineKeyboardButton(
+                "📊 Umumiy statistika", callback_data="panel:stats"
+            )])
+
+    if "games" in available:
+        rows.append([InlineKeyboardButton(
+            "🏆 O'yin turlari statistikasi", callback_data="panel:games"
+        )])
+    if "gifts" in available:
+        rows.append([InlineKeyboardButton(
+            "🎁 Sovg'alar statistikasi", callback_data="panel:gifts"
+        )])
+
+    if is_owner:
+        rows.extend([
+            [
+                InlineKeyboardButton("💣 Bankrot qilish", callback_data="panel:bankrupt"),
+                InlineKeyboardButton("💸 Pul yuborish", callback_data="panel:give"),
+            ],
+            [InlineKeyboardButton("📢 Ommaviy xabar", callback_data="panel:broadcast")],
+        ])
+
+    if is_owner:
+        rows.append([
+            InlineKeyboardButton(
+                "🛡 Adminlarni boshqarish",
+                callback_data="panel:admins",
+            )
+        ])
+
+    return InlineKeyboardMarkup(rows or [[
+        InlineKeyboardButton("🔄 Panelni yangilash", callback_data="panel:home")
+    ]])
 
 
 def panel_group_ids(c):
@@ -1742,8 +1848,8 @@ async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat or not msg or not user:
         return
 
-    if user.id not in CAREER_OWNER_IDS:
-        await msg.reply_text("⛔ Bu buyruq faqat bot egalari uchun.")
+    if not is_panel_admin(user.id):
+        await msg.reply_text("⛔ Sizga paneldan foydalanish ruxsati berilmagan.")
         return
 
     if chat.type != ChatType.PRIVATE:
@@ -1767,7 +1873,7 @@ async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎮 Faol o'yinlar: <b>{len(GAMES)}</b>"
     )
 
-    await msg.reply_text(text, reply_markup=panel_keyboard())
+    await msg.reply_text(text, reply_markup=panel_keyboard(user.id))
 
 
 
@@ -1776,14 +1882,217 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         return
 
-    if query.from_user.id not in CAREER_OWNER_IDS:
+    uid = query.from_user.id
+    if not is_panel_admin(uid):
         await query.answer(
-            "⛔ Bu bo'lim faqat bot egalari uchun.",
+            "⛔ Paneldan foydalanish ruxsati yo‘q.",
             show_alert=True,
         )
         return
 
+    required = panel_permission_for_callback(query.data)
+    if required == "owner_only" and uid not in CAREER_OWNER_IDS:
+        await query.answer(
+            "⛔ Bu amal faqat bot egalari uchun.",
+            show_alert=True,
+        )
+        return
+
+    if required and required != "owner_only":
+        if not panel_has_permission(uid, required):
+            await query.answer(
+                "⛔ Bu bo‘lim uchun ruxsat yo‘q.",
+                show_alert=True,
+            )
+            return
+
     await query.answer()
+
+    # Admin boshqaruvi: faqat bot egalari.
+    if query.data == "panel:admins":
+        c = db()
+        admins = c.execute(
+            "SELECT user_id FROM bot_panel_admins ORDER BY added_at DESC"
+        ).fetchall()
+        buttons = [
+            [InlineKeyboardButton("➕ Admin qo‘shish", callback_data="panel:admin:add")],
+            [InlineKeyboardButton("👥 Adminlar ro‘yxati", callback_data="panel:admin:list")],
+            [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
+        ]
+        await query.edit_message_text(
+            "🛡 <b>ADMIN BOSHQARUVI</b>\n\n"
+            f"Qo‘shilgan adminlar: <b>{len(admins)}</b>\n"
+            "Admin ID raqami orqali qo‘shiladi. Har bir bo‘limga ruxsat alohida beriladi.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    if query.data == "panel:admin:add":
+        context.user_data["panel_admin_add_state"] = "waiting_id"
+        await query.edit_message_text(
+            "➕ Admin qilmoqchi bo‘lgan foydalanuvchining Telegram ID raqamini yuboring.\n\n"
+            "Bekor qilish uchun tugmani bosing.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:admins")
+            ]]),
+        )
+        return
+
+    if query.data == "panel:admin:list":
+        c = db()
+        admins = c.execute(
+            "SELECT user_id FROM bot_panel_admins ORDER BY added_at DESC"
+        ).fetchall()
+        buttons = []
+        lines = ["👥 <b>PANEL ADMINLARI</b>", ""]
+        for row in admins:
+            aid = int(row[0])
+            lines.append(f"🆔 <code>{aid}</code>")
+            buttons.append([
+                InlineKeyboardButton(
+                    f"🔐 Ruxsatlar: {aid}",
+                    callback_data=f"panel:admin:perms:{aid}",
+                ),
+                InlineKeyboardButton(
+                    f"🗑 O‘chirish: {aid}",
+                    callback_data=f"panel:admin:remove:{aid}",
+                ),
+            ])
+        if not admins:
+            lines.append("Hozircha qo‘shilgan admin yo‘q.")
+        buttons.append([
+            InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:admins")
+        ])
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    if query.data.startswith("panel:admin:remove:"):
+        try:
+            aid = int(query.data.rsplit(":", 1)[1])
+        except ValueError:
+            await query.edit_message_text("❌ Admin ID noto‘g‘ri.")
+            return
+        if aid in CAREER_OWNER_IDS:
+            await query.answer("Bot egasini bu yerdan o‘chirib bo‘lmaydi.", show_alert=True)
+            return
+        c = db()
+        c.execute("DELETE FROM bot_panel_admins WHERE user_id = ?", (aid,))
+        c.execute("DELETE FROM bot_panel_admin_permissions WHERE user_id = ?", (aid,))
+        c.commit()
+        await query.edit_message_text(
+            f"✅ <code>{aid}</code> adminlar ro‘yxatidan o‘chirildi.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Admin boshqaruvi", callback_data="panel:admins")
+            ]]),
+        )
+        return
+
+    if query.data.startswith("panel:admin:perms:"):
+        try:
+            aid = int(query.data.rsplit(":", 1)[1])
+        except ValueError:
+            await query.edit_message_text("❌ Admin ID noto‘g‘ri.")
+            return
+        c = db()
+        exists = c.execute(
+            "SELECT 1 FROM bot_panel_admins WHERE user_id = ?", (aid,)
+        ).fetchone()
+        if not exists:
+            await query.edit_message_text(
+                "Bu admin topilmadi.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:admin:list")
+                ]]),
+            )
+            return
+        labels = {
+            "users": "👤 Foydalanuvchilar",
+            "groups": "🏘 Guruhlar",
+            "active": "🎮 Faol o‘yinlar",
+            "stats": "📊 Umumiy statistika",
+            "games": "🏆 O‘yin statistikasi",
+            "gifts": "🎁 Sovg‘alar statistikasi",
+        }
+        buttons = []
+        for perm, label in labels.items():
+            row = c.execute(
+                "SELECT enabled FROM bot_panel_admin_permissions "
+                "WHERE user_id = ? AND permission = ?",
+                (aid, perm),
+            ).fetchone()
+            enabled = bool(row and row[0])
+            buttons.append([InlineKeyboardButton(
+                ("✅ " if enabled else "❌ ") + label,
+                callback_data=f"panel:admin:toggle:{aid}:{perm}",
+            )])
+        buttons.append([
+            InlineKeyboardButton("⬅️ Adminlar ro‘yxati", callback_data="panel:admin:list")
+        ])
+        await query.edit_message_text(
+            f"🔐 <b>{aid}</b> uchun bo‘lim ruxsatlari\n\n"
+            "✅ — ruxsat berilgan\n❌ — ruxsat berilmagan\n"
+            "Tugmani bosib holatini o‘zgartiring.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    if query.data.startswith("panel:admin:toggle:"):
+        parts = query.data.split(":")
+        if len(parts) != 5:
+            await query.edit_message_text("❌ So‘rov noto‘g‘ri.")
+            return
+        try:
+            aid = int(parts[3])
+        except ValueError:
+            await query.edit_message_text("❌ Admin ID noto‘g‘ri.")
+            return
+        perm = parts[4]
+        allowed = {"users", "groups", "active", "stats", "games", "gifts"}
+        if perm not in allowed:
+            await query.edit_message_text("❌ Ruxsat turi noto‘g‘ri.")
+            return
+        c = db()
+        if not c.execute(
+            "SELECT 1 FROM bot_panel_admins WHERE user_id = ?", (aid,)
+        ).fetchone():
+            await query.edit_message_text("Admin topilmadi.")
+            return
+        row = c.execute(
+            "SELECT enabled FROM bot_panel_admin_permissions "
+            "WHERE user_id = ? AND permission = ?",
+            (aid, perm),
+        ).fetchone()
+        new_value = 0 if row and row[0] else 1
+        c.execute(
+            "INSERT INTO bot_panel_admin_permissions (user_id, permission, enabled) "
+            "VALUES (?, ?, ?) ON CONFLICT(user_id, permission) "
+            "DO UPDATE SET enabled = excluded.enabled",
+            (aid, perm, new_value),
+        )
+        c.commit()
+        # Ruxsatlar sahifasini qayta ko‘rsatish.
+        query.data = f"panel:admin:perms:{aid}"
+        # Quyidagi bo‘lim keyingi callbackda qayta ochiladi.
+        await query.edit_message_text(
+            ("✅ Ruxsat yoqildi." if new_value else "❌ Ruxsat o‘chirildi."),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "🔐 Ruxsatlarni ko‘rish",
+                    callback_data=f"panel:admin:perms:{aid}",
+                )
+            ], [
+                InlineKeyboardButton("⬅️ Adminlar ro‘yxati", callback_data="panel:admin:list")
+            ]]),
+        )
+        return
+
 
     if query.data == "panel:gifts":
         c = db()
@@ -1796,6 +2105,7 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ("bear", "🧸 Ayiqcha"),
             ("bouquet", "💐 Guldasta"),
             ("rose", "🌹 Atirgul"),
+            ("diamond", "💎 Olmos"),
         ]
         total = sum(int(counts.get(key, 0)) for key, _ in gifts)
         lines = [
@@ -2247,7 +2557,7 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             text,
-            reply_markup=panel_keyboard(),
+            reply_markup=panel_keyboard(query.from_user.id),
         )
         return
 
@@ -5032,6 +5342,40 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if user.id in CAREER_OWNER_IDS:
         raw = msg.text.strip()
+        if context.user_data.get("panel_admin_add_state") == "waiting_id":
+            try:
+                aid = int(raw)
+                if aid <= 0:
+                    raise ValueError
+            except ValueError:
+                await msg.reply_text("❌ Telegram ID musbat son bo‘lishi kerak. Qaytadan yuboring.")
+                return
+
+            if aid in CAREER_OWNER_IDS:
+                await msg.reply_text("ℹ️ Bu foydalanuvchi allaqachon bot egasi.")
+                return
+
+            c = db()
+            c.execute(
+                "INSERT OR IGNORE INTO bot_panel_admins (user_id, added_by) VALUES (?, ?)",
+                (aid, user.id),
+            )
+            c.commit()
+            context.user_data.pop("panel_admin_add_state", None)
+
+            if c.execute(
+                "SELECT 1 FROM bot_panel_admins WHERE user_id = ?", (aid,)
+            ).fetchone():
+                await msg.reply_text(
+                    f"✅ <code>{aid}</code> adminlar ro‘yxatida.\n"
+                    "Bo‘lim ruxsatlarini adminlar ro‘yxatidan sozlang.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🛡 Admin boshqaruvi", callback_data="panel:admins")
+                    ]]),
+                )
+            return
+
 
         if context.user_data.get("panel_broadcast_state") == "waiting_text":
             if not raw:
@@ -5551,7 +5895,8 @@ async def secret_callback(
 
 
 SHOP_GIFTS = {"ring": ("💍 Uzuk", 100), "bear": ("🧸 Ayiqcha", 75),
-              "bouquet": ("💐 Guldasta", 50), "rose": ("🌹 Atirgul", 25)}
+              "bouquet": ("💐 Guldasta", 50), "rose": ("🌹 Atirgul", 25),
+              "diamond": ("💎 Olmos", 200)}
 
 def init_economy():
     c = db()
@@ -5570,6 +5915,26 @@ def init_economy():
       id INTEGER PRIMARY KEY AUTOINCREMENT, sender_id INTEGER NOT NULL,
       recipient_id INTEGER NOT NULL, gift_key TEXT NOT NULL, price INTEGER NOT NULL,
       created_at TEXT NOT NULL);
+
+        CREATE TABLE IF NOT EXISTS hadya_contests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            owner_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            remaining INTEGER NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            message_id INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS hadya_claims (
+            contest_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            gift_key TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            claimed_at TEXT NOT NULL,
+            PRIMARY KEY (contest_id, user_id)
+        );
+
     """)
     # Existing DB migration: remember the public contest message so it can be edited live.
     contest_columns = {row[1] for row in c.execute("PRAGMA table_info(money_contests)").fetchall()}
@@ -5631,7 +5996,8 @@ async def show_gifts(chat_id, context, recipient_id):
           "ring":{"uz":"💍 Uzuk","eng":"💍 Ring","ru":"💍 Кольцо","kz":"💍 Сақина"},
           "bear":{"uz":"🧸 Ayiqcha","eng":"🧸 Teddy bear","ru":"🧸 Мишка","kz":"🧸 Қонжық"},
           "bouquet":{"uz":"💐 Guldasta","eng":"💐 Bouquet","ru":"💐 Букет","kz":"💐 Гүл шоғы"},
-          "rose":{"uz":"🌹 Atirgul","eng":"🌹 Rose","ru":"🌹 Роза","kz":"🌹 Раушан"}
+          "rose":{"uz":"🌹 Atirgul","eng":"🌹 Rose","ru":"🌹 Роза","kz":"🌹 Раушан"},
+          "diamond":{"uz":"💎 Olmos","eng":"💎 Diamond","ru":"💎 Алмаз","kz":"💎 Алмас"}
         }[key].get(lang,name)
         rows.append([InlineKeyboardButton(f"{localized} — {price}$", callback_data=f"shop:gift:{recipient_id}:{key}")])
     rows.append([InlineKeyboardButton({"uz":"🎁 Sovg‘alar","eng":"🎁 Gifts","ru":"🎁 Подарки","kz":"🎁 Сыйлықтар"}.get(lang,"🎁 Sovg‘alar"), url=shop_url(context,"catalog"))])
@@ -5861,6 +6227,271 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (str(event.chat.id),),
             )
         logger.info("Konkurs kanali avtomatik saqlandi: %s", event.chat.id)
+
+
+
+def hadya_keyboard(contest_id, active=True):
+    if not active:
+        return None
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎁 Sovg‘ani olish", callback_data=f"hadya:claim:{contest_id}")
+    ]])
+
+
+def hadya_post_text(contest_id):
+    c = db()
+    try:
+        contest = c.execute(
+            "SELECT id, amount, remaining, active FROM hadya_contests WHERE id=?",
+            (contest_id,),
+        ).fetchone()
+        if not contest:
+            return "🎁 Hadya topilmadi.", None
+
+        _, amount, remaining, active = contest
+        claims = c.execute(
+            "SELECT display_name, gift_key FROM hadya_claims WHERE contest_id=? "
+            "ORDER BY rowid DESC LIMIT 20",
+            (contest_id,),
+        ).fetchall()
+        count = c.execute(
+            "SELECT COUNT(*) FROM hadya_claims WHERE contest_id=?",
+            (contest_id,),
+        ).fetchone()[0]
+    finally:
+        c.close()
+
+    lines = [
+        "🎁 <b>HADYA BOSHLANDI!</b>",
+        "",
+        f"🎁 Sovg‘alar soni: <b>{amount}</b>",
+        f"📦 Qolgan sovg‘alar: <b>{remaining}</b>",
+        f"👥 Sovg‘a olganlar: <b>{count}</b>",
+        "",
+    ]
+    if claims:
+        lines.append("<b>🏆 G‘oliblar:</b>")
+        labels = {
+            "ring": "💍 Uzuk",
+            "bear": "🧸 Ayiqcha",
+            "bouquet": "💐 Guldasta",
+            "rose": "🌹 Atirgul",
+            "diamond": "💎 Olmos",
+        }
+        for name, key in claims:
+            lines.append(f"• {escape(name)} — {labels.get(key, escape(key))}")
+    else:
+        lines.append("🎉 Birinchi bo‘lib sovg‘ani oling!")
+
+    is_active = bool(active) and int(remaining) > 0
+    if not is_active:
+        lines.extend(["", "✅ <b>Hadya yakunlandi.</b>"])
+    return "\n".join(lines), hadya_keyboard(contest_id, is_active)
+
+
+async def cmd_hadya(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not msg or not chat:
+        return
+    lang = family_lang(chat.id)
+    args = context.args or []
+
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL):
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="Bu buyruqni guruhda yoki sozlangan kanalda ishlating."
+        )
+        return
+
+    if len(args) != 1 or not args[0].isdigit() or not 1 <= int(args[0]) <= 1000:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="Foydalanish: /hadya 50\nSovg‘alar soni 1 dan 1000 gacha bo‘lishi kerak."
+        )
+        return
+
+    if chat.type == ChatType.CHANNEL:
+        c = db()
+        try:
+            row = c.execute(
+                "SELECT value FROM contest_config WHERE key='contest_channel_id'"
+            ).fetchone()
+        finally:
+            c.close()
+        if not row or str(row[0]) != str(chat.id):
+            return
+        owner_id = user.id if user else min(CAREER_OWNER_IDS)
+    else:
+        if not user:
+            return
+        try:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            if user.id not in CAREER_OWNER_IDS and member.status not in (
+                ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER
+            ):
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text="⛔ Hadya boshlash uchun guruh administratori bo‘lishingiz kerak."
+                )
+                return
+        except TelegramError:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text="⛔ Admin huquqini tekshirib bo‘lmadi."
+            )
+            return
+        owner_id = user.id
+
+    amount = int(args[0])
+    c = db()
+    try:
+        cur = c.execute(
+            "INSERT INTO hadya_contests "
+            "(chat_id, owner_id, amount, remaining, active, created_at) "
+            "VALUES (?, ?, ?, ?, 1, ?)",
+            (chat.id, owner_id, amount, amount, datetime.now().isoformat(timespec="seconds")),
+        )
+        contest_id = cur.lastrowid
+        c.commit()
+    finally:
+        c.close()
+
+    text, keyboard = hadya_post_text(contest_id)
+    try:
+        posted = await context.bot.send_message(
+            chat_id=chat.id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+    except TelegramError:
+        c = db()
+        try:
+            c.execute("DELETE FROM hadya_contests WHERE id=?", (contest_id,))
+            c.commit()
+        finally:
+            c.close()
+        raise
+
+    c = db()
+    try:
+        c.execute(
+            "UPDATE hadya_contests SET message_id=? WHERE id=?",
+            (posted.message_id, contest_id),
+        )
+        c.commit()
+    finally:
+        c.close()
+
+
+async def cb_hadya(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    match = re.fullmatch(r"hadya:claim:(\d+)", query.data or "")
+    if not match:
+        await query.answer()
+        return
+
+    contest_id = int(match.group(1))
+    user = query.from_user
+    save_user(user)
+    c = db()
+    result = None
+    try:
+        # Bitta foydalanuvchi bir hadyadan faqat bir marta olishi mumkin.
+        c.execute("BEGIN IMMEDIATE")
+        contest = c.execute(
+            "SELECT chat_id, remaining, active, message_id "
+            "FROM hadya_contests WHERE id=?",
+            (contest_id,),
+        ).fetchone()
+
+        if not contest:
+            result = "❌ Hadya topilmadi."
+        else:
+            chat_id, remaining, active, message_id = contest
+            already = c.execute(
+                "SELECT 1 FROM hadya_claims WHERE contest_id=? AND user_id=?",
+                (contest_id, user.id),
+            ).fetchone()
+
+            if already:
+                result = "ℹ️ Siz bu hadyadan allaqachon sovg‘a olgansiz."
+            elif not active or remaining <= 0:
+                result = "😔 Hadya tugagan."
+            else:
+                gifts = list(SHOP_GIFTS.keys())
+                if not gifts:
+                    result = "❌ Sovg‘alar ro‘yxati bo‘sh."
+                else:
+                    gift_key = random.choice(gifts)
+                    display_name = user.full_name or user.username or str(user.id)
+                    now = datetime.now().isoformat(timespec="seconds")
+                    c.execute(
+                        "INSERT INTO hadya_claims "
+                        "(contest_id, user_id, gift_key, display_name, claimed_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (contest_id, user.id, gift_key, display_name, now),
+                    )
+                    c.execute(
+                        "UPDATE hadya_contests SET remaining=remaining-1, "
+                        "active=CASE WHEN remaining-1<=0 THEN 0 ELSE 1 END "
+                        "WHERE id=? AND remaining>0",
+                        (contest_id,),
+                    )
+                    c.execute(
+                        "INSERT INTO gift_log "
+                        "(sender_id, recipient_id, gift_key, price, created_at) "
+                        "VALUES (?, ?, ?, 0, ?)",
+                        (0, user.id, gift_key, now),
+                    )
+                    c.commit()
+                    gift_names = {
+                        "ring": "💍 Uzuk",
+                        "bear": "🧸 Ayiqcha",
+                        "bouquet": "💐 Guldasta",
+                        "rose": "🌹 Atirgul",
+                        "diamond": "💎 Olmos",
+                    }
+                    result = f"🎉 Tabriklaymiz! Siz {gift_names.get(gift_key, gift_key)} yutdingiz!"
+    except sqlite3.IntegrityError:
+        c.rollback()
+        result = "ℹ️ Siz bu hadyadan allaqachon sovg‘a olgansiz."
+    except Exception:
+        c.rollback()
+        logger.exception("Hadya sovg‘asini berishda xato")
+        result = "❌ Xatolik yuz berdi. Qayta urinib ko‘ring."
+    finally:
+        c.close()
+
+    await query.answer(result or "🎁", show_alert=True)
+
+    # Postdagi qolgan sovg'alar va g'oliblar ro'yxatini yangilash.
+    try:
+        text, keyboard = hadya_post_text(contest_id)
+        c = db()
+        try:
+            row = c.execute(
+                "SELECT chat_id, message_id FROM hadya_contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+        finally:
+            c.close()
+        if row and row[1]:
+            await context.bot.edit_message_text(
+                chat_id=row[0],
+                message_id=row[1],
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+    except TelegramError:
+        logger.exception("Hadya postini yangilashda xato")
 
 
 async def cmd_konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6339,6 +6970,7 @@ def main():
         (["oila", "family"], cmd_oila),
         (["shop"], cmd_shop),
         (["pul"], cmd_pul),
+        (["hadya"], cmd_hadya),
         (["konkurs"], cmd_konkurs),
         (["missiyalar", "missions"], cmd_missiyalar),
         (["ariza"], cmd_ariza),
@@ -6347,7 +6979,7 @@ def main():
         (["lang"], cmd_lang),
     ]
     for names, handler in commands:
-        if names == ["konkurs"]:
+        if names in (["konkurs"], ["hadya"]):
             # /konkurs guruhda ham, kanalda ham ishlashi uchun channel_post'larni ham qabul qilamiz
             app.add_handler(CommandHandler(
                 names, handler,
@@ -6359,6 +6991,7 @@ def main():
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(cb_shop, pattern=r"^shop:"))
     app.add_handler(CallbackQueryHandler(cb_contest, pattern=r"^contest:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_hadya, pattern=r"^hadya:claim:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^panel:"))
     app.add_handler(CallbackQueryHandler(cb_memory, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|menu)$"))

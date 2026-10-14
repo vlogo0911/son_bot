@@ -692,10 +692,21 @@ _SEEN: dict[int, tuple] = {}
 OUTCOME_COL = {"win": "wins", "loss": "losses", "draw": "draws"}
 
 
+class _SharedConnection(sqlite3.Connection):
+    """Butun bot bitta ulanishdan foydalanadi; c.close() uni yopib qo'ymasligi kerak."""
+
+    def close(self):  # noqa: D401
+        # Oddiy close() chaqiruvlari e'tiborga olinmaydi (ulanish umumiy).
+        pass
+
+    def real_close(self):
+        super().close()
+
+
 def db():
     global _conn
     if _conn is None:
-        _conn = sqlite3.connect(DB_FILE)
+        _conn = sqlite3.connect(DB_FILE, factory=_SharedConnection)
     return _conn
 
 
@@ -1882,6 +1893,62 @@ async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+PANEL_PERMISSION_LABELS = {
+    "users": "👤 Foydalanuvchilar",
+    "groups": "🏘 Guruhlar",
+    "active": "🎮 Faol o‘yinlar",
+    "stats": "📊 Umumiy statistika",
+    "games": "🏆 O‘yin statistikasi",
+    "gifts": "🎁 Sovg‘alar statistikasi",
+    "broadcast": "📢 Ommaviy xabar",
+    "economy": "💸 Pul yuborish / bankrot",
+    "hadya": "🎁 Hadya yaratish",
+    "child_instant": "👶 Farzandni kutishsiz olish",
+    "admin_management": "🛡 Adminlarni boshqarish",
+}
+
+
+async def show_admin_permissions(query, aid):
+    c = db()
+    exists = c.execute(
+        "SELECT 1 FROM bot_panel_admins WHERE user_id = ?", (aid,)
+    ).fetchone()
+    if not exists:
+        await query.edit_message_text(
+            "Bu admin topilmadi.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:admin:list")
+            ]]),
+        )
+        return
+    buttons = []
+    for perm, label in PANEL_PERMISSION_LABELS.items():
+        row = c.execute(
+            "SELECT enabled FROM bot_panel_admin_permissions "
+            "WHERE user_id = ? AND permission = ?",
+            (aid, perm),
+        ).fetchone()
+        enabled = bool(row and row[0])
+        buttons.append([InlineKeyboardButton(
+            ("✅ " if enabled else "❌ ") + label,
+            callback_data=f"panel:admin:toggle:{aid}:{perm}",
+        )])
+    buttons.append([
+        InlineKeyboardButton("⬅️ Adminlar ro‘yxati", callback_data="panel:admin:list")
+    ])
+    try:
+        await query.edit_message_text(
+            f"🔐 <b>{aid}</b> uchun bo‘lim ruxsatlari\n\n"
+            "✅ — ruxsat berilgan\n❌ — ruxsat berilmagan\n"
+            "Tugmani bosib holatini o‘zgartiring.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            raise
+
+
 async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -1997,53 +2064,7 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await query.edit_message_text("❌ Admin ID noto‘g‘ri.")
             return
-        c = db()
-        exists = c.execute(
-            "SELECT 1 FROM bot_panel_admins WHERE user_id = ?", (aid,)
-        ).fetchone()
-        if not exists:
-            await query.edit_message_text(
-                "Bu admin topilmadi.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:admin:list")
-                ]]),
-            )
-            return
-        labels = {
-            "users": "👤 Foydalanuvchilar",
-            "groups": "🏘 Guruhlar",
-            "active": "🎮 Faol o‘yinlar",
-            "stats": "📊 Umumiy statistika",
-            "games": "🏆 O‘yin statistikasi",
-            "gifts": "🎁 Sovg‘alar statistikasi",
-            "broadcast": "📢 Ommaviy xabar",
-            "economy": "💸 Pul yuborish / bankrot",
-            "hadya": "🎁 Hadya yaratish",
-            "child_instant": "👶 Farzandni kutishsiz olish",
-            "admin_management": "🛡 Adminlarni boshqarish",
-        }
-        buttons = []
-        for perm, label in labels.items():
-            row = c.execute(
-                "SELECT enabled FROM bot_panel_admin_permissions "
-                "WHERE user_id = ? AND permission = ?",
-                (aid, perm),
-            ).fetchone()
-            enabled = bool(row and row[0])
-            buttons.append([InlineKeyboardButton(
-                ("✅ " if enabled else "❌ ") + label,
-                callback_data=f"panel:admin:toggle:{aid}:{perm}",
-            )])
-        buttons.append([
-            InlineKeyboardButton("⬅️ Adminlar ro‘yxati", callback_data="panel:admin:list")
-        ])
-        await query.edit_message_text(
-            f"🔐 <b>{aid}</b> uchun bo‘lim ruxsatlari\n\n"
-            "✅ — ruxsat berilgan\n❌ — ruxsat berilmagan\n"
-            "Tugmani bosib holatini o‘zgartiring.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        await show_admin_permissions(query, aid)
         return
 
     if query.data.startswith("panel:admin:toggle:"):
@@ -2081,22 +2102,8 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (aid, perm, new_value),
         )
         c.commit()
-        # Ruxsatlar sahifasini qayta ko‘rsatish.
-        query.data = f"panel:admin:perms:{aid}"
-        # Quyidagi bo‘lim keyingi callbackda qayta ochiladi.
-        await query.edit_message_text(
-            ("✅ Ruxsat yoqildi." if new_value else "❌ Ruxsat o‘chirildi."),
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "🔐 Ruxsatlarni ko‘rish",
-                    callback_data=f"panel:admin:perms:{aid}",
-                )
-            ], [
-                InlineKeyboardButton("⬅️ Adminlar ro‘yxati", callback_data="panel:admin:list")
-            ]]),
-        )
+        await show_admin_permissions(query, aid)
         return
-
 
     if query.data == "panel:gifts":
         c = db()
@@ -4572,7 +4579,7 @@ async def post_shutdown(application: Application):
         if timer and not timer.done():
             timer.cancel()
     if _conn is not None:
-        _conn.close()
+        _conn.real_close()
 
 
 # ───────────────────────────── Kasb tizimi ─────────────────────────────
@@ -5376,7 +5383,7 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             "SELECT 1 FROM bot_panel_admins WHERE user_id = ?", (aid,)
         ).fetchone():
             await msg.reply_text(
-                f"✅ <code>{aid}</code> adminlar ro‘yxatida.\\n"
+                f"✅ <code>{aid}</code> adminlar ro‘yxatida.\n"
                 "Bo‘lim ruxsatlarini adminlar ro‘yxatidan sozlang.",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([[
@@ -6270,8 +6277,9 @@ def hadya_post_text(contest_id):
     finally:
         c.close()
 
+    _is_open = bool(active) and int(remaining) > 0
     lines = [
-        "🎁 <b>HADYA BOSHLANDI!</b>",
+        "🎁 <b>HADYA BOSHLANDI!</b>" if _is_open else "🎁 <b>HADYA</b>",
         "",
         f"🎁 Sovg‘alar soni: <b>{amount}</b>",
         f"📦 Qolgan sovg‘alar: <b>{remaining}</b>",
@@ -6305,7 +6313,6 @@ async def cmd_hadya(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not msg or not chat:
         return
-    lang = family_lang(chat.id)
     args = context.args or []
 
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL):
@@ -6336,22 +6343,31 @@ async def cmd_hadya(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         if not user:
             return
-        try:
-            member = await context.bot.get_chat_member(chat.id, user.id)
-            if (user.id not in CAREER_OWNER_IDS
-                and not panel_has_permission(user.id, "hadya")
-                and member.status not in (
-                    ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER
-                )):
+        # Anonim guruh admini (guruh nomidan yozgan) — admin hisoblanadi.
+        anonymous_admin = bool(
+            msg.sender_chat and msg.sender_chat.id == chat.id
+        )
+        allowed = (
+            anonymous_admin
+            or user.id in CAREER_OWNER_IDS
+            or panel_has_permission(user.id, "hadya")
+        )
+        if not allowed:
+            try:
+                member = await context.bot.get_chat_member(chat.id, user.id)
+            except TelegramError:
                 await context.bot.send_message(
                     chat_id=chat.id,
-                    text="⛔ Hadya boshlash uchun guruh administratori bo‘lishingiz kerak."
+                    text="⛔ Admin huquqini tekshirib bo‘lmadi."
                 )
                 return
-        except TelegramError:
+            allowed = member.status in (
+                ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER
+            )
+        if not allowed:
             await context.bot.send_message(
                 chat_id=chat.id,
-                text="⛔ Admin huquqini tekshirib bo‘lmadi."
+                text="⛔ Hadya boshlash uchun guruh administratori bo‘lishingiz kerak."
             )
             return
         owner_id = user.id
@@ -6415,6 +6431,8 @@ async def cb_hadya(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = None
     try:
         # Bitta foydalanuvchi bir hadyadan faqat bir marta olishi mumkin.
+        if c.in_transaction:
+            c.commit()
         c.execute("BEGIN IMMEDIATE")
         contest = c.execute(
             "SELECT chat_id, remaining, active, message_id "
@@ -6501,6 +6519,9 @@ async def cb_hadya(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML,
                 reply_markup=keyboard,
             )
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            logger.warning("Hadya postini yangilashda xato: %s", exc)
     except TelegramError:
         logger.exception("Hadya postini yangilashda xato")
 

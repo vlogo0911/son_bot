@@ -4767,7 +4767,7 @@ def crash_payout(bet, mult):
 
 
 def crash_mention(uid, player):
-    return f'<a href="tg://user?id={uid}">{player["name"]}</a>'
+    return f'<a href="tg://user?id={uid}">{escape(html.unescape(str(player["name"])))}</a>'
 
 
 def crash_players_text(chat_id, game):
@@ -4976,7 +4976,76 @@ async def crash_round(app, chat_id, game):
         logger.exception("Crash raundida xato")
     finally:
         crash_refund(game)
+        was_finished = game.get("state") == "end"
+        auto_repeat = bool(game.get("auto_repeat"))
         end_game(chat_id, game)
+        if auto_repeat and was_finished:
+            task = asyncio.create_task(_crash_auto_restart(app, chat_id))
+            BG_TASKS.add(task)
+            task.add_done_callback(BG_TASKS.discard)
+
+
+async def cmd_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start Crash directly with /crash; channel mode automatically repeats rounds."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or chat.type == ChatType.PRIVATE:
+        if msg:
+            await msg.reply_text("👥 /crash buyrug‘ini guruh yoki kanalda ishlating.")
+        return
+    chat_id = chat.id
+    if GAMES.get(chat_id):
+        await msg.reply_text("⚠️ Bu chatda boshqa o‘yin ishlayapti. Avval uni yakunlang.")
+        return
+    if chat.type == ChatType.CHANNEL:
+        starter = 0
+        auto_repeat = True
+    else:
+        if not user:
+            return
+        starter = user.id
+        auto_repeat = False
+    lobby = await context.bot.send_message(
+        chat_id=chat_id,
+        text=cr_t(chat_id, "lobby", min=CRASH_MIN_BET, sec=CRASH_COUNTDOWN),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(cr_t(chat_id, "b_join"), callback_data="cr:join")
+        ]]),
+        parse_mode=ParseMode.HTML,
+    )
+    game = new_game(
+        chat_id, "crash", starter, state="lobby", msg_id=lobby.message_id,
+        players={}, dropped=[], cp=None, t0=None, t_crash=None,
+        charged=False, settled=False, auto_repeat=auto_repeat,
+    )
+    await edit(context.bot, chat_id, lobby.message_id,
+               cr_t(chat_id, "lobby", min=CRASH_MIN_BET, sec=CRASH_COUNTDOWN),
+               crash_kb(chat_id, game))
+    arm(context.application, chat_id, game, CRASH_LOBBY_TTL)
+
+
+async def _crash_auto_restart(app, chat_id):
+    await asyncio.sleep(4)
+    if GAMES.get(chat_id):
+        return
+    try:
+        msg = await app.bot.send_message(
+            chat_id=chat_id,
+            text=cr_t(chat_id, "lobby", min=CRASH_MIN_BET, sec=CRASH_COUNTDOWN),
+            parse_mode=ParseMode.HTML,
+        )
+        game = new_game(
+            chat_id, "crash", 0, state="lobby", msg_id=msg.message_id,
+            players={}, dropped=[], cp=None, t0=None, t_crash=None,
+            charged=False, settled=False, auto_repeat=True,
+        )
+        await edit(app.bot, chat_id, msg.message_id,
+                   cr_t(chat_id, "lobby", min=CRASH_MIN_BET, sec=CRASH_COUNTDOWN),
+                   crash_kb(chat_id, game))
+        arm(app, chat_id, game, CRASH_LOBBY_TTL)
+    except TelegramError:
+        logger.exception("Crash kanalida avtomatik yangi raund ochilmadi")
 
 
 async def cb_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6753,7 +6822,8 @@ async def pemoji_handle_text(update, context):
     if not state or not msg:
         return False
 
-    entities = [e for e in (msg.entities or []) if e.type == "custom_emoji"]
+    entities = [e for e in (msg.entities or msg.caption_entities or [])
+                if e.type == "custom_emoji"]
     if not entities:
         await msg.reply_text(
             "❌ Xabarda premium emoji topilmadi. Premium akkauntdan premium emoji yuboring.",
@@ -7313,7 +7383,7 @@ async def cb_hadya(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "rose": "🌹 Atirgul",
                         "diamond": "💎 Olmos",
                     }
-                    result = f"🎉 Tabriklaymiz! Siz {gift_names.get(gift_key, gift_key)} yutdingiz!"
+                    result = f"🎉 Tabriklaymiz! Siz {gift_names.get(gift_key, gift_key)} yutdingiz! Sovg‘a profilda premium emoji bilan ko‘rinadi."
     except sqlite3.IntegrityError:
         c.rollback()
         result = "ℹ️ Siz bu hadyadan allaqachon sovg‘a olgansiz."
@@ -7829,6 +7899,7 @@ def main():
         (["shop"], cmd_shop),
         (["pul"], cmd_pul),
         (["hadya"], cmd_hadya),
+        (["crash"], cmd_crash),
         (["konkurs"], cmd_konkurs),
         (["missiyalar", "missions"], cmd_missiyalar),
         (["ariza"], cmd_ariza),
@@ -7837,7 +7908,7 @@ def main():
         (["lang"], cmd_lang),
     ]
     for names, handler in commands:
-        if names in (["konkurs"], ["hadya"]):
+        if names in (["konkurs"], ["hadya"], ["crash"]):
             # /konkurs guruhda ham, kanalda ham ishlashi uchun channel_post'larni ham qabul qilamiz
             app.add_handler(CommandHandler(
                 names, handler,

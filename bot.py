@@ -3199,7 +3199,7 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         cost = CHILD_COSTS[min(existing_children, 4)]
         wallet_row = c.execute("SELECT money FROM user_wallet WHERE user_id=?", (requester,)).fetchone()
-        balance = (10**12 if requester in CAREER_OWNER_IDS else (int(wallet_row[0] or 0) if wallet_row else 0))
+        balance = int(wallet_row[0] or 0) if wallet_row else 0
         if balance < cost:
             try:
                 await context.bot.send_message(
@@ -3220,7 +3220,7 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         debit_failed = False
         request_updated = False
         with c:
-            if cost and requester not in CAREER_OWNER_IDS:
+            if cost:
                 debit = c.execute(
                     "UPDATE user_wallet SET money=money-? WHERE user_id=? AND money>=?",
                     (cost, requester, cost),
@@ -3232,7 +3232,7 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (due, rid),
                 )
                 request_updated = updated.rowcount == 1
-                if not request_updated and cost and requester not in CAREER_OWNER_IDS:
+                if not request_updated and cost:
                     c.execute(
                         "UPDATE user_wallet SET money=money+? WHERE user_id=?",
                         (cost, requester),
@@ -3243,7 +3243,7 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not request_updated:
             await q.answer("So‘rov avval qayta ishlangan.", show_alert=True)
             return
-        if cost and requester not in CAREER_OWNER_IDS:
+        if cost:
             await log_money_event(
                 context.bot,
                 "👶 <b>FARZAND UCHUN TO‘LOV</b>\n"
@@ -7300,7 +7300,37 @@ def wallet_balance(user_id):
     return int(row[0] or 0) if row else 0
 
 def is_money_owner(user_id):
-    return user_id in CAREER_OWNER_IDS
+    return False
+
+
+async def cmd_hisob(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.effective_message
+
+    if not user or user.id not in CAREER_OWNER_IDS:
+        await msg.reply_text("⛔ Bu buyruq faqat bot egalari uchun.")
+        return
+
+    if len(context.args) != 1:
+        await msg.reply_text("Foydalanish: /hisob 100000")
+        return
+
+    try:
+        amount = int(context.args[0])
+    except (ValueError, TypeError):
+        await msg.reply_text("❌ Miqdor butun son bo‘lishi kerak.")
+        return
+
+    if amount <= 0 or amount > 10**9:
+        await msg.reply_text("❌ Miqdor 1 dan 1 000 000 000 gacha bo‘lishi kerak.")
+        return
+
+    wallet_change(user.id, amount)
+    balance = wallet_balance(user.id)
+    await msg.reply_text(
+        f"✅ Hamyoningizga {amount:,}$ qo‘shildi.\\n"
+        f"💰 Joriy balans: {balance:,}$"
+    )
 
 
 async def log_money_event(bot, text):
@@ -7565,7 +7595,7 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         member.status == ChatMemberStatus.ADMINISTRATOR
         and getattr(member, "can_post_messages", False)
         and event.from_user
-        and is_money_owner(event.from_user.id)
+        and event.from_user.id in CAREER_OWNER_IDS
     ):
         c = db()
         with c:
@@ -8328,6 +8358,7 @@ def main():
         (["oila", "family"], cmd_oila),
         (["shop"], cmd_shop),
         (["pul"], cmd_pul),
+        (["hisob"], cmd_hisob),
         (["hadya"], cmd_hadya),
         (["crash"], cmd_crash),
         (["konkurs"], cmd_konkurs),

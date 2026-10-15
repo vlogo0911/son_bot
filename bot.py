@@ -7029,6 +7029,22 @@ def init_economy():
 # Premium emoji ID egasi premium emojini botga yuborganda avtomatik olinadi.
 
 PEMOJI_GIFT_KEYS = ["ring", "bear", "bouquet", "rose", "diamond"]
+# Profilda ishlatiladigan belgilarni alohida premium emoji bilan sozlash.
+PEMOJI_PROFILE_KEYS = [
+    ("👤", "Ism / profil sarlavhasi"),
+    ("🎂", "Tug‘ilgan sana"),
+    ("🎈", "Yosh"),
+    ("🎖", "Daraja"),
+    ("💰", "Ball"),
+    ("💵", "Pul"),
+    ("💼", "Kasb"),
+    ("⭐", "Kasb XP"),
+    ("🎮", "O‘yinlar"),
+    ("🏆", "G‘alabalar"),
+    ("💔", "Mag‘lubiyatlar"),
+    ("🤝", "Duranglar / juftlik"),
+    ("📊", "G‘alaba foizi"),
+]
 _FE0F = "️"
 
 
@@ -7179,30 +7195,45 @@ async def pemoji_show_profile(query):
     rows = db().execute(
         "SELECT key, emoji_id FROM premium_emoji WHERE scope='profile' ORDER BY rowid"
     ).fetchall()
+    saved = {key: emoji_id for key, emoji_id in rows}
     lines = [
         "👤 <b>PROFIL — PREMIUM EMOJI</b>",
         "",
-        "Profil matnidagi oddiy emoji o‘rniga premium emoji ko‘rsatiladi.",
+        "Profil ko‘rinishidagi belgini tanlang. Har bir belgi uchun alohida premium emoji o‘rnatish yoki o‘chirish mumkin.",
         "Holati: " + ("✅ yoqilgan" if pemoji_enabled("profile") else "❌ o‘chirilgan"),
         "",
     ]
     buttons = []
-    if rows:
-        for idx, (key, emoji_id) in enumerate(rows):
+    for key, label in PEMOJI_PROFILE_KEYS:
+        emoji_id = saved.get(key)
+        lines.append(
+            f"{key} <b>{escape(label)}</b> — " +
+            (f"✅ <code>{emoji_id}</code>" if emoji_id else "▫️ standart emoji")
+        )
+        row = [InlineKeyboardButton(
+            ("✏️ " if emoji_id else "➕ ") + key + " " + label,
+            callback_data=f"panel:pemoji:pset:{key}"
+        )]
+        if emoji_id:
+            row.append(InlineKeyboardButton(
+                "🗑", callback_data=f"panel:pemoji:pdelkey:{key}"
+            ))
+        buttons.append(row)
+    known = {key for key, _ in PEMOJI_PROFILE_KEYS}
+    extras = [(key, emoji_id) for key, emoji_id in rows if key not in known]
+    if extras:
+        lines += ["", "<b>Qo‘shimcha saqlangan emojilar:</b>"]
+        for key, emoji_id in extras:
             lines.append(f"{escape(key)} → <code>{emoji_id}</code>")
             buttons.append([InlineKeyboardButton(
-                f"🗑 {key} ni o‘chirish", callback_data=f"panel:pemoji:pdel:{idx}")])
-    else:
-        lines.append("Hozircha emoji qo‘shilmagan.")
-    buttons.insert(0, [InlineKeyboardButton("➕ Premium emoji qo‘shish",
-                                            callback_data="panel:pemoji:padd")])
+                f"🗑 {key} ni o‘chirish", callback_data=f"panel:pemoji:pdelkey:{key}"
+            )])
     buttons.append([InlineKeyboardButton(
         "🔴 O‘chirish" if pemoji_enabled("profile") else "🟢 Yoqish",
         callback_data="panel:pemoji:ptoggle")])
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:pemoji")])
     lines += ["", PEMOJI_NOTE]
     await _pemoji_edit(query, "\n".join(lines), InlineKeyboardMarkup(buttons))
-
 
 async def pemoji_callback(query, context):
     """panel:pemoji... callbacklari (faqat bot egalari)."""
@@ -7240,6 +7271,18 @@ async def pemoji_callback(query, context):
         except (ValueError, IndexError):
             pass
         await pemoji_show_profile(query)
+    elif action == "pdelkey" and arg:
+        pemoji_delete("profile", arg)
+        await pemoji_show_profile(query)
+    elif action == "pset" and arg:
+        context.user_data["pemoji_state"] = {"scope": "profile", "key": arg}
+        await _pemoji_edit(
+            query,
+            f"<b>{escape(arg)}</b> belgisi uchun premium emoji yuboring. "
+            "Yuborgan premium emoji tanlangan belgining o‘rnida ko‘rinadi.",
+            InlineKeyboardMarkup([[InlineKeyboardButton(
+                "❌ Bekor qilish", callback_data="panel:pemoji:profile")]]),
+        )
     elif action == "gset" and arg in SHOP_GIFTS:
         context.user_data["pemoji_state"] = {"scope": "gift", "key": arg}
         await _pemoji_edit(
@@ -7291,12 +7334,17 @@ async def pemoji_handle_text(update, context):
         return True
 
     saved = []
-    for e in entities:
-        fallback = msg.parse_entity(e).replace(_FE0F, "")
-        if not fallback:
-            continue
-        pemoji_save("profile", fallback, e.custom_emoji_id)
-        saved.append(fallback)
+    selected_key = state.get("key")
+    if selected_key:
+        pemoji_save("profile", selected_key, entities[0].custom_emoji_id)
+        saved.append(selected_key)
+    else:
+        for e in entities:
+            fallback = msg.parse_entity(e).replace(_FE0F, "")
+            if not fallback:
+                continue
+            pemoji_save("profile", fallback, e.custom_emoji_id)
+            saved.append(fallback)
     context.user_data.pop("pemoji_state", None)
     if saved:
         pemoji_set_enabled("profile", True)

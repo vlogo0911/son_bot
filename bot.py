@@ -715,6 +715,20 @@ def db():
 
 def init_db():
     c = db()
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS crash_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS crash_groups (
+            chat_id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT ''
+        );
+    """)
+    c.executemany(
+        "INSERT OR IGNORE INTO crash_config (key, value) VALUES (?, ?)",
+        [("enabled", "1"), ("min_bet", "50"), ("tick", "1.0"), ("group_restrict", "0")],
+    )
     c.execute("""
         CREATE TABLE IF NOT EXISTS bot_panel_admins (
             user_id INTEGER PRIMARY KEY,
@@ -1904,6 +1918,7 @@ def panel_keyboard(user_id=None):
     if "admin_management" in available:
         rows.append([InlineKeyboardButton("🛡 Adminlarni boshqarish", callback_data="panel:admins")])
     if is_owner:
+        rows.append([InlineKeyboardButton("🎰 Crash sozlamalari", callback_data="panel:crash")])
         rows.append([InlineKeyboardButton("✨ Premium emoji", callback_data="panel:pemoji")])
 
     return InlineKeyboardMarkup(rows or [[
@@ -2018,6 +2033,101 @@ async def show_admin_permissions(query, aid):
             raise
 
 
+def crash_panel_keyboard():
+    status = "🟢 Yoqilgan" if CRASH_ENABLED else "🔴 O‘chirilgan"
+    group_mode = "🔒 Faqat ulangan guruhlar" if CRASH_GROUP_RESTRICT else "🌐 Barcha guruhlar"
+    buttons = [
+        [InlineKeyboardButton(f"Ommaviy Crash: {status}", callback_data="panel:crash:toggle")],
+        [InlineKeyboardButton("➕ Guruh ulash", callback_data="panel:crash:group_add"),
+         InlineKeyboardButton("➖ Guruh uzish", callback_data="panel:crash:group_remove")],
+        [InlineKeyboardButton(f"💰 Minimal depozit: {CRASH_MIN_BET}$", callback_data="panel:crash:min")],
+        [InlineKeyboardButton(f"⚡ Koeffitsiyent tezligi: {CRASH_TICK:.1f} s", callback_data="panel:crash:speed")],
+        [InlineKeyboardButton("➕ Tezlashtirish", callback_data="panel:crash:speed_up"),
+         InlineKeyboardButton("➖ Sekinlashtirish", callback_data="panel:crash:speed_down")],
+        [InlineKeyboardButton(group_mode, callback_data="panel:crash:group_mode")],
+        [InlineKeyboardButton("⬅️ Owner panelga qaytish", callback_data="panel:home")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+async def crash_panel_callback(query, context):
+    global CRASH_ENABLED, CRASH_MIN_BET, CRASH_TICK, CRASH_GROUP_RESTRICT
+    data = query.data
+    if data == "panel:crash":
+        context.user_data.pop("panel_crash_state", None)
+        load_crash_config()
+        groups = db().execute("SELECT COUNT(*) FROM crash_groups").fetchone()[0]
+        mode = "faqat ulangan guruhlar" if CRASH_GROUP_RESTRICT else "barcha guruhlar"
+        await query.edit_message_text(
+            "🎰 <b>CRASH SOZLAMALARI</b>\n\n"
+            f"Holati: <b>{'Yoqilgan' if CRASH_ENABLED else 'O‘chirilgan'}</b>\n"
+            f"Minimal depozit: <b>{CRASH_MIN_BET}$</b>\n"
+            f"Koeffitsiyent tezligi: <b>{CRASH_TICK:.1f} soniya</b>\n"
+            f"Ulangan guruhlar: <b>{groups}</b>\n"
+            f"Guruh rejimi: <b>{mode}</b>\n\n"
+            "Tezlik 0.6–1.6 soniya oralig‘ida: 0.6 — tezroq, 1.6 — sekinroq.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=crash_panel_keyboard(),
+        )
+        return
+    if data == "panel:crash:toggle":
+        load_crash_config()
+        crash_config_set("enabled", "0" if CRASH_ENABLED else "1")
+        load_crash_config()
+        await crash_panel_callback(query, context)
+        return
+    if data == "panel:crash:min":
+        context.user_data["panel_crash_state"] = "min_bet"
+        await query.edit_message_text(
+            "💰 Crash uchun yangi minimal depozitni dollar hisobida butun son qilib yuboring.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:crash")]]),
+        )
+        return
+    if data == "panel:crash:group_add":
+        context.user_data["panel_crash_state"] = "group_add"
+        await query.edit_message_text(
+            "➕ Crashga ulanadigan guruhning ID raqamini yuboring.\n\n"
+            "Misol: <code>-1001234567890</code>\n"
+            "Bot shu guruhda bo‘lishi kerak.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:crash")]]),
+        )
+        return
+    if data == "panel:crash:group_remove":
+        rows = db().execute("SELECT chat_id FROM crash_groups ORDER BY chat_id").fetchall()
+        buttons = [[InlineKeyboardButton(f"➖ Uzish: {r[0]}", callback_data=f"panel:crash:group_del:{r[0]}")] for r in rows]
+        if not buttons:
+            buttons.append([InlineKeyboardButton("Ulangan guruh yo‘q", callback_data="panel:crash")])
+        buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:crash")])
+        await query.edit_message_text("➖ <b>Crash guruhini uzish</b>\nUzmoqchi bo‘lgan guruhni tanlang:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+        return
+    if data.startswith("panel:crash:group_del:"):
+        try:
+            chat_id = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            return
+        db().execute("DELETE FROM crash_groups WHERE chat_id = ?", (chat_id,))
+        db().commit()
+        await crash_panel_callback(query, context)
+        return
+    if data == "panel:crash:group_mode":
+        load_crash_config()
+        crash_config_set("group_restrict", "0" if CRASH_GROUP_RESTRICT else "1")
+        load_crash_config()
+        await crash_panel_callback(query, context)
+        return
+    if data in ("panel:crash:speed", "panel:crash:speed_up", "panel:crash:speed_down"):
+        load_crash_config()
+        if data == "panel:crash:speed_up":
+            CRASH_TICK = max(0.6, round(CRASH_TICK - 0.1, 1))
+            crash_config_set("tick", CRASH_TICK)
+        elif data == "panel:crash:speed_down":
+            CRASH_TICK = min(1.6, round(CRASH_TICK + 0.1, 1))
+            crash_config_set("tick", CRASH_TICK)
+        await crash_panel_callback(query, context)
+        return
+
+
 async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -2044,6 +2154,13 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "panel:pemoji" or query.data.startswith("panel:pemoji:"):
         await pemoji_callback(query, context)
+        return
+
+    if query.data == "panel:crash" or query.data.startswith("panel:crash:"):
+        if uid not in CAREER_OWNER_IDS:
+            await query.answer("⛔ Crash sozlamalari faqat bot egalari uchun.", show_alert=True)
+            return
+        await crash_panel_callback(query, context)
         return
 
     # Admin boshqaruvi: faqat bot egalari.
@@ -4623,12 +4740,53 @@ CRASH_MIN_BET = 50          # minimal depozit ($)
 CRASH_STEP = 50             # ➕ tugmasi har bosilganda qo'shiladigan summa ($)
 CRASH_COUNTDOWN = 20        # birinchi o'yinchi qo'shilgach teskari sanoq (soniya)
 CRASH_LOBBY_TTL = 120       # hech kim qo'shilmasa o'yin bekor bo'ladigan vaqt (soniya)
-CRASH_GROWTH = 0.10         # koeffitsiyent = e^(CRASH_GROWTH * soniya)
+CRASH_GROWTH = 0.10         # asosiy koeffitsiyent o'sish tezligi
 CRASH_RTP = 0.97            # 0.97 → uzoq muddatda ~3% bot foydasi
 CRASH_MAX_MULT = 100.0      # eng katta koeffitsiyent
-CRASH_TICK = 0.4            # parvoz xabari yangilanish oralig'i; Telegram rate-limit uchun
+CRASH_TICK = 1.0            # owner panelda 0.6–1.6 soniya oralig'ida sozlanadi
+CRASH_ENABLED = True
+CRASH_GROUP_RESTRICT = False
 CRASH_LIST_LIMIT = 25       # xabarda ko'rsatiladigan o'yinchilar soni (ro'yxat boshiga)
 _CRASH_RNG = secrets.SystemRandom()
+
+
+def crash_config_set(key, value):
+    c = db()
+    c.execute(
+        "INSERT INTO crash_config (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(key), str(value)),
+    )
+    c.commit()
+
+
+def load_crash_config():
+    global CRASH_ENABLED, CRASH_MIN_BET, CRASH_TICK, CRASH_GROUP_RESTRICT
+    c = db()
+    rows = dict(c.execute("SELECT key, value FROM crash_config").fetchall())
+    CRASH_ENABLED = rows.get("enabled", "1") == "1"
+    try:
+        CRASH_MIN_BET = max(1, int(rows.get("min_bet", "50")))
+    except (TypeError, ValueError):
+        CRASH_MIN_BET = 50
+    try:
+        CRASH_TICK = min(1.6, max(0.6, round(float(rows.get("tick", "1.0")), 1)))
+    except (TypeError, ValueError):
+        CRASH_TICK = 1.0
+    CRASH_GROUP_RESTRICT = rows.get("group_restrict", "0") == "1"
+
+
+def crash_growth_rate():
+    # 1.0 s — standart tezlik; 0.6 s tezroq, 1.6 s sekinroq koeffitsiyent.
+    return CRASH_GROWTH / CRASH_TICK
+
+
+def crash_group_allowed(chat_id):
+    if not CRASH_GROUP_RESTRICT:
+        return True
+    return db().execute(
+        "SELECT 1 FROM crash_groups WHERE chat_id = ?", (int(chat_id),)
+    ).fetchone() is not None
 
 CRASH_TEXT = {
     "uz": {
@@ -5022,7 +5180,7 @@ def render_crash_gif(cp, growth=None, fps=ANIM_FPS):
     """Parvozning to'liq GIF'ini (bytes) qaytaradi yoki None. Og'ir — thread'da chaqiring."""
     if not PIL_OK:
         return None
-    growth = CRASH_GROWTH if growth is None else growth
+    growth = crash_growth_rate() if growth is None else growth
     t_crash = math.log(cp) / growth if cp > 1.0 else 0.0
     t_draw = min(t_crash, ANIM_MAX_SECONDS)
     dt = 1.0 / fps
@@ -5164,9 +5322,10 @@ def crash_point():
     return min(CRASH_MAX_MULT, max(1.0, cp))
 
 
-def crash_mult(elapsed):
+def crash_mult(elapsed, growth=None):
     """Parvoz boshlanganidan beri `elapsed` soniya o'tgandagi koeffitsiyent."""
-    return math.floor(math.exp(CRASH_GROWTH * elapsed) * 100) / 100
+    growth = crash_growth_rate() if growth is None else growth
+    return math.floor(math.exp(growth * elapsed) * 100) / 100
 
 
 def crash_payout(bet, mult):
@@ -5278,6 +5437,8 @@ async def crash_round(app, chat_id, game):
         # Crash nuqtasi raund boshida aniqlanadi. GIF ishlatilmaydi:
         # bitta oddiy matn xabari tahrirlanadi — Telegram ancha yengil ishlaydi.
         game["cp"] = crash_point()
+        game["growth"] = crash_growth_rate()
+        game["tick"] = CRASH_TICK
 
         # Qo'shilish oynasi saqlanadi, ammo har soniyada countdown xabari yuborilmaydi.
         # Shu vaqt ichida o'yinchilar bitta lobby xabaridagi tugmalar orqali qo'shilishi mumkin.
@@ -5304,7 +5465,7 @@ async def crash_round(app, chat_id, game):
             )
             return
 
-        game["t_crash"] = math.log(game["cp"]) / CRASH_GROWTH
+        game["t_crash"] = math.log(game["cp"]) / game.get("growth", crash_growth_rate())
         game["t0"] = time.monotonic()
         game["media"] = False
         game["state"] = "fly"
@@ -5317,7 +5478,7 @@ async def crash_round(app, chat_id, game):
         )
 
         # Xabarni taxminan har 1.2 soniyada yangilash rate-limit va qotishni kamaytiradi.
-        tick = 0.4
+        tick = game.get("tick", CRASH_TICK)
         while True:
             elapsed = time.monotonic() - game["t0"]
             if elapsed >= game["t_crash"]:
@@ -5328,7 +5489,7 @@ async def crash_round(app, chat_id, game):
             elapsed = time.monotonic() - game["t0"]
             if elapsed >= game["t_crash"]:
                 break
-            mult_now = crash_mult(max(0.0, elapsed))
+            mult_now = crash_mult(max(0.0, elapsed), game.get("growth"))
             await cr_edit(
                 bot, chat_id, game,
                 crash_fit(lambda lim: crash_fly_text(chat_id, game, mult_now, lim)),
@@ -5413,6 +5574,12 @@ async def cmd_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("👥 /crash buyrug‘ini guruh yoki kanalda ishlating.")
         return
     chat_id = chat.id
+    if not CRASH_ENABLED:
+        await msg.reply_text("⛔ Crash o‘yini bot egasi tomonidan vaqtincha o‘chirib qo‘yilgan.")
+        return
+    if not crash_group_allowed(chat_id):
+        await msg.reply_text("⛔ Bu guruh Crash uchun ulanmagan. Bot egasidan guruhni ulashni so‘rang.")
+        return
     if GAMES.get(chat_id):
         await msg.reply_text("⚠️ Bu chatda boshqa o‘yin ishlayapti. Avval uni yakunlang.")
         return
@@ -5446,7 +5613,7 @@ async def cmd_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _crash_auto_restart(app, chat_id):
     await asyncio.sleep(4)
-    if GAMES.get(chat_id):
+    if not CRASH_ENABLED or not crash_group_allowed(chat_id) or GAMES.get(chat_id):
         return
     try:
         msg = await app.bot.send_message(
@@ -5473,6 +5640,12 @@ async def cb_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = q.from_user
     action = q.data.split(":", 1)[1]
     game = active(q, "crash")
+
+    if action in ("join", "plus", "min") and (
+        not CRASH_ENABLED or not crash_group_allowed(chat_id)
+    ):
+        await q.answer("⛔ Bu guruhda Crash hozir faol emas.", show_alert=True)
+        return
 
     # ── Qo'shilish ──
     if action == "join":
@@ -5562,7 +5735,7 @@ async def cb_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if elapsed >= game["t_crash"]:
             await q.answer(cr_t(chat_id, "late"), show_alert=True)
             return
-        mult = crash_mult(elapsed)
+        mult = crash_mult(elapsed, game.get("growth"))
         payout = crash_payout(p["bet"], mult)
         p["cash"] = mult
         try:
@@ -6409,6 +6582,50 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     raw = msg.text.strip()
+    crash_state = context.user_data.get("panel_crash_state")
+    if crash_state and user.id in CAREER_OWNER_IDS:
+        if crash_state == "group_add":
+            try:
+                chat_id = int(raw)
+                if chat_id >= 0:
+                    raise ValueError
+            except ValueError:
+                await msg.reply_text("❌ Guruh ID manfiy son bo‘lishi kerak (masalan, -1001234567890). Qaytadan yuboring.")
+                return
+            c = db()
+            c.execute(
+                "INSERT INTO crash_groups (chat_id, title) VALUES (?, ?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title",
+                (chat_id, str(chat_id)),
+            )
+            c.commit()
+            crash_config_set("group_restrict", "1")
+            load_crash_config()
+            context.user_data.pop("panel_crash_state", None)
+            await msg.reply_text(
+                f"✅ Crash uchun <code>{chat_id}</code> guruhi ulandi.\n"
+                "Endi Crash faqat ulangan guruhlarda ishlaydi.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Crash sozlamalari", callback_data="panel:crash")]]),
+            )
+            return
+        if crash_state == "min_bet":
+            try:
+                amount = int(raw)
+                if amount < 1 or amount > 1_000_000_000:
+                    raise ValueError
+            except ValueError:
+                await msg.reply_text("❌ Minimal depozit 1 dan 1 000 000 000 gacha butun son bo‘lsin. Qaytadan yuboring.")
+                return
+            crash_config_set("min_bet", amount)
+            load_crash_config()
+            context.user_data.pop("panel_crash_state", None)
+            await msg.reply_text(
+                f"✅ Crash minimal depoziti <b>{amount}$</b> qilib belgilandi.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Crash sozlamalari", callback_data="panel:crash")]]),
+            )
+            return
     if context.user_data.get("panel_admin_add_state") == "waiting_id" and (
         user.id in CAREER_OWNER_IDS or panel_has_permission(user.id, "admin_management")
     ):
@@ -8400,6 +8617,7 @@ def main():
 
     init_db()
     init_economy()
+    load_crash_config()
 
     app = (
         Application.builder()

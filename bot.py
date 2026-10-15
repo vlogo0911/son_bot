@@ -4565,7 +4565,7 @@ CRASH_LOBBY_TTL = 120       # hech kim qo'shilmasa o'yin bekor bo'ladigan vaqt (
 CRASH_GROWTH = 0.10         # koeffitsiyent = e^(CRASH_GROWTH * soniya)
 CRASH_RTP = 0.97            # 0.97 → uzoq muddatda ~3% bot foydasi
 CRASH_MAX_MULT = 100.0      # eng katta koeffitsiyent
-CRASH_TICK = 1.0            # parvoz paytida xabar yangilanish oralig'i (soniya)
+CRASH_TICK = 0.8            # koeffitsiyent tezroq ko'rinadi, Telegram edit limitiga ehtiyotkor
 CRASH_LIST_LIMIT = 25       # xabarda ko'rsatiladigan o'yinchilar soni (ro'yxat boshiga)
 _CRASH_RNG = secrets.SystemRandom()
 
@@ -4974,6 +4974,11 @@ async def crash_round(app, chat_id, game):
         )
     except Exception:  # noqa: BLE001 — raund xatosi botni yiqitmasin
         logger.exception("Crash raundida xato")
+        # Agar parvoz paytida API/xabar yangilash xatosi bo'lsa, raundni
+        # osilib qolgan holatda qoldirmaymiz. finally depozitlarni qaytaradi
+        # (naqd qilgan o'yinchilar qayta to'lov olmaydi).
+        if GAMES.get(chat_id) is game and game.get("state") == "fly":
+            game["state"] = "end"
     finally:
         crash_refund(game)
         was_finished = game.get("state") == "end"

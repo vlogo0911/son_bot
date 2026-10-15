@@ -1088,15 +1088,14 @@ def record(chat_id, user_id, outcome, points=0):
                     (user_id,)
                 )
 
-                # Ownerlar cheksiz pulga ega, balansiga qo'shmaymiz
-                if user_id not in CAREER_OWNER_IDS:
-                    c.execute(
-                        """
-                        UPDATE user_wallet
-                        SET money = money + ?
-                        WHERE user_id=?
-                        """,
-                        (reward_money, user_id)
+                # Kasb mukofoti barcha foydalanuvchilarning balansiga qo'shiladi
+                c.execute(
+                    """
+                    UPDATE user_wallet
+                    SET money = money + ?
+                    WHERE user_id=?
+                    """,
+                    (reward_money, user_id)
                     )
 
 def get_stats(chat_id, user_id, private):
@@ -2746,8 +2745,7 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (user.id,)
     ).fetchone()[0]
 
-    if user.id in CAREER_OWNER_IDS:
-        money = "∞"
+    money = int(money or 0)
 
     private = chat.type == ChatType.PRIVATE
 

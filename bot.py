@@ -1345,6 +1345,12 @@ async def _expire(app, chat_id, game, seconds):
     if GAMES.get(chat_id) is not game:
         return
 
+    # Crash lobby taymeri faqat hali hech kim qo'shilmagan kutish oynasini yopishi
+    # mumkin. Callback va taymer bir vaqtda ishlasa ham faol raundni o'chirmaymiz.
+    if game.get("type") == "crash":
+        if game.get("state") != "lobby" or game.get("players"):
+            return
+
     del GAMES[chat_id]
     game["timer"] = None
 
@@ -4622,7 +4628,7 @@ CRASH_LOBBY_TTL = 120       # hech kim qo'shilmasa o'yin bekor bo'ladigan vaqt (
 CRASH_GROWTH = 0.10         # koeffitsiyent = e^(CRASH_GROWTH * soniya)
 CRASH_RTP = 0.97            # 0.97 → uzoq muddatda ~3% bot foydasi
 CRASH_MAX_MULT = 100.0      # eng katta koeffitsiyent
-CRASH_TICK = 1.0            # parvoz paytida xabar yangilanish oralig'i (soniya)
+CRASH_TICK = 1.2            # parvoz xabari yangilanish oralig'i; Telegram rate-limit uchun
 CRASH_LIST_LIMIT = 25       # xabarda ko'rsatiladigan o'yinchilar soni (ro'yxat boshiga)
 _CRASH_RNG = secrets.SystemRandom()
 
@@ -4643,6 +4649,7 @@ CRASH_TEXT = {
         ),
         "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Portlashdan oldin pulni oling!",
         "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Portlashdan oldin pulni oling!",
+        "crashed_short": "💥 <b>Portlash: x{cp}</b>",
         "result": (
             "💥 <b>Roket x{cp} da portladi!</b>\n\n"
             "🏆 <b>Yutganlar:</b>\n{winners}\n\n"
@@ -4686,6 +4693,7 @@ CRASH_TEXT = {
         ),
         "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Cash out before it crashes!",
         "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Cash out before it crashes!",
+        "crashed_short": "💥 <b>Crashed at x{cp}</b>",
         "result": (
             "💥 <b>The rocket crashed at x{cp}!</b>\n\n"
             "🏆 <b>Winners:</b>\n{winners}\n\n"
@@ -4729,6 +4737,7 @@ CRASH_TEXT = {
         ),
         "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Заберите деньги до взрыва!",
         "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Заберите деньги до взрыва!",
+        "crashed_short": "💥 <b>Взрыв на x{cp}</b>",
         "result": (
             "💥 <b>Ракета взорвалась на x{cp}!</b>\n\n"
             "🏆 <b>Выиграли:</b>\n{winners}\n\n"
@@ -4772,6 +4781,7 @@ CRASH_TEXT = {
         ),
         "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Жарылғанға дейін ақшаны алыңыз!",
         "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Жарылғанға дейін ақшаны алыңыз!",
+        "crashed_short": "💥 <b>Жарылу: x{cp}</b>",
         "result": (
             "💥 <b>Зымыран x{cp} кезінде жарылды!</b>\n\n"
             "🏆 <b>Ұтқандар:</b>\n{winners}\n\n"
@@ -4816,9 +4826,9 @@ except Exception:  # noqa: BLE001
     PIL_OK = False
 
 ANIM_W, ANIM_H = 480, 270
-ANIM_FPS = 10
+ANIM_FPS = 20
 ANIM_MAX_SECONDS = 50.0          # shundan uzun parvoz chizilmaydi (x100 ≈ 46s)
-ANIM_LAG = 1.0                   # GIF yuklanib, mijozda boshlanguncha kutiladigan vaqt (s)
+ANIM_LAG = 0.0                   # GIF yuborilgach server koeffitsiyenti kechikmasin
 _ANIM_SS = 2                     # supersampling (silliq chiziqlar uchun)
 
 _FONT_CACHE: dict = {}
@@ -4922,13 +4932,15 @@ def _scene(t, cp, growth, state, fly_p=0.0):
     top, bottom = 22 * S, H - 28 * S
     pw, ph = right - left, bottom - top
 
-    t_eff = min(t, math.log(cp) / growth) if cp > 1.0 else 0.0
-    t_eff = max(t_eff, 0.0)
-    m_now = math.exp(growth * t_eff)
+    # Grafik masshtabi butun raund davomida o'zgarmaydi: samolyot chapdan
+    # o'ngga haqiqiy vaqt bilan yuradi, egri chiziq esa real koeffitsiyentga mos o'sadi.
+    t_crash = math.log(cp) / growth if cp > 1.0 else 0.0
+    t_eff = min(max(t, 0.0), t_crash)
+    m_now = min(cp, math.exp(growth * t_eff))
 
-    # ko'rinish oralig'i (vaqt va koeffitsiyent) — samolyot kadrdan chiqib ketmasin
-    x_rng = max(6.0, t_eff * 1.22)
-    y_rng = max(1.6, 1.0 + (m_now - 1.0) * 1.28)  # ko'rinadigan maksimal koeffitsiyent
+    # Har raund uchun yakuniy vaqt/koeffitsiyentga mos bir xil koordinata masshtabi.
+    x_rng = max(0.5, t_crash * 1.06)
+    y_rng = max(1.3, 1.0 + (cp - 1.0) * 1.12)
 
     def px(tt):
         return left + (tt / x_rng) * pw
@@ -5036,9 +5048,10 @@ def render_crash_gif(cp, growth=None, fps=ANIM_FPS):
     for i in range(1, out_n + 1):
         frames.append(_scene(t_crash, cp, growth, "out", i / out_n))
         durs.append(int(dt * 1000))
-    # yakuniy kadr — uzoq ushlab turiladi (GIF aylanib ketmasin)
+    # Yakuniy portlash kadri qisqa ushlab turiladi; GIF loop qilmaydi,
+    # shuning uchun animatsiya qayta boshidan aylanib ketmaydi.
     frames.append(_scene(t_crash, cp, growth, "gone"))
-    durs.append(300_000)
+    durs.append(2_000)
 
     # umumiy palitra
     sample = [frames[0], frames[len(frames) // 3], frames[len(frames) // 2], frames[-1]]
@@ -5049,15 +5062,17 @@ def render_crash_gif(cp, growth=None, fps=ANIM_FPS):
     qf = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
 
     buf = io.BytesIO()
+    # `loop` parametrini bermaslik — GIF bir marta ijro etiladi va
+    # portlash kadrida to'xtaydi (loop=0 esa cheksiz takrorlaydi).
     qf[0].save(
         buf, format="GIF", save_all=True, append_images=qf[1:],
-        duration=durs, loop=0, optimize=False, disposal=1,
+        duration=durs, optimize=False, disposal=1,
     )
     return buf.getvalue()
 
 
 _RENDER_SEM = asyncio.Semaphore(2)   # bir vaqtda ko'pi bilan 2 ta GIF chiziladi (server yuklanmasligi uchun)
-CRASH_TICK_MEDIA = 3.0               # GIF xabarda caption yangilanish oralig'i (Telegram limiti uchun)
+CRASH_TICK_MEDIA = 1.0               # GIF captionidagi o'yinchilar holatini tezroq yangilash
 CRASH_CAPTION_MAX = 1000             # Telegram caption limiti 1024
 
 
@@ -5085,19 +5100,55 @@ def crash_fit(builder, limit=None):
 
 
 async def cr_edit(bot, chat_id, game, text, kb=None):
-    """Crash xabarini tahrirlaydi: GIF bo'lsa caption, bo'lmasa matn."""
+    """Crash parvoz xabarini yangilaydi; xato bo'lsa keyingi yangilanishlar davom etadi."""
     if not game.get("media"):
         await edit(bot, chat_id, game["msg_id"], text, kb)
-        return
+        return False
     try:
         await bot.edit_message_caption(
-            chat_id=chat_id, message_id=game["msg_id"], caption=text, reply_markup=kb
+            chat_id=chat_id, message_id=game["msg_id"], caption=text,
+            reply_markup=kb, parse_mode=ParseMode.HTML,
         )
+        return True
     except BadRequest as e:
         if "not modified" not in str(e).lower():
-            logger.warning("caption xatosi: %s", e)
+            logger.warning("Crash caption xatosi: %s", e)
     except TelegramError as e:
-        logger.warning("caption xatosi: %s", e)
+        logger.warning("Crash caption xatosi: %s", e)
+    return False
+
+
+async def crash_publish_result(bot, chat_id, game, text, kb):
+    """Natija GIF captioniga bog'liq bo'lmasin: har doim ko'rinadigan xabar chiqarsin."""
+    if game.get("media"):
+        # GIF captionida faqat portlash holatini ko'rsatamiz; g'oliblar alohida xabarda.
+        try:
+            await bot.edit_message_caption(
+                chat_id=chat_id, message_id=game["msg_id"],
+                caption=cr_t(chat_id, "crashed_short", cp=f"{game['cp']:.2f}"),
+                reply_markup=None, parse_mode=ParseMode.HTML,
+            )
+        except TelegramError as e:
+            logger.warning("Crash yakuniy GIF captionini yangilab bo'lmadi: %s", e)
+        await bot.send_message(
+            chat_id=chat_id, text=text, reply_markup=kb,
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+        )
+        return
+
+    # Matnli rejimda avval mavjud xabarni yangilashga urinib ko'ramiz.
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=game["msg_id"], text=text,
+            reply_markup=kb, parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except TelegramError as e:
+        logger.warning("Crash natijasini tahrirlab bo'lmadi, yangi xabar yuboriladi: %s", e)
+        await bot.send_message(
+            chat_id=chat_id, text=text, reply_markup=kb,
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+        )
 
 
 def cr_t(chat_id, key, **kwargs):
@@ -5226,49 +5277,25 @@ def crash_refund(game):
 async def crash_round(app, chat_id, game):
     bot = app.bot
     try:
-        # 0) Portlash nuqtasi oldindan aniqlanadi va animatsiya sanoq paytida chiziladi
+        # Crash nuqtasi raund boshida aniqlanadi. GIF ishlatilmaydi:
+        # bitta oddiy matn xabari tahrirlanadi — Telegram ancha yengil ishlaydi.
         game["cp"] = crash_point()
-        anim_task = None
-        if PIL_OK:
-            anim_task = asyncio.ensure_future(_render_async(game["cp"]))
 
-        # 1) Umumiy teskari sanoq (hamma uchun bir xil vaqt)
+        # Qo'shilish oynasi saqlanadi, ammo har soniyada countdown xabari yuborilmaydi.
+        # Shu vaqt ichida o'yinchilar bitta lobby xabaridagi tugmalar orqali qo'shilishi mumkin.
         deadline = time.monotonic() + CRASH_COUNTDOWN
-        last = None
         while True:
             if GAMES.get(chat_id) is not game:
-                return  # /stop yoki boshqa sabab bilan to'xtatilgan
-            left = math.ceil(deadline - time.monotonic())
-            if left <= 0:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
-            if left != last:
-                last = left
-                await edit(
-                    bot, chat_id, game["msg_id"],
-                    cr_t(
-                        chat_id, "count", left=left,
-                        players=crash_players_text(chat_id, game),
-                        step=CRASH_STEP, min=CRASH_MIN_BET,
-                    ),
-                    crash_kb(chat_id, game),
-                )
-            until_next = deadline - (left - 1) - time.monotonic()
-            await asyncio.sleep(max(0.05, until_next))
+            await asyncio.sleep(min(0.25, remaining))
 
         if GAMES.get(chat_id) is not game:
             return
 
-        # GIF tayyor bo'lishini kutamiz (state hali "count": yangi qo'shilganlar ham depozitga kiradi)
-        anim = None
-        if anim_task is not None:
-            try:
-                anim = await asyncio.wait_for(asyncio.shield(anim_task), 15)
-            except Exception:  # noqa: BLE001
-                anim = None
-            if GAMES.get(chat_id) is not game:
-                return
-
-        # 2) Depozitlarni yechish va parvozni boshlash (bu blokda await yo'q — poyga holati bo'lmaydi)
+        # Depozitlar bir marta yechiladi.
         crash_charge(game)
         if not game["players"]:
             game["state"] = "end"
@@ -5280,57 +5307,24 @@ async def crash_round(app, chat_id, game):
             return
 
         game["t_crash"] = math.log(game["cp"]) / CRASH_GROWTH
-        game["t0"] = None          # soat GIF yuborilgandan keyin ishga tushadi
+        game["t0"] = time.monotonic()
         game["media"] = False
         game["state"] = "fly"
 
-        # 3) Parvoz xabari: GIF (yoki GIF bo'lmasa — matn)
-        sent = False
-        if anim:
-            game["media"] = True
-            new = None
-            try:
-                new = await bot.send_animation(
-                    chat_id=chat_id,
-                    animation=InputFile(anim, filename="crash.gif"),
-                    caption=crash_fit(lambda lim: crash_fly_text(chat_id, game, 1.0, lim)),
-                    reply_markup=crash_kb(chat_id, game),
-                    width=ANIM_W, height=ANIM_H,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception("Crash: GIF yuborib bo'lmadi, matnli rejimga o'tildi")
-            game["media"] = False
-            if new is not None:
-                if GAMES.get(chat_id) is not game:
-                    # yuklanish paytida /stop bosilgan — yangi xabarni olib tashlaymiz
-                    try:
-                        await bot.delete_message(chat_id, new.message_id)
-                    except TelegramError:
-                        pass
-                    return
-                old_id = game["msg_id"]
-                game["msg_id"] = new.message_id
-                game["media"] = True
-                sent = True
-                try:
-                    await bot.delete_message(chat_id, old_id)
-                except TelegramError:
-                    pass
-        if not sent:
-            await edit(
-                bot, chat_id, game["msg_id"],
-                crash_fit(lambda lim: crash_fly_text(chat_id, game, 1.0, lim)),
-                crash_kb(chat_id, game),
-            )
-        # GIF mijozda boshlanishi uchun biroz kechikish: koeffitsiyent GIF bilan bir vaqtda o'sadi
-        game["t0"] = time.monotonic() + (ANIM_LAG if sent else 0.0)
-        tick = CRASH_TICK_MEDIA if sent else CRASH_TICK
+        # Mavjud xabarning o'zi tahrirlanadi; yangi GIF/xabar yuborilmaydi.
+        await edit(
+            bot, chat_id, game["msg_id"],
+            crash_fit(lambda lim: crash_fly_text(chat_id, game, 1.0, lim)),
+            crash_kb(chat_id, game),
+        )
 
+        # Xabarni taxminan har 1.2 soniyada yangilash rate-limit va qotishni kamaytiradi.
+        tick = max(1.2, CRASH_TICK)
         while True:
             elapsed = time.monotonic() - game["t0"]
             if elapsed >= game["t_crash"]:
                 break
-            await asyncio.sleep(max(0.05, min(tick, game["t_crash"] - elapsed)))
+            await asyncio.sleep(min(tick, max(0.05, game["t_crash"] - elapsed)))
             if GAMES.get(chat_id) is not game:
                 return  # /stop — depozitlar finally ichida qaytariladi
             elapsed = time.monotonic() - game["t0"]
@@ -5375,12 +5369,12 @@ async def crash_round(app, chat_id, game):
             shown = lines[:lim] + ([f"… +{extra}"] if extra > 0 else [])
             return "\n".join(shown)
 
-        await cr_edit(
-            bot, chat_id, game,
-            crash_fit(lambda lim: cr_t(
-                chat_id, "result", cp=f"{game['cp']:.2f}",
-                winners=_cut(winners, lim), losers=_cut(losers, lim),
-            )),
+        result_text = crash_fit(lambda lim: cr_t(
+            chat_id, "result", cp=f"{game['cp']:.2f}",
+            winners=_cut(winners, lim), losers=_cut(losers, lim),
+        ))
+        await crash_publish_result(
+            bot, chat_id, game, result_text,
             InlineKeyboardMarkup([again_row(chat_id)]),
         )
         await log_money_event(
@@ -5389,8 +5383,17 @@ async def crash_round(app, chat_id, game):
             f"Chat: <code>{chat_id}</code>\n"
             f"Portlash: <b>x{game['cp']:.2f}</b>\n" + "\n".join(log_lines),
         )
-    except Exception:  # noqa: BLE001 — raund xatosi botni yiqitmasin
+    except Exception:  # noqa: BLE001 — xato bo'lsa ham foydalanuvchi eski tugmalarda qolmasin
         logger.exception("Crash raundida xato")
+        try:
+            game["state"] = "end"
+            await close_game_message(
+                bot, chat_id, game,
+                "⚠️ <b>Crash raundida texnik xatolik yuz berdi.</b>\n"
+                "Depozit qaytarilishi tekshirilmoqda. Iltimos, yangi raundni qayta boshlang.",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Crash xatosi haqida xabar yuborilmadi")
     finally:
         crash_refund(game)
         was_finished = game.get("state") == "end"

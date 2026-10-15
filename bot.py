@@ -4626,7 +4626,7 @@ CRASH_LOBBY_TTL = 120       # hech kim qo'shilmasa o'yin bekor bo'ladigan vaqt (
 CRASH_GROWTH = 0.10         # koeffitsiyent = e^(CRASH_GROWTH * soniya)
 CRASH_RTP = 0.97            # 0.97 → uzoq muddatda ~3% bot foydasi
 CRASH_MAX_MULT = 100.0      # eng katta koeffitsiyent
-CRASH_TICK = 1.2            # parvoz xabari yangilanish oralig'i; Telegram rate-limit uchun
+CRASH_TICK = 0.4            # parvoz xabari yangilanish oralig'i; Telegram rate-limit uchun
 CRASH_LIST_LIMIT = 25       # xabarda ko'rsatiladigan o'yinchilar soni (ro'yxat boshiga)
 _CRASH_RNG = secrets.SystemRandom()
 
@@ -4637,11 +4637,11 @@ CRASH_TEXT = {
             "🚀 <b>CRASH</b>\n\n"
             "Roket uchadi va koeffitsiyent oshib boradi. Portlashdan oldin pulni olishga ulguring!\n\n"
             "💵 Minimal depozit: <b>{min}$</b>\n\n"
-            "👇 Qo‘shilish uchun tugmani bosing — shundan keyin {sec} soniyalik sanoq boshlanadi."
+            "👇 Qo‘shiling — birinchi o‘yinchi kirganidan 20 soniya o‘tib raund boshlanadi."
         ),
         "count": (
             "🚀 <b>CRASH</b>\n\n"
-            "⏳ Boshlanishiga: <b>{left}</b> soniya\n\n"
+            "⏳ Birinchi o‘yinchi qo‘shilgach, raund 20 soniyada boshlanadi.\n\n"
             "👥 O‘yinchilar:\n{players}\n\n"
             "➕ Depozitni oshiring (+{step}$) yoki 🔽 {min}$ ga tushiring."
         ),
@@ -4681,11 +4681,11 @@ CRASH_TEXT = {
             "🚀 <b>CRASH</b>\n\n"
             "The rocket takes off and the multiplier keeps growing. Cash out before it crashes!\n\n"
             "💵 Minimum deposit: <b>{min}$</b>\n\n"
-            "👇 Press the button to join — a {sec}-second countdown starts after that."
+            "👇 Join — the round starts 20 seconds after the first player joins."
         ),
         "count": (
             "🚀 <b>CRASH</b>\n\n"
-            "⏳ Starts in: <b>{left}</b> sec\n\n"
+            "⏳ The round starts 20 seconds after the first player joins.\n\n"
             "👥 Players:\n{players}\n\n"
             "➕ Raise your deposit (+{step}$) or 🔽 drop it to {min}$."
         ),
@@ -4725,11 +4725,11 @@ CRASH_TEXT = {
             "🚀 <b>CRASH</b>\n\n"
             "Ракета взлетает, множитель растёт. Успейте забрать деньги до взрыва!\n\n"
             "💵 Минимальный депозит: <b>{min}$</b>\n\n"
-            "👇 Нажмите кнопку, чтобы войти — после этого начнётся отсчёт {sec} сек."
+            "👇 Войдите в игру — раунд начнётся через 20 секунд после входа первого игрока."
         ),
         "count": (
             "🚀 <b>CRASH</b>\n\n"
-            "⏳ До старта: <b>{left}</b> сек\n\n"
+            "⏳ Раунд начнётся через 20 секунд после входа первого игрока.\n\n"
             "👥 Игроки:\n{players}\n\n"
             "➕ Увеличьте депозит (+{step}$) или 🔽 снизьте до {min}$."
         ),
@@ -4769,11 +4769,11 @@ CRASH_TEXT = {
             "🚀 <b>CRASH</b>\n\n"
             "Зымыран ұшады, коэффициент өсе береді. Жарылғанға дейін ақшаны алып үлгеріңіз!\n\n"
             "💵 Ең аз депозит: <b>{min}$</b>\n\n"
-            "👇 Қосылу үшін батырманы басыңыз — содан кейін {sec} секундтық санақ басталады."
+            "👇 Қосылыңыз — раунд бірінші ойыншы кіргеннен кейін 20 секундтан соң басталады."
         ),
         "count": (
             "🚀 <b>CRASH</b>\n\n"
-            "⏳ Басталуына: <b>{left}</b> сек\n\n"
+            "⏳ Раунд бірінші ойыншы кіргеннен кейін 20 секундтан соң басталады.\n\n"
             "👥 Ойыншылар:\n{players}\n\n"
             "➕ Депозитті көбейтіңіз (+{step}$) немесе 🔽 {min}$ дейін түсіріңіз."
         ),
@@ -5317,7 +5317,7 @@ async def crash_round(app, chat_id, game):
         )
 
         # Xabarni taxminan har 1.2 soniyada yangilash rate-limit va qotishni kamaytiradi.
-        tick = max(1.2, CRASH_TICK)
+        tick = 0.4
         while True:
             elapsed = time.monotonic() - game["t0"]
             if elapsed >= game["t_crash"]:
@@ -5499,6 +5499,16 @@ async def cb_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
             task = asyncio.create_task(crash_round(context.application, chat_id, game))
             BG_TASKS.add(task)
             task.add_done_callback(BG_TASKS.discard)
+        try:
+            await edit(
+                context.bot, chat_id, game["msg_id"],
+                cr_t(chat_id, "count", left=CRASH_COUNTDOWN,
+                     players=crash_players_text(chat_id, game),
+                     step=CRASH_STEP, min=CRASH_MIN_BET),
+                crash_kb(chat_id, game),
+            )
+        except TelegramError:
+            logger.exception("Crash qo'shilganda lobby xabarini yangilab bo'lmadi")
         await q.answer(cr_t(chat_id, "joined", bet=CRASH_MIN_BET))
         return
 
@@ -5520,6 +5530,16 @@ async def cb_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p["bet"] = new_bet
         else:
             p["bet"] = CRASH_MIN_BET
+        try:
+            await edit(
+                context.bot, chat_id, game["msg_id"],
+                cr_t(chat_id, "count", left=CRASH_COUNTDOWN,
+                     players=crash_players_text(chat_id, game),
+                     step=CRASH_STEP, min=CRASH_MIN_BET),
+                crash_kb(chat_id, game),
+            )
+        except TelegramError:
+            logger.exception("Crash depozit xabarini yangilashda xato")
         await q.answer(cr_t(chat_id, "bet_set", bet=p["bet"]))
         return
 

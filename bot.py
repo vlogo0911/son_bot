@@ -23,6 +23,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQueryResultArticle,
+    InputFile,
     InputTextMessageContent,
     Update,
 )
@@ -785,6 +786,8 @@ def init_db():
                 decided_at TEXT
             )
         """)
+    # Kasb tizimi sxemasi: yangi (bo'sh) bazada ham ishlashi uchun. Mavjud bazaga tegmaydi.
+    ensure_career_schema(c)
     migrate_legacy(c)
 
     for chat_id, language in c.execute("SELECT chat_id, language FROM group_languages"):
@@ -875,6 +878,49 @@ def init_db():
             request_id INTEGER UNIQUE
         )
     """)
+
+def ensure_career_schema(c):
+    """users kasb ustunlari va missiya/XP jadvallarini yaratadi (mavjud bo'lsa — o'zgartirmaydi)."""
+    with c:
+        user_cols = {row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()}
+        for col, ddl in (
+            ("birth_date", "TEXT"),
+            ("birth_confirmed", "INTEGER NOT NULL DEFAULT 0"),
+            ("profession_id", "INTEGER"),
+            ("profession_selected", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col not in user_cols:
+                c.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS user_career (
+                user_id INTEGER PRIMARY KEY,
+                career_xp INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS daily_missions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profession_id INTEGER NOT NULL,
+                mission_key TEXT NOT NULL,
+                target INTEGER NOT NULL,
+                reward_xp INTEGER NOT NULL DEFAULT 0,
+                reward_money INTEGER NOT NULL DEFAULT 0,
+                active_date TEXT NOT NULL,
+                title_uz TEXT, title_eng TEXT, title_ru TEXT, title_kz TEXT,
+                description_uz TEXT, description_eng TEXT,
+                description_ru TEXT, description_kz TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS mission_progress (
+                user_id INTEGER NOT NULL,
+                mission_id INTEGER NOT NULL,
+                progress INTEGER NOT NULL DEFAULT 0,
+                completed INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, mission_id)
+            )
+        """)
+
 
 def migrate_legacy(c):
     """Eski global ballarni (agar bitta guruh bo'lsa) o'sha guruhga ko'chiradi."""
@@ -1043,7 +1089,7 @@ def record(chat_id, user_id, outcome, points=0):
                 )
 
                 # Ownerlar cheksiz pulga ega, balansiga qo'shmaymiz
-                if user_id not in {6913838682, 1150777456}:
+                if user_id not in CAREER_OWNER_IDS:
                     c.execute(
                         """
                         UPDATE user_wallet
@@ -1273,9 +1319,14 @@ async def close_game_message(bot, chat_id, game, text):
     """O'yin xabarini yakuniy matn bilan almashtiradi (yoki yangi xabar yuboradi)."""
     if game.get("msg_id") and game["type"] != "number":
         try:
-            await bot.edit_message_text(
-                text, chat_id=chat_id, message_id=game["msg_id"], reply_markup=None
-            )
+            if game.get("media"):
+                await bot.edit_message_caption(
+                    chat_id=chat_id, message_id=game["msg_id"], caption=text, reply_markup=None
+                )
+            else:
+                await bot.edit_message_text(
+                    text, chat_id=chat_id, message_id=game["msg_id"], reply_markup=None
+                )
             return
         except TelegramError:
             pass
@@ -1302,6 +1353,12 @@ async def _expire(app, chat_id, game, seconds):
     else:
         text = t(chat_id, "timeout")
     await close_game_message(app.bot, chat_id, game, text)
+
+    # Kanaldagi Crash hech kim qo'shilmasa ham to'xtab qolmasin
+    if game.get("type") == "crash" and game.get("auto_repeat"):
+        task = asyncio.create_task(_crash_auto_restart(app, chat_id))
+        BG_TASKS.add(task)
+        task.add_done_callback(BG_TASKS.discard)
 
 
 def active(q, kind):
@@ -2683,7 +2740,7 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (user.id,)
     ).fetchone()[0]
 
-    if user.id in {6913838682, 1150777456}:
+    if user.id in CAREER_OWNER_IDS:
         money = "∞"
 
     private = chat.type == ChatType.PRIVATE
@@ -2721,7 +2778,7 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ru": "лет",
             "kz": "жаста",
         }
-        age_display = f"{age} {age_units.get(lang, age_units["uz"])}"
+        age_display = f"{age} {age_units.get(lang, age_units['uz'])}"
     else:
         age_display = "—"
 
@@ -4565,7 +4622,7 @@ CRASH_LOBBY_TTL = 120       # hech kim qo'shilmasa o'yin bekor bo'ladigan vaqt (
 CRASH_GROWTH = 0.10         # koeffitsiyent = e^(CRASH_GROWTH * soniya)
 CRASH_RTP = 0.97            # 0.97 → uzoq muddatda ~3% bot foydasi
 CRASH_MAX_MULT = 100.0      # eng katta koeffitsiyent
-CRASH_TICK = 0.8            # koeffitsiyent tezroq ko'rinadi, Telegram edit limitiga ehtiyotkor
+CRASH_TICK = 1.0            # parvoz paytida xabar yangilanish oralig'i (soniya)
 CRASH_LIST_LIMIT = 25       # xabarda ko'rsatiladigan o'yinchilar soni (ro'yxat boshiga)
 _CRASH_RNG = secrets.SystemRandom()
 
@@ -4585,6 +4642,7 @@ CRASH_TEXT = {
             "➕ Depozitni oshiring (+{step}$) yoki 🔽 {min}$ ga tushiring."
         ),
         "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Portlashdan oldin pulni oling!",
+        "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Portlashdan oldin pulni oling!",
         "result": (
             "💥 <b>Roket x{cp} da portladi!</b>\n\n"
             "🏆 <b>Yutganlar:</b>\n{winners}\n\n"
@@ -4627,6 +4685,7 @@ CRASH_TEXT = {
             "➕ Raise your deposit (+{step}$) or 🔽 drop it to {min}$."
         ),
         "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Cash out before it crashes!",
+        "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Cash out before it crashes!",
         "result": (
             "💥 <b>The rocket crashed at x{cp}!</b>\n\n"
             "🏆 <b>Winners:</b>\n{winners}\n\n"
@@ -4669,6 +4728,7 @@ CRASH_TEXT = {
             "➕ Увеличьте депозит (+{step}$) или 🔽 снизьте до {min}$."
         ),
         "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Заберите деньги до взрыва!",
+        "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Заберите деньги до взрыва!",
         "result": (
             "💥 <b>Ракета взорвалась на x{cp}!</b>\n\n"
             "🏆 <b>Выиграли:</b>\n{winners}\n\n"
@@ -4711,6 +4771,7 @@ CRASH_TEXT = {
             "➕ Депозитті көбейтіңіз (+{step}$) немесе 🔽 {min}$ дейін түсіріңіз."
         ),
         "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Жарылғанға дейін ақшаны алыңыз!",
+        "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Жарылғанға дейін ақшаны алыңыз!",
         "result": (
             "💥 <b>Зымыран x{cp} кезінде жарылды!</b>\n\n"
             "🏆 <b>Ұтқандар:</b>\n{winners}\n\n"
@@ -4739,6 +4800,304 @@ CRASH_TEXT = {
         "error": "⚠️ Қате. Қайта көріңіз.",
     },
 }
+
+
+
+# ───────────────────────────── 🚀 Crash animatsiyasi (GIF) ─────────────────────────────
+# Portlash nuqtasi (cp) raund boshida ma'lum bo'lgani uchun butun parvoz oldindan,
+# o'yin vaqtiga (crash_mult) moslab chiziladi. Faqat Pillow kerak; bo'lmasa — matnli rejim.
+
+import io
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_OK = True
+except Exception:  # noqa: BLE001
+    PIL_OK = False
+
+ANIM_W, ANIM_H = 480, 270
+ANIM_FPS = 10
+ANIM_MAX_SECONDS = 50.0          # shundan uzun parvoz chizilmaydi (x100 ≈ 46s)
+ANIM_LAG = 1.0                   # GIF yuklanib, mijozda boshlanguncha kutiladigan vaqt (s)
+_ANIM_SS = 2                     # supersampling (silliq chiziqlar uchun)
+
+_FONT_CACHE: dict = {}
+
+
+def _anim_font(size):
+    f = _FONT_CACHE.get(size)
+    if f:
+        return f
+    for path in (
+        "DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "arialbd.ttf",
+    ):
+        try:
+            f = ImageFont.truetype(path, size)
+            break
+        except Exception:  # noqa: BLE001
+            f = None
+    if f is None:
+        try:
+            f = ImageFont.load_default(size=size)
+        except Exception:  # noqa: BLE001
+            f = ImageFont.load_default()
+    _FONT_CACHE[size] = f
+    return f
+
+
+def _plane_sprite(px=64):
+    """Original samolyot (yon ko'rinish, o'ngga qaragan). 8x kattalikda chizilib kichraytiriladi."""
+    k = 8
+    w, h = px * k, int(px * 0.62) * k
+    im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    cy = h // 2
+    body = (236, 242, 255, 255)
+    shade = (170, 190, 230, 255)
+    accent = (255, 176, 32, 255)
+    glass = (60, 190, 255, 255)
+    # dum qanoti
+    d.polygon([(w*0.10, cy-h*0.40), (w*0.22, cy-h*0.40), (w*0.30, cy-h*0.02), (w*0.12, cy-h*0.02)], fill=accent)
+    # orqa gorizontal stabilizator
+    d.polygon([(w*0.10, cy+h*0.02), (w*0.30, cy+h*0.02), (w*0.26, cy+h*0.14), (w*0.08, cy+h*0.14)], fill=shade)
+    # asosiy qanot (pastga)
+    d.polygon([(w*0.42, cy+h*0.04), (w*0.66, cy+h*0.04), (w*0.50, cy+h*0.46), (w*0.36, cy+h*0.46)], fill=shade)
+    # fyuzelyaj
+    d.rounded_rectangle([w*0.06, cy-h*0.13, w*0.94, cy+h*0.17], radius=int(h*0.15), fill=body)
+    # burun
+    d.ellipse([w*0.78, cy-h*0.13, w*0.98, cy+h*0.17], fill=body)
+    # kabina oynasi
+    d.rounded_rectangle([w*0.60, cy-h*0.11, w*0.78, cy+h*0.02], radius=int(h*0.05), fill=glass)
+    # chiziq (akcent)
+    d.rectangle([w*0.20, cy+h*0.03, w*0.58, cy+h*0.07], fill=accent)
+    # propeller
+    d.rounded_rectangle([w*0.965, cy-h*0.30, w*0.99, cy+h*0.34], radius=int(h*0.02), fill=(255, 255, 255, 200))
+    return im.resize((px, h // k), Image.LANCZOS)
+
+
+_PLANE = None
+
+
+def _get_plane():
+    global _PLANE
+    if _PLANE is None:
+        _PLANE = _plane_sprite()
+    return _PLANE
+
+
+def _mult_color(m):
+    if m < 2.0:
+        return (255, 255, 255)
+    if m < 5.0:
+        return (120, 220, 255)
+    if m < 10.0:
+        return (180, 140, 255)
+    return (255, 200, 60)
+
+
+def _nice_step(span, target=4):
+    raw = span / target
+    for s in (0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100):
+        if s >= raw:
+            return s
+    return 100
+
+
+def _scene(t, cp, growth, state, fly_p=0.0):
+    """Bitta kadr. state: 'fly' | 'out' (uchib ketish) | 'gone'."""
+    S = _ANIM_SS
+    W, H = ANIM_W * S, ANIM_H * S
+    img = Image.new("RGB", (W, H), (11, 15, 32))
+    d = ImageDraw.Draw(img, "RGBA")
+
+    # gradient fon
+    for y in range(0, H, 4):
+        v = y / H
+        d.rectangle([0, y, W, y + 4], fill=(int(11 + 12 * v), int(15 + 12 * v), int(32 + 26 * v)))
+
+    left, right = 46 * S, W - 18 * S
+    top, bottom = 22 * S, H - 28 * S
+    pw, ph = right - left, bottom - top
+
+    t_eff = min(t, math.log(cp) / growth) if cp > 1.0 else 0.0
+    t_eff = max(t_eff, 0.0)
+    m_now = math.exp(growth * t_eff)
+
+    # ko'rinish oralig'i (vaqt va koeffitsiyent) — samolyot kadrdan chiqib ketmasin
+    x_rng = max(6.0, t_eff * 1.22)
+    y_rng = max(1.6, 1.0 + (m_now - 1.0) * 1.28)  # ko'rinadigan maksimal koeffitsiyent
+
+    def px(tt):
+        return left + (tt / x_rng) * pw
+
+    def py(mm):
+        return bottom - ((mm - 1.0) / (y_rng - 1.0)) * ph
+
+    # to'r va chap shkala
+    step = _nice_step(y_rng - 1.0)
+    g = 1.0
+    gl = []
+    while g <= y_rng + 1e-9:
+        gl.append(g)
+        g = round(g + step, 6)
+    for gv in gl:
+        yy = py(gv)
+        d.line([(left, yy), (right, yy)], fill=(255, 255, 255, 22), width=S)
+        lab = f"{gv:g}x"
+        d.text((8 * S, yy - 7 * S), lab, font=_anim_font(11 * S), fill=(150, 160, 190, 255))
+    xs = _nice_step(x_rng, 5)
+    xv = 0.0
+    while xv <= x_rng + 1e-9:
+        xx = px(xv)
+        d.line([(xx, top), (xx, bottom)], fill=(255, 255, 255, 14), width=S)
+        xv += xs
+    d.line([(left, bottom), (right, bottom)], fill=(255, 255, 255, 60), width=S)
+    d.line([(left, top), (left, bottom)], fill=(255, 255, 255, 60), width=S)
+
+    # egri chiziq
+    n = max(8, int(40 * min(1.0, t_eff / 6.0 + 0.2)) + 20)
+    pts = [(px(t_eff * i / n), py(math.exp(growth * t_eff * i / n))) for i in range(n + 1)]
+    tip = pts[-1]
+    poly = [(left, bottom)] + pts + [(tip[0], bottom)]
+    d.polygon(poly, fill=(255, 45, 85, 70))
+    d.line(pts, fill=(255, 60, 95, 255), width=3 * S, joint="curve")
+
+    # samolyot yo'nalishi (egri chiziq urinmasi)
+    dm = growth * m_now  # dm/dt
+    dx = pw / x_rng
+    dy = (dm / (y_rng - 1.0)) * ph
+    ang = math.degrees(math.atan2(dy, dx))
+    ang = min(ang, 48.0)
+
+    plane = _get_plane().resize(
+        (_get_plane().width * S // 1, _get_plane().height * S // 1), Image.LANCZOS
+    ) if S != 1 else _get_plane()
+
+    cx, cy_ = tip
+    if state == "out":
+        # chiqib ketish: tezlanib kadrdan uchib chiqadi
+        run = (fly_p ** 1.6) * 1.3 * W
+        cx += run * math.cos(math.radians(ang))
+        cy_ -= run * math.sin(math.radians(ang))
+    if state != "gone":
+        rot = plane.rotate(ang, resample=Image.BICUBIC, expand=True)
+        img.paste(rot, (int(cx - rot.width * 0.62), int(cy_ - rot.height * 0.5)), rot)
+
+    # katta koeffitsiyent
+    if state == "fly":
+        txt, col = f"x{math.floor(m_now * 100) / 100:.2f}", _mult_color(m_now)
+        big = _anim_font(58 * S)
+    else:
+        txt, col = f"x{cp:.2f}", (255, 70, 90)
+        big = _anim_font(58 * S)
+    bb = d.textbbox((0, 0), txt, font=big)
+    tw, th = bb[2] - bb[0], bb[3] - bb[1]
+    tx = left + (pw - tw) / 2
+    ty = top + (ph - th) / 2 - 24 * S
+    d.text((tx + 2 * S, ty + 2 * S), txt, font=big, fill=(0, 0, 0, 140))
+    d.text((tx, ty), txt, font=big, fill=col + (255,))
+    if state != "fly":
+        sub = "CRASH"
+        sf = _anim_font(20 * S)
+        sb = d.textbbox((0, 0), sub, font=sf)
+        d.text((left + (pw - (sb[2] - sb[0])) / 2, ty + th + 14 * S), sub, font=sf, fill=(255, 120, 135, 255))
+
+    return img.reduce(S)
+
+
+def render_crash_gif(cp, growth=None, fps=ANIM_FPS):
+    """Parvozning to'liq GIF'ini (bytes) qaytaradi yoki None. Og'ir — thread'da chaqiring."""
+    if not PIL_OK:
+        return None
+    growth = CRASH_GROWTH if growth is None else growth
+    t_crash = math.log(cp) / growth if cp > 1.0 else 0.0
+    t_draw = min(t_crash, ANIM_MAX_SECONDS)
+    dt = 1.0 / fps
+
+    frames, durs = [], []
+    n = int(t_draw / dt)
+    for i in range(n + 1):
+        frames.append(_scene(i * dt, cp, growth, "fly"))
+        durs.append(int(dt * 1000))
+    # oxirgi "fly" kadrni portlash vaqtigacha davom ettirish (agar chizish cheklangan bo'lsa)
+    if t_crash > t_draw:
+        durs[-1] = int((t_crash - t_draw) * 1000) + int(dt * 1000)
+    else:
+        rest = t_crash - n * dt
+        if rest > 0.001:
+            frames.append(_scene(t_crash, cp, growth, "fly"))
+            durs.append(max(20, int(rest * 1000)))
+
+    # uchib ketish
+    out_n = 12
+    for i in range(1, out_n + 1):
+        frames.append(_scene(t_crash, cp, growth, "out", i / out_n))
+        durs.append(int(dt * 1000))
+    # yakuniy kadr — uzoq ushlab turiladi (GIF aylanib ketmasin)
+    frames.append(_scene(t_crash, cp, growth, "gone"))
+    durs.append(300_000)
+
+    # umumiy palitra
+    sample = [frames[0], frames[len(frames) // 3], frames[len(frames) // 2], frames[-1]]
+    strip = Image.new("RGB", (ANIM_W, ANIM_H * len(sample)))
+    for i, f in enumerate(sample):
+        strip.paste(f, (0, i * ANIM_H))
+    pal = strip.quantize(colors=255, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+    qf = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
+
+    buf = io.BytesIO()
+    qf[0].save(
+        buf, format="GIF", save_all=True, append_images=qf[1:],
+        duration=durs, loop=0, optimize=False, disposal=1,
+    )
+    return buf.getvalue()
+
+
+_RENDER_SEM = asyncio.Semaphore(2)   # bir vaqtda ko'pi bilan 2 ta GIF chiziladi (server yuklanmasligi uchun)
+CRASH_TICK_MEDIA = 3.0               # GIF xabarda caption yangilanish oralig'i (Telegram limiti uchun)
+CRASH_CAPTION_MAX = 1000             # Telegram caption limiti 1024
+
+
+def _safe_render(cp):
+    try:
+        return render_crash_gif(cp)
+    except Exception:  # noqa: BLE001
+        logger.exception("Crash animatsiyasini chizib bo'lmadi (cp=%s)", cp)
+        return None
+
+
+async def _render_async(cp):
+    async with _RENDER_SEM:
+        return await asyncio.to_thread(_safe_render, cp)
+
+
+def crash_fit(builder, limit=None):
+    """builder(lim) → matn. Caption 1000 belgidan oshmaguncha ro'yxatni qisqartiradi."""
+    lim = CRASH_LIST_LIMIT if limit is None else limit
+    while True:
+        text = builder(lim)
+        if len(text) <= CRASH_CAPTION_MAX or lim <= 1:
+            return text
+        lim = max(1, lim // 2)
+
+
+async def cr_edit(bot, chat_id, game, text, kb=None):
+    """Crash xabarini tahrirlaydi: GIF bo'lsa caption, bo'lmasa matn."""
+    if not game.get("media"):
+        await edit(bot, chat_id, game["msg_id"], text, kb)
+        return
+    try:
+        await bot.edit_message_caption(
+            chat_id=chat_id, message_id=game["msg_id"], caption=text, reply_markup=kb
+        )
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            logger.warning("caption xatosi: %s", e)
+    except TelegramError as e:
+        logger.warning("caption xatosi: %s", e)
 
 
 def cr_t(chat_id, key, **kwargs):
@@ -4770,18 +5129,19 @@ def crash_mention(uid, player):
     return f'<a href="tg://user?id={uid}">{escape(html.unescape(str(player["name"])))}</a>'
 
 
-def crash_players_text(chat_id, game):
+def crash_players_text(chat_id, game, limit=None):
+    limit = CRASH_LIST_LIMIT if limit is None else limit
     items = list(game["players"].items())
     if not items:
         return cr_t(chat_id, "none")
     lines = []
-    for uid, p in items[:CRASH_LIST_LIMIT]:
+    for uid, p in items[:limit]:
         line = f"👤 {crash_mention(uid, p)} — <b>{p['bet']}$</b>"
         if p["cash"] is not None:
             line += f" ✅ x{p['cash']:.2f}"
         lines.append(line)
-    if len(items) > CRASH_LIST_LIMIT:
-        lines.append(f"… +{len(items) - CRASH_LIST_LIMIT}")
+    if len(items) > limit:
+        lines.append(f"… +{len(items) - limit}")
     return "\n".join(lines)
 
 
@@ -4799,14 +5159,14 @@ def crash_kb(chat_id, game):
     return InlineKeyboardMarkup(rows)
 
 
-def crash_fly_text(chat_id, game, mult):
+def crash_fly_text(chat_id, game, mult, limit=None):
     dropped = ""
     if game["dropped"]:
         dropped = cr_t(chat_id, "dropped", names=", ".join(game["dropped"]))
-    return cr_t(
-        chat_id, "fly",
-        mult=f"{mult:.2f}", players=crash_players_text(chat_id, game), dropped=dropped,
-    )
+    players = crash_players_text(chat_id, game, limit)
+    if game.get("media"):
+        return cr_t(chat_id, "fly_media", players=players, dropped=dropped)
+    return cr_t(chat_id, "fly", mult=f"{mult:.2f}", players=players, dropped=dropped)
 
 
 def crash_charge(game):
@@ -4866,6 +5226,12 @@ def crash_refund(game):
 async def crash_round(app, chat_id, game):
     bot = app.bot
     try:
+        # 0) Portlash nuqtasi oldindan aniqlanadi va animatsiya sanoq paytida chiziladi
+        game["cp"] = crash_point()
+        anim_task = None
+        if PIL_OK:
+            anim_task = asyncio.ensure_future(_render_async(game["cp"]))
+
         # 1) Umumiy teskari sanoq (hamma uchun bir xil vaqt)
         deadline = time.monotonic() + CRASH_COUNTDOWN
         last = None
@@ -4892,7 +5258,17 @@ async def crash_round(app, chat_id, game):
         if GAMES.get(chat_id) is not game:
             return
 
-        # 2) Depozitlarni yechish va parvozni boshlash (await yo'q — poyga holati bo'lmaydi)
+        # GIF tayyor bo'lishini kutamiz (state hali "count": yangi qo'shilganlar ham depozitga kiradi)
+        anim = None
+        if anim_task is not None:
+            try:
+                anim = await asyncio.wait_for(asyncio.shield(anim_task), 15)
+            except Exception:  # noqa: BLE001
+                anim = None
+            if GAMES.get(chat_id) is not game:
+                return
+
+        # 2) Depozitlarni yechish va parvozni boshlash (bu blokda await yo'q — poyga holati bo'lmaydi)
         crash_charge(game)
         if not game["players"]:
             game["state"] = "end"
@@ -4903,30 +5279,68 @@ async def crash_round(app, chat_id, game):
             )
             return
 
-        game["cp"] = crash_point()
         game["t_crash"] = math.log(game["cp"]) / CRASH_GROWTH
-        game["t0"] = time.monotonic()
+        game["t0"] = None          # soat GIF yuborilgandan keyin ishga tushadi
+        game["media"] = False
         game["state"] = "fly"
 
-        # 3) Parvoz
-        if game["t_crash"] > 0:
+        # 3) Parvoz xabari: GIF (yoki GIF bo'lmasa — matn)
+        sent = False
+        if anim:
+            game["media"] = True
+            new = None
+            try:
+                new = await bot.send_animation(
+                    chat_id=chat_id,
+                    animation=InputFile(anim, filename="crash.gif"),
+                    caption=crash_fit(lambda lim: crash_fly_text(chat_id, game, 1.0, lim)),
+                    reply_markup=crash_kb(chat_id, game),
+                    width=ANIM_W, height=ANIM_H,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Crash: GIF yuborib bo'lmadi, matnli rejimga o'tildi")
+            game["media"] = False
+            if new is not None:
+                if GAMES.get(chat_id) is not game:
+                    # yuklanish paytida /stop bosilgan — yangi xabarni olib tashlaymiz
+                    try:
+                        await bot.delete_message(chat_id, new.message_id)
+                    except TelegramError:
+                        pass
+                    return
+                old_id = game["msg_id"]
+                game["msg_id"] = new.message_id
+                game["media"] = True
+                sent = True
+                try:
+                    await bot.delete_message(chat_id, old_id)
+                except TelegramError:
+                    pass
+        if not sent:
             await edit(
                 bot, chat_id, game["msg_id"],
-                crash_fly_text(chat_id, game, 1.0), crash_kb(chat_id, game),
+                crash_fit(lambda lim: crash_fly_text(chat_id, game, 1.0, lim)),
+                crash_kb(chat_id, game),
             )
+        # GIF mijozda boshlanishi uchun biroz kechikish: koeffitsiyent GIF bilan bir vaqtda o'sadi
+        game["t0"] = time.monotonic() + (ANIM_LAG if sent else 0.0)
+        tick = CRASH_TICK_MEDIA if sent else CRASH_TICK
+
         while True:
             elapsed = time.monotonic() - game["t0"]
             if elapsed >= game["t_crash"]:
                 break
-            await asyncio.sleep(min(CRASH_TICK, game["t_crash"] - elapsed))
+            await asyncio.sleep(max(0.05, min(tick, game["t_crash"] - elapsed)))
             if GAMES.get(chat_id) is not game:
                 return  # /stop — depozitlar finally ichida qaytariladi
             elapsed = time.monotonic() - game["t0"]
             if elapsed >= game["t_crash"]:
                 break
-            await edit(
-                bot, chat_id, game["msg_id"],
-                crash_fly_text(chat_id, game, crash_mult(elapsed)), crash_kb(chat_id, game),
+            mult_now = crash_mult(max(0.0, elapsed))
+            await cr_edit(
+                bot, chat_id, game,
+                crash_fit(lambda lim: crash_fly_text(chat_id, game, mult_now, lim)),
+                crash_kb(chat_id, game),
             )
 
         # 4) Portlash va natijalar
@@ -4954,16 +5368,19 @@ async def crash_round(app, chat_id, game):
             except sqlite3.Error:
                 logger.exception("Crash: statistikani yozib bo'lmadi (user %s)", uid)
 
-        def _cut(lines):
+        def _cut(lines, lim):
             if not lines:
                 return cr_t(chat_id, "none")
-            extra = len(lines) - CRASH_LIST_LIMIT
-            shown = lines[:CRASH_LIST_LIMIT] + ([f"… +{extra}"] if extra > 0 else [])
+            extra = len(lines) - lim
+            shown = lines[:lim] + ([f"… +{extra}"] if extra > 0 else [])
             return "\n".join(shown)
 
-        await edit(
-            bot, chat_id, game["msg_id"],
-            cr_t(chat_id, "result", cp=f"{game['cp']:.2f}", winners=_cut(winners), losers=_cut(losers)),
+        await cr_edit(
+            bot, chat_id, game,
+            crash_fit(lambda lim: cr_t(
+                chat_id, "result", cp=f"{game['cp']:.2f}",
+                winners=_cut(winners, lim), losers=_cut(losers, lim),
+            )),
             InlineKeyboardMarkup([again_row(chat_id)]),
         )
         await log_money_event(
@@ -4974,11 +5391,6 @@ async def crash_round(app, chat_id, game):
         )
     except Exception:  # noqa: BLE001 — raund xatosi botni yiqitmasin
         logger.exception("Crash raundida xato")
-        # Agar parvoz paytida API/xabar yangilash xatosi bo'lsa, raundni
-        # osilib qolgan holatda qoldirmaymiz. finally depozitlarni qaytaradi
-        # (naqd qilgan o'yinchilar qayta to'lov olmaydi).
-        if GAMES.get(chat_id) is game and game.get("state") == "fly":
-            game["state"] = "end"
     finally:
         crash_refund(game)
         was_finished = game.get("state") == "end"
@@ -5011,22 +5423,23 @@ async def cmd_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         starter = user.id
         auto_repeat = False
-    lobby = await context.bot.send_message(
-        chat_id=chat_id,
-        text=cr_t(chat_id, "lobby", min=CRASH_MIN_BET, sec=CRASH_COUNTDOWN),
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(cr_t(chat_id, "b_join"), callback_data="cr:join")
-        ]]),
-        parse_mode=ParseMode.HTML,
-    )
+    # O'yin avval ro'yxatga olinadi (ikkita /crash bir vaqtda ochilib ketmasin)
     game = new_game(
-        chat_id, "crash", starter, state="lobby", msg_id=lobby.message_id,
+        chat_id, "crash", starter, state="lobby", msg_id=None,
         players={}, dropped=[], cp=None, t0=None, t_crash=None,
         charged=False, settled=False, auto_repeat=auto_repeat,
     )
-    await edit(context.bot, chat_id, lobby.message_id,
-               cr_t(chat_id, "lobby", min=CRASH_MIN_BET, sec=CRASH_COUNTDOWN),
-               crash_kb(chat_id, game))
+    try:
+        lobby = await context.bot.send_message(
+            chat_id=chat_id,
+            text=cr_t(chat_id, "lobby", min=CRASH_MIN_BET, sec=CRASH_COUNTDOWN),
+            reply_markup=crash_kb(chat_id, game),
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramError:
+        end_game(chat_id, game)
+        raise
+    game["msg_id"] = lobby.message_id
     arm(context.application, chat_id, game, CRASH_LOBBY_TTL)
 
 
@@ -5121,6 +5534,9 @@ async def cb_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if p["cash"] is not None:
             await q.answer(cr_t(chat_id, "already_cashed"), show_alert=True)
             return
+        if game.get("t0") is None or time.monotonic() < game["t0"]:
+            await q.answer()  # animatsiya hali boshlanmadi (x1.00) — hozircha hech narsa
+            return
         elapsed = time.monotonic() - game["t0"]
         if elapsed >= game["t_crash"]:
             await q.answer(cr_t(chat_id, "late"), show_alert=True)
@@ -5185,6 +5601,12 @@ async def post_init(application: Application):
 
 async def post_shutdown(application: Application):
     for game in list(GAMES.values()):
+        # Restart/deploy paytida Crash depozitlari yo'qolib qolmasin
+        if game.get("type") == "crash":
+            try:
+                crash_refund(game)
+            except Exception:  # noqa: BLE001
+                logger.exception("Crash: to'xtash paytida depozitlarni qaytarib bo'lmadi")
         timer = game.get("timer")
         if timer and not timer.done():
             timer.cancel()

@@ -28,7 +28,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -1298,6 +1298,8 @@ async def edit(bot, chat_id, message_id, text, kb=None):
 
 GAMES: dict[int, dict] = {}
 BG_TASKS: set = set()
+# /scrash bosilganda avtomatik yangi raund ochilishini ham to'xtatadi.
+CRASH_STOPPED: set[int] = set()
 
 
 def new_game(chat_id, kind, owner, **extra):
@@ -2050,82 +2052,130 @@ def crash_panel_keyboard():
     return InlineKeyboardMarkup(buttons)
 
 
-async def crash_panel_callback(query, context):
-    global CRASH_ENABLED, CRASH_MIN_BET, CRASH_TICK, CRASH_GROUP_RESTRICT
-    data = query.data
-    if data == "panel:crash":
-        context.user_data.pop("panel_crash_state", None)
-        load_crash_config()
-        groups = db().execute("SELECT COUNT(*) FROM crash_groups").fetchone()[0]
-        mode = "faqat ulangan guruhlar" if CRASH_GROUP_RESTRICT else "barcha guruhlar"
+async def _crash_panel_edit(query, text, markup):
+    """Panel xabarini xavfsiz tahrirlaydi ("not modified" xatosi panelni buzmasin)."""
+    try:
         await query.edit_message_text(
-            "🎰 <b>CRASH SOZLAMALARI</b>\n\n"
-            f"Holati: <b>{'Yoqilgan' if CRASH_ENABLED else 'O‘chirilgan'}</b>\n"
-            f"Minimal depozit: <b>{CRASH_MIN_BET}$</b>\n"
-            f"Koeffitsiyent tezligi: <b>{CRASH_TICK:.1f} soniya</b>\n"
-            f"Ulangan guruhlar: <b>{groups}</b>\n"
-            f"Guruh rejimi: <b>{mode}</b>\n\n"
-            "Tezlik 0.6–1.6 soniya oralig‘ida: 0.6 — tezroq, 1.6 — sekinroq.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=crash_panel_keyboard(),
+            text, parse_mode=ParseMode.HTML, reply_markup=markup,
         )
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            logger.warning("Crash panel tahrirlash xatosi: %s", exc)
+    except TelegramError as exc:
+        logger.warning("Crash panel tahrirlash xatosi: %s", exc)
+
+
+async def crash_panel_render(query, context):
+    """Crash sozlamalari bosh oynasini chizadi (hech qanday amal bajarmaydi)."""
+    context.user_data.pop("panel_crash_state", None)
+    load_crash_config()
+    groups = db().execute("SELECT COUNT(*) FROM crash_groups").fetchone()[0]
+    mode = "faqat ulangan guruhlar" if CRASH_GROUP_RESTRICT else "barcha guruhlar"
+    warn = ""
+    if CRASH_GROUP_RESTRICT and groups == 0:
+        warn = "\n\n⚠️ <b>Diqqat:</b> «Faqat ulangan guruhlar» rejimi yoqilgan, lekin guruh ulanmagan — Crash hech qayerda ishlamaydi."
+    await _crash_panel_edit(
+        query,
+        "🎰 <b>CRASH SOZLAMALARI</b>\n\n"
+        f"Holati: <b>{'Yoqilgan' if CRASH_ENABLED else 'O‘chirilgan'}</b>\n"
+        f"Minimal depozit: <b>{CRASH_MIN_BET}$</b>\n"
+        f"Koeffitsiyent tezligi: <b>{CRASH_TICK:.1f} soniya</b>\n"
+        f"Ulangan guruhlar: <b>{groups}</b>\n"
+        f"Guruh rejimi: <b>{mode}</b>\n\n"
+        "Tezlik 0.6–1.6 oralig‘ida: 0.6 — tezroq, 1.6 — sekinroq. "
+        "O‘zgarish keyingi raunddan boshlab kuchga kiradi."
+        f"{warn}",
+        crash_panel_keyboard(),
+    )
+
+
+async def crash_panel_callback(query, context):
+    """Har bir tugma: avval amal bajariladi, so'ng bosh oyna QAYTA CHIZILADI
+    (oldingi versiyada funksiya o'zini qayta chaqirib, amalni takrorlayverardi)."""
+    data = query.data
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:crash")]])
+
+    if data == "panel:crash":
+        await crash_panel_render(query, context)
         return
+
     if data == "panel:crash:toggle":
         load_crash_config()
         crash_config_set("enabled", "0" if CRASH_ENABLED else "1")
-        load_crash_config()
-        await crash_panel_callback(query, context)
+        await crash_panel_render(query, context)
         return
+
+    if data == "panel:crash:group_mode":
+        load_crash_config()
+        crash_config_set("group_restrict", "0" if CRASH_GROUP_RESTRICT else "1")
+        await crash_panel_render(query, context)
+        return
+
+    if data in ("panel:crash:speed", "panel:crash:speed_up", "panel:crash:speed_down"):
+        load_crash_config()
+        # Butun "o'ndan bir" birliklarida hisoblaymiz: har bosishda aynan 0.1 soniya.
+        tenths = int(round(CRASH_TICK * 10))
+        if data == "panel:crash:speed_up":
+            tenths = max(6, tenths - 1)
+        elif data == "panel:crash:speed_down":
+            tenths = min(16, tenths + 1)
+        if data != "panel:crash:speed":
+            crash_config_set("tick", f"{tenths / 10:.1f}")
+        await crash_panel_render(query, context)
+        return
+
     if data == "panel:crash:min":
         context.user_data["panel_crash_state"] = "min_bet"
-        await query.edit_message_text(
+        await _crash_panel_edit(
+            query,
             "💰 Crash uchun yangi minimal depozitni dollar hisobida butun son qilib yuboring.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:crash")]]),
+            cancel_kb,
         )
         return
+
     if data == "panel:crash:group_add":
         context.user_data["panel_crash_state"] = "group_add"
-        await query.edit_message_text(
+        await _crash_panel_edit(
+            query,
             "➕ Crashga ulanadigan guruhning ID raqamini yuboring.\n\n"
             "Misol: <code>-1001234567890</code>\n"
             "Bot shu guruhda bo‘lishi kerak.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:crash")]]),
+            cancel_kb,
         )
         return
+
     if data == "panel:crash:group_remove":
-        rows = db().execute("SELECT chat_id FROM crash_groups ORDER BY chat_id").fetchall()
-        buttons = [[InlineKeyboardButton(f"➖ Uzish: {r[0]}", callback_data=f"panel:crash:group_del:{r[0]}")] for r in rows]
+        rows = db().execute("SELECT chat_id, title FROM crash_groups ORDER BY chat_id").fetchall()
+        buttons = [
+            [InlineKeyboardButton(
+                f"➖ {(r[1] or r[0])} ({r[0]})"[:60],
+                callback_data=f"panel:crash:group_del:{r[0]}",
+            )]
+            for r in rows
+        ]
         if not buttons:
             buttons.append([InlineKeyboardButton("Ulangan guruh yo‘q", callback_data="panel:crash")])
         buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:crash")])
-        await query.edit_message_text("➖ <b>Crash guruhini uzish</b>\nUzmoqchi bo‘lgan guruhni tanlang:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+        await _crash_panel_edit(
+            query,
+            "➖ <b>Crash guruhini uzish</b>\nUzmoqchi bo‘lgan guruhni tanlang:",
+            InlineKeyboardMarkup(buttons),
+        )
         return
+
     if data.startswith("panel:crash:group_del:"):
         try:
             chat_id = int(data.rsplit(":", 1)[1])
         except ValueError:
             return
-        db().execute("DELETE FROM crash_groups WHERE chat_id = ?", (chat_id,))
-        db().commit()
-        await crash_panel_callback(query, context)
+        c = db()
+        c.execute("DELETE FROM crash_groups WHERE chat_id = ?", (chat_id,))
+        c.commit()
+        await crash_panel_render(query, context)
         return
-    if data == "panel:crash:group_mode":
-        load_crash_config()
-        crash_config_set("group_restrict", "0" if CRASH_GROUP_RESTRICT else "1")
-        load_crash_config()
-        await crash_panel_callback(query, context)
-        return
-    if data in ("panel:crash:speed", "panel:crash:speed_up", "panel:crash:speed_down"):
-        load_crash_config()
-        if data == "panel:crash:speed_up":
-            CRASH_TICK = max(0.6, round(CRASH_TICK - 0.1, 1))
-            crash_config_set("tick", CRASH_TICK)
-        elif data == "panel:crash:speed_down":
-            CRASH_TICK = min(1.6, round(CRASH_TICK + 0.1, 1))
-            crash_config_set("tick", CRASH_TICK)
-        await crash_panel_callback(query, context)
-        return
+
+    # Noma'lum tugma bo'lsa ham panel qotib qolmasin
+    await crash_panel_render(query, context)
 
 
 async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3895,6 +3945,12 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         arm(app, chat_id, game, MEMORY_SETUP_TTL)
 
     elif kind == "crash":
+        if not CRASH_ENABLED:
+            await context.bot.send_message(chat_id, "⛔ Crash o‘yini bot egasi tomonidan vaqtincha o‘chirib qo‘yilgan.")
+            return
+        if not crash_group_allowed(chat_id):
+            await context.bot.send_message(chat_id, "⛔ Bu guruh Crash uchun ulanmagan. Bot egasidan guruhni ulashni so‘rang.")
+            return
         game = new_game(
             chat_id, "crash", user.id,
             state="lobby", msg_id=msg.message_id,
@@ -4803,16 +4859,16 @@ CRASH_TEXT = {
             "👥 O‘yinchilar:\n{players}\n\n"
             "➕ Depozitni oshiring (+{step}$) yoki 🔽 {min}$ ga tushiring."
         ),
-        "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Portlashdan oldin pulni oling!",
-        "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Portlashdan oldin pulni oling!",
+        "fly": "🚀 <b>x{mult}</b>\n\n💰 Portlashdan oldin pulni oling!",
+        "fly_media": "🚀 <b>CRASH</b>\n\n💰 Portlashdan oldin pulni oling!",
         "crashed_short": "💥 <b>Portlash: x{cp}</b>",
         "result": (
             "💥 <b>Roket x{cp} da portladi!</b>\n\n"
             "🏆 <b>Yutganlar:</b>\n{winners}\n\n"
             "😔 <b>Yutqazganlar:</b>\n{losers}"
         ),
-        "win_line": "✅ {mention} — x{mult} → <b>+{profit}$</b>",
-        "lose_line": "❌ {mention} — <b>−{bet}$</b>",
+        "win_line": "✅ {mention}\n    💵 Tikdi: <b>{bet}$</b> · x{mult} → 🏆 Foyda: <b>+{profit}$</b> (olindi {payout}$)",
+        "lose_line": "❌ {mention}\n    💵 Tikdi: <b>{bet}$</b> · 💔 Yutqazdi: <b>−{bet}$</b>",
         "cancelled": "🚀 <b>CRASH</b>\n\n😕 O‘yin bekor qilindi: depozit uchun mablag‘ yetmadi.",
         "b_join": "✅ Qo‘shilish",
         "b_plus": "➕ Depozit +{step}$",
@@ -4847,16 +4903,16 @@ CRASH_TEXT = {
             "👥 Players:\n{players}\n\n"
             "➕ Raise your deposit (+{step}$) or 🔽 drop it to {min}$."
         ),
-        "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Cash out before it crashes!",
-        "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Cash out before it crashes!",
+        "fly": "🚀 <b>x{mult}</b>\n\n💰 Cash out before it crashes!",
+        "fly_media": "🚀 <b>CRASH</b>\n\n💰 Cash out before it crashes!",
         "crashed_short": "💥 <b>Crashed at x{cp}</b>",
         "result": (
             "💥 <b>The rocket crashed at x{cp}!</b>\n\n"
             "🏆 <b>Winners:</b>\n{winners}\n\n"
             "😔 <b>Losers:</b>\n{losers}"
         ),
-        "win_line": "✅ {mention} — x{mult} → <b>+{profit}$</b>",
-        "lose_line": "❌ {mention} — <b>−{bet}$</b>",
+        "win_line": "✅ {mention}\n    💵 Bet: <b>{bet}$</b> · x{mult} → 🏆 Profit: <b>+{profit}$</b> (received {payout}$)",
+        "lose_line": "❌ {mention}\n    💵 Bet: <b>{bet}$</b> · 💔 Lost: <b>−{bet}$</b>",
         "cancelled": "🚀 <b>CRASH</b>\n\n😕 Round cancelled: not enough funds for the deposit.",
         "b_join": "✅ Join",
         "b_plus": "➕ Deposit +{step}$",
@@ -4891,16 +4947,16 @@ CRASH_TEXT = {
             "👥 Игроки:\n{players}\n\n"
             "➕ Увеличьте депозит (+{step}$) или 🔽 снизьте до {min}$."
         ),
-        "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Заберите деньги до взрыва!",
-        "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Заберите деньги до взрыва!",
+        "fly": "🚀 <b>x{mult}</b>\n\n💰 Заберите деньги до взрыва!",
+        "fly_media": "🚀 <b>CRASH</b>\n\n💰 Заберите деньги до взрыва!",
         "crashed_short": "💥 <b>Взрыв на x{cp}</b>",
         "result": (
             "💥 <b>Ракета взорвалась на x{cp}!</b>\n\n"
             "🏆 <b>Выиграли:</b>\n{winners}\n\n"
             "😔 <b>Проиграли:</b>\n{losers}"
         ),
-        "win_line": "✅ {mention} — x{mult} → <b>+{profit}$</b>",
-        "lose_line": "❌ {mention} — <b>−{bet}$</b>",
+        "win_line": "✅ {mention}\n    💵 Ставка: <b>{bet}$</b> · x{mult} → 🏆 Прибыль: <b>+{profit}$</b> (получено {payout}$)",
+        "lose_line": "❌ {mention}\n    💵 Ставка: <b>{bet}$</b> · 💔 Проигрыш: <b>−{bet}$</b>",
         "cancelled": "🚀 <b>CRASH</b>\n\n😕 Раунд отменён: не хватило средств на депозит.",
         "b_join": "✅ Войти",
         "b_plus": "➕ Депозит +{step}$",
@@ -4935,16 +4991,16 @@ CRASH_TEXT = {
             "👥 Ойыншылар:\n{players}\n\n"
             "➕ Депозитті көбейтіңіз (+{step}$) немесе 🔽 {min}$ дейін түсіріңіз."
         ),
-        "fly": "🚀 <b>x{mult}</b>\n\n{players}{dropped}\n\n💰 Жарылғанға дейін ақшаны алыңыз!",
-        "fly_media": "🚀 <b>CRASH</b>\n\n{players}{dropped}\n\n💰 Жарылғанға дейін ақшаны алыңыз!",
+        "fly": "🚀 <b>x{mult}</b>\n\n💰 Жарылғанға дейін ақшаны алыңыз!",
+        "fly_media": "🚀 <b>CRASH</b>\n\n💰 Жарылғанға дейін ақшаны алыңыз!",
         "crashed_short": "💥 <b>Жарылу: x{cp}</b>",
         "result": (
             "💥 <b>Зымыран x{cp} кезінде жарылды!</b>\n\n"
             "🏆 <b>Ұтқандар:</b>\n{winners}\n\n"
             "😔 <b>Ұтылғандар:</b>\n{losers}"
         ),
-        "win_line": "✅ {mention} — x{mult} → <b>+{profit}$</b>",
-        "lose_line": "❌ {mention} — <b>−{bet}$</b>",
+        "win_line": "✅ {mention}\n    💵 Салды: <b>{bet}$</b> · x{mult} → 🏆 Пайда: <b>+{profit}$</b> (алынды {payout}$)",
+        "lose_line": "❌ {mention}\n    💵 Салды: <b>{bet}$</b> · 💔 Ұтылды: <b>−{bet}$</b>",
         "cancelled": "🚀 <b>CRASH</b>\n\n😕 Раунд тоқтатылды: депозитке қаражат жетпеді.",
         "b_join": "✅ Қосылу",
         "b_plus": "➕ Депозит +{step}$",
@@ -5245,66 +5301,113 @@ async def _render_async(cp):
         return await asyncio.to_thread(_safe_render, cp)
 
 
-def crash_fit(builder, limit=None):
-    """builder(lim) → matn. Caption 1000 belgidan oshmaguncha ro'yxatni qisqartiradi."""
+def crash_fit(builder, limit=None, max_len=None):
+    """builder(lim) → matn. Matn limitdan oshmaguncha ro'yxatni qisqartiradi."""
     lim = CRASH_LIST_LIMIT if limit is None else limit
+    max_len = CRASH_CAPTION_MAX if max_len is None else max_len
     while True:
         text = builder(lim)
-        if len(text) <= CRASH_CAPTION_MAX or lim <= 1:
+        if len(text) <= max_len or lim <= 1:
             return text
         lim = max(1, lim // 2)
 
 
+CRASH_MIN_EDIT_GAP = 1.0   # koeffitsiyent taxminan har soniyada yangilanadi; flood-limitdan saqlaydi
+
+
 async def cr_edit(bot, chat_id, game, text, kb=None):
-    """Crash parvoz xabarini yangilaydi; xato bo'lsa keyingi yangilanishlar davom etadi."""
-    if not game.get("media"):
-        await edit(bot, chat_id, game["msg_id"], text, kb)
+    """Crash parvoz xabarini yangilaydi.
+
+    Telegram flood-limitiga (RetryAfter) tushsak, shu muddat tugaguncha tahrirlarni
+    o'tkazib yuboramiz — raund esa to'xtamaydi va natija baribir chiqadi."""
+    now = time.monotonic()
+    if now < game.get("edit_block_until", 0.0):
         return False
+    if now - game.get("last_edit", 0.0) < CRASH_MIN_EDIT_GAP:
+        return False
+    game["last_edit"] = now
     try:
-        await bot.edit_message_caption(
-            chat_id=chat_id, message_id=game["msg_id"], caption=text,
-            reply_markup=kb, parse_mode=ParseMode.HTML,
-        )
+        if game.get("media"):
+            await bot.edit_message_caption(
+                chat_id=chat_id, message_id=game["msg_id"], caption=text,
+                reply_markup=kb, parse_mode=ParseMode.HTML,
+            )
+        else:
+            await bot.edit_message_text(
+                text, chat_id=chat_id, message_id=game["msg_id"],
+                reply_markup=kb, parse_mode=ParseMode.HTML,
+            )
         return True
+    except RetryAfter as e:
+        wait = float(getattr(e, "retry_after", 5) or 5)
+        game["edit_block_until"] = time.monotonic() + wait + 0.5
+        logger.warning("Crash: flood-limit, %.0f s tahrir to'xtatildi", wait)
     except BadRequest as e:
         if "not modified" not in str(e).lower():
-            logger.warning("Crash caption xatosi: %s", e)
+            logger.warning("Crash tahrir xatosi: %s", e)
     except TelegramError as e:
-        logger.warning("Crash caption xatosi: %s", e)
+        logger.warning("Crash tahrir xatosi: %s", e)
     return False
 
 
-async def crash_publish_result(bot, chat_id, game, text, kb):
-    """Natija GIF captioniga bog'liq bo'lmasin: har doim ko'rinadigan xabar chiqarsin."""
-    if game.get("media"):
-        # GIF captionida faqat portlash holatini ko'rsatamiz; g'oliblar alohida xabarda.
+async def _send_retry(call, attempts=6):
+    """RetryAfter bo'lsa kutib, qayta urinadi (natija xabari yo'qolib ketmasin)."""
+    last = None
+    for _ in range(attempts):
         try:
+            return await call()
+        except RetryAfter as e:
+            last = e
+            await asyncio.sleep(min(65.0, float(getattr(e, "retry_after", 3) or 3) + 0.5))
+        except (TimedOut, NetworkError) as e:
+            last = e
+            await asyncio.sleep(2.0)
+    if last:
+        raise last
+
+
+async def crash_publish_result(bot, chat_id, game, text, kb):
+    """Natijani HAR DOIM alohida yangi xabar sifatida chiqaradi (flood bo'lsa ham kutib yuboradi),
+    eski parvoz xabarini esa qisqa 'portladi' holatiga o'tkazadi."""
+    short = cr_t(chat_id, "crashed_short", cp=f"{game['cp']:.2f}")
+
+    async def close_old():
+        if game.get("media"):
             await bot.edit_message_caption(
-                chat_id=chat_id, message_id=game["msg_id"],
-                caption=cr_t(chat_id, "crashed_short", cp=f"{game['cp']:.2f}"),
+                chat_id=chat_id, message_id=game["msg_id"], caption=short,
                 reply_markup=None, parse_mode=ParseMode.HTML,
             )
-        except TelegramError as e:
-            logger.warning("Crash yakuniy GIF captionini yangilab bo'lmadi: %s", e)
-        await bot.send_message(
-            chat_id=chat_id, text=text, reply_markup=kb,
-            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
-        )
-        return
+        else:
+            await bot.edit_message_text(
+                short, chat_id=chat_id, message_id=game["msg_id"],
+                reply_markup=None, parse_mode=ParseMode.HTML,
+            )
 
-    # Matnli rejimda avval mavjud xabarni yangilashga urinib ko'ramiz.
-    try:
-        await bot.edit_message_text(
-            chat_id=chat_id, message_id=game["msg_id"], text=text,
-            reply_markup=kb, parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-    except TelegramError as e:
-        logger.warning("Crash natijasini tahrirlab bo'lmadi, yangi xabar yuboriladi: %s", e)
-        await bot.send_message(
+    async def send_new():
+        return await bot.send_message(
             chat_id=chat_id, text=text, reply_markup=kb,
             parse_mode=ParseMode.HTML, disable_web_page_preview=True,
         )
+
+    # Avval natijani yuboramiz (eng muhimi), keyin eski xabarni yopamiz.
+    await _send_retry(send_new)
+    try:
+        await _send_retry(close_old, attempts=2)
+    except TelegramError as e:
+        logger.warning("Crash eski parvoz xabarini yopib bo'lmadi: %s", e)
+
+
+CRASH_SUMMARY = {
+    "uz": "\n\n📊 <b>Jami:</b> {n} o‘yinchi · tikilgan <b>{bets}$</b> · to‘langan <b>{paid}$</b>",
+    "eng": "\n\n📊 <b>Total:</b> {n} players · wagered <b>{bets}$</b> · paid out <b>{paid}$</b>",
+    "ru": "\n\n📊 <b>Итого:</b> {n} игроков · ставки <b>{bets}$</b> · выплачено <b>{paid}$</b>",
+    "kz": "\n\n📊 <b>Барлығы:</b> {n} ойыншы · салынған <b>{bets}$</b> · төленген <b>{paid}$</b>",
+}
+
+
+def cr_summary(chat_id, n, bets, paid):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    return CRASH_SUMMARY.get(lang, CRASH_SUMMARY["uz"]).format(n=n, bets=bets, paid=paid)
 
 
 def cr_t(chat_id, key, **kwargs):
@@ -5461,7 +5564,7 @@ async def crash_round(app, chat_id, game):
             end_game(chat_id, game)
             await edit(
                 bot, chat_id, game["msg_id"], cr_t(chat_id, "cancelled"),
-                InlineKeyboardMarkup([again_row(chat_id)]),
+                None,
             )
             return
 
@@ -5477,13 +5580,13 @@ async def crash_round(app, chat_id, game):
             crash_kb(chat_id, game),
         )
 
-        # Xabarni taxminan har 1.2 soniyada yangilash rate-limit va qotishni kamaytiradi.
-        tick = game.get("tick", CRASH_TICK)
+        # Sikl tez aylanadi (portlash aniq vaqtda bo'lsin), lekin xabar faqat cr_edit ichidagi
+        # CRASH_MIN_EDIT_GAP oralig'ida va flood-limit bo'lmaganda tahrirlanadi.
         while True:
             elapsed = time.monotonic() - game["t0"]
             if elapsed >= game["t_crash"]:
                 break
-            await asyncio.sleep(min(tick, max(0.05, game["t_crash"] - elapsed)))
+            await asyncio.sleep(min(0.4, max(0.05, game["t_crash"] - elapsed)))
             if GAMES.get(chat_id) is not game:
                 return  # /stop — depozitlar finally ichida qaytariladi
             elapsed = time.monotonic() - game["t0"]
@@ -5502,13 +5605,19 @@ async def crash_round(app, chat_id, game):
         end_game(chat_id, game)
 
         winners, losers, log_lines = [], [], []
+        total_bets = 0
+        total_paid = 0
         for uid, p in game["players"].items():
+            total_bets += p["bet"]
             mention = crash_mention(uid, p)
             if p["cash"] is not None:
-                profit = crash_payout(p["bet"], p["cash"]) - p["bet"]
+                payout = crash_payout(p["bet"], p["cash"])
+                profit = payout - p["bet"]
+                total_paid += payout
                 winners.append(cr_t(
                     chat_id, "win_line",
-                    mention=mention, mult=f"{p['cash']:.2f}", profit=profit,
+                    mention=mention, bet=p["bet"], mult=f"{p['cash']:.2f}",
+                    profit=profit, payout=payout,
                 ))
                 outcome = "win"
                 log_lines.append(f"{person_name(uid)}: +{profit}$ (x{p['cash']:.2f})")
@@ -5528,13 +5637,14 @@ async def crash_round(app, chat_id, game):
             shown = lines[:lim] + ([f"… +{extra}"] if extra > 0 else [])
             return "\n".join(shown)
 
+        summary = cr_summary(chat_id, len(game["players"]), total_bets, total_paid)
         result_text = crash_fit(lambda lim: cr_t(
             chat_id, "result", cp=f"{game['cp']:.2f}",
             winners=_cut(winners, lim), losers=_cut(losers, lim),
-        ))
+        ) + summary, limit=None, max_len=3900)
         await crash_publish_result(
             bot, chat_id, game, result_text,
-            InlineKeyboardMarkup([again_row(chat_id)]),
+            None,
         )
         await log_money_event(
             bot,
@@ -5558,7 +5668,7 @@ async def crash_round(app, chat_id, game):
         was_finished = game.get("state") == "end"
         auto_repeat = bool(game.get("auto_repeat"))
         end_game(chat_id, game)
-        if auto_repeat and was_finished:
+        if auto_repeat and was_finished and chat_id not in CRASH_STOPPED:
             task = asyncio.create_task(_crash_auto_restart(app, chat_id))
             BG_TASKS.add(task)
             task.add_done_callback(BG_TASKS.discard)
@@ -5583,14 +5693,20 @@ async def cmd_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if GAMES.get(chat_id):
         await msg.reply_text("⚠️ Bu chatda boshqa o‘yin ishlayapti. Avval uni yakunlang.")
         return
+    # Yangi /crash buyrug'i avvalgi /scrash stop holatini bekor qiladi.
+    CRASH_STOPPED.discard(chat_id)
+    # Guruh va kanallarda /crash raund tugagach avtomatik qayta boshlanadi.
     if chat.type == ChatType.CHANNEL:
         starter = 0
-        auto_repeat = True
     else:
         if not user:
-            return
-        starter = user.id
-        auto_repeat = False
+            # Guruh nomidan yuborilgan admin posti uchun egasi 0 bo'lishi mumkin.
+            starter = 0 if msg.sender_chat and msg.sender_chat.id == chat_id else None
+            if starter is None:
+                return
+        else:
+            starter = user.id
+    auto_repeat = True
     # O'yin avval ro'yxatga olinadi (ikkita /crash bir vaqtda ochilib ketmasin)
     game = new_game(
         chat_id, "crash", starter, state="lobby", msg_id=None,
@@ -5611,9 +5727,47 @@ async def cmd_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arm(context.application, chat_id, game, CRASH_LOBBY_TTL)
 
 
+async def cmd_scrash(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop Crash in a group/channel and suppress automatic restarts until /crash."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or chat.type == ChatType.PRIVATE:
+        if msg:
+            await msg.reply_text("👥 /scrash buyrug‘ini guruh yoki kanalda ishlating.")
+        return
+
+    chat_id = chat.id
+    game = GAMES.get(chat_id)
+    # To'xtatish ruxsati: o'yin egasi, guruh administratori yoki anonim kanal/guruh admini.
+    anonymous_admin = bool(msg.sender_chat and msg.sender_chat.id == chat_id)
+    allowed = anonymous_admin or bool(
+        user and (
+            (game and user.id == game.get("owner"))
+            or await is_admin(context.bot, chat_id, user.id)
+        )
+    )
+    if not allowed:
+        await msg.reply_text("⛔ /scrash buyrug‘ini faqat admin yoki o‘yin egasi ishlata oladi.")
+        return
+
+    CRASH_STOPPED.add(chat_id)
+    if not game or game.get("type") != "crash":
+        await msg.reply_text("🛑 Crash avtomatik qayta boshlashi to‘xtatildi. Faol Crash raundi yo‘q.")
+        return
+
+    game["state"] = "stopped"
+    end_game(chat_id, game)  # cashout qilinmagan depozitlar qaytariladi
+    await close_game_message(
+        context.bot, chat_id, game,
+        "🛑 <b>CRASH TO‘XTATILDI</b>\nYangi raund boshlanmaydi. Qayta yoqish uchun /crash yuboring."
+    )
+    await msg.reply_text("🛑 Crash to‘xtatildi. Avtomatik qayta boshlash o‘chirildi; qayta boshlash uchun /crash.")
+
+
 async def _crash_auto_restart(app, chat_id):
     await asyncio.sleep(4)
-    if not CRASH_ENABLED or not crash_group_allowed(chat_id) or GAMES.get(chat_id):
+    if chat_id in CRASH_STOPPED or not CRASH_ENABLED or not crash_group_allowed(chat_id) or GAMES.get(chat_id):
         return
     try:
         msg = await app.bot.send_message(
@@ -5769,17 +5923,17 @@ async def post_init(application: Application):
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
-            ("reyting", "🏆 Reyting"), ("profil", "👤 Profil"),
+            ("reyting", "🏆 Reyting"), ("profil", "👤 Profil"), ("scrash", "🛑 Crashni to‘xtatish"),
             ("qoidalar", "📚 Qoidalar"), ("lang", "🌐 Til"), ("help", "❓ Yordam"),
         ],
         "en": [
             ("emps", "🎮 Choose a game"), ("stop", "🛑 Stop the game"),
-            ("reyting", "🏆 Leaderboard"), ("profil", "👤 Profile"),
+            ("reyting", "🏆 Leaderboard"), ("profil", "👤 Profile"), ("scrash", "🛑 Stop Crash"),
             ("qoidalar", "📚 Rules"), ("lang", "🌐 Language"), ("help", "❓ Help"),
         ],
         "ru": [
             ("emps", "🎮 Выбрать игру"), ("stop", "🛑 Остановить игру"),
-            ("reyting", "🏆 Рейтинг"), ("profil", "👤 Профиль"),
+            ("reyting", "🏆 Рейтинг"), ("profil", "👤 Профиль"), ("scrash", "🛑 Остановить Crash"),
             ("qoidalar", "📚 Правила"), ("lang", "🌐 Язык"), ("help", "❓ Помощь"),
         ],
     }
@@ -6592,11 +6746,20 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             except ValueError:
                 await msg.reply_text("❌ Guruh ID manfiy son bo‘lishi kerak (masalan, -1001234567890). Qaytadan yuboring.")
                 return
+            title = str(chat_id)
+            try:
+                chat_obj = await context.bot.get_chat(chat_id)
+                title = chat_obj.title or title
+            except TelegramError:
+                await msg.reply_text(
+                    "❌ Bot bu guruhni topa olmadi. Bot guruhda borligini va ID to‘g‘riligini tekshiring."
+                )
+                return
             c = db()
             c.execute(
                 "INSERT INTO crash_groups (chat_id, title) VALUES (?, ?) "
                 "ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title",
-                (chat_id, str(chat_id)),
+                (chat_id, title),
             )
             c.commit()
             crash_config_set("group_restrict", "1")
@@ -8645,6 +8808,7 @@ def main():
         (["hisob"], cmd_hisob),
         (["hadya"], cmd_hadya),
         (["crash"], cmd_crash),
+        (["scrash"], cmd_scrash),
         (["konkurs"], cmd_konkurs),
         (["missiyalar", "missions"], cmd_missiyalar),
         (["ariza"], cmd_ariza),
@@ -8653,7 +8817,7 @@ def main():
         (["lang"], cmd_lang),
     ]
     for names, handler in commands:
-        if names in (["konkurs"], ["hadya"], ["crash"]):
+        if names in (["konkurs"], ["hadya"], ["crash"], ["scrash"]):
             # /konkurs guruhda ham, kanalda ham ishlashi uchun channel_post'larni ham qabul qilamiz
             app.add_handler(CommandHandler(
                 names, handler,

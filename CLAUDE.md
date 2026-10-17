@@ -17,10 +17,12 @@
   (`maybe_tag_all`); "bot kelish" → har biri "@username kelish"; "stop" to'xtatadi; "tez 0.7" — guruh uchun xabarlar oralig'i (0.7–1.5 s, `tag_speed` jadvali). A'zolar `group_members` jadvalida yig'iladi
   (`track_group_member`, `on_chat_member`), chunki Telegram API to'liq ro'yxatni bermaydi.
   Bot egasi xabarga reply qilib "ruxsat" / "xayr" yozsa — tag huquqi beriladi / olinadi (`tag_permissions`, guruh bo'yicha).
-- `/aktiv` (faqat guruh adminlari va bot egalari): guruhdagi eng faol 15 a'zo (xabarlar soni + eng ko'p yozgan so'zi). Hisob `count_activity` orqali
+- `/aktiv` (faqat guruh adminlari va bot egalari): guruhdagi eng faol 15 a'zo (mention bilan, xabarlar soni + eng ko'p yozgan so'zi). Hisob `count_activity` orqali
   `member_activity` / `member_words` jadvallarida, funksiya qo'shilgan paytdan boshlab yig'iladi.
 - Owner panel → 💰 Pul statistikasi (`panel:money`, `panel_money_text`): faqat bot egalari; jami pul, egalarda /
   foydalanuvchilarda, o'yinlarda tikilgan (`money_in_games`), o'rtacha, eng boy 10.
+- Owner panel → 👶 Farzand o'chirish (`panel:kiddel*`, `panel_kid_callback`, `panel_kid_handle_text`): faqat bot egalari;
+  ID/@username → farzandlar ro'yxati → tasdiqlab o'chirish.
 - /profil → 🏦 Banklar / 📈 Birja / 👶 Farzandlarim — URL tugmalar (`?start=bank|birja|kids`, `cmd_start`),
   bo'lim shaxsiy chatda ochiladi.
 - 🏦 Banklar (`cb_bank`, `bk:<uid>:...`): Gold Invest. Kredit kuniga 13%, 1–7 kun, birinchisi 1 000$, keyingilari

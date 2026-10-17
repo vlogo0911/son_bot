@@ -2009,12 +2009,111 @@ def panel_keyboard(user_id=None):
         rows.append([InlineKeyboardButton("🛡 Adminlarni boshqarish", callback_data="panel:admins")])
     if is_owner:
         rows.append([InlineKeyboardButton("💰 Pul statistikasi", callback_data="panel:money")])
+        rows.append([InlineKeyboardButton("👶 Farzand o‘chirish", callback_data="panel:kiddel")])
         rows.append([InlineKeyboardButton("🎰 Crash sozlamalari", callback_data="panel:crash")])
         rows.append([InlineKeyboardButton("✨ Premium emoji", callback_data="panel:pemoji")])
 
     return InlineKeyboardMarkup(rows or [[
         InlineKeyboardButton("🔄 Panelni yangilash", callback_data="panel:home")
     ]])
+
+
+# ── Owner panel: farzandni o'chirish ──
+# 👶 Farzand o'chirish → foydalanuvchi ID / @username → farzandlari ro'yxati → tanlash → tasdiqlash.
+
+PANEL_KID_CANCEL = InlineKeyboardMarkup([[
+    InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:kiddel_cancel")
+]])
+
+
+def panel_kid_list_markup(user_id):
+    rows = []
+    for kid in kids_of(user_id):
+        label = (
+            f"🗑 {kid['child_name']} · {child_gender_label(user_id, kid['gender'])} · "
+            f"{kid['age']} {KID_TEXT['uz']['age_unit']}"
+        )
+        rows.append([InlineKeyboardButton(label, callback_data=f"panel:kiddel_pick:{kid['id']}")])
+    rows.append([InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def panel_kid_callback(query, context):
+    data = query.data
+    if data == "panel:kiddel":
+        context.user_data["panel_kid_state"] = "waiting_id"
+        await query.edit_message_text(
+            "👶 <b>FARZAND O‘CHIRISH</b>\n\nFoydalanuvchi Telegram ID sini yoki @username sini yuboring.",
+            reply_markup=PANEL_KID_CANCEL,
+        )
+        return
+    if data == "panel:kiddel_cancel":
+        context.user_data.pop("panel_kid_state", None)
+        await query.edit_message_text(
+            "❎ Bekor qilindi.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")]]),
+        )
+        return
+
+    action, _, raw_id = data.partition(":")[2].partition(":")
+    kid = kid_row(int(raw_id)) if raw_id.isdigit() else None
+    if not kid:
+        await query.edit_message_text(
+            "❌ Farzand topilmadi (balki allaqachon o‘chirilgan).",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")]]),
+        )
+        return
+    parents = f"{person_name(kid['parent1_id'])} ❤️ {person_name(kid['parent2_id'])}"
+
+    if action == "kiddel_pick":
+        await query.edit_message_text(
+            f"⚠️ <b>{escape(kid['child_name'])}</b> ({kid['age']} yosh) farzandini o‘chirasizmi?\n"
+            f"👪 Ota-onasi: {parents}\n\nBu amalni qaytarib bo‘lmaydi.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Ha, o‘chirish", callback_data=f"panel:kiddel_yes:{kid['id']}")],
+                [InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:kiddel_cancel")],
+            ]),
+        )
+        return
+
+    if action == "kiddel_yes":
+        c = db()
+        with c:
+            c.execute("DELETE FROM family_children WHERE id=?", (kid["id"],))
+        logger.info("Owner %s farzandni o'chirdi: %s (id %s)", query.from_user.id, kid["child_name"], kid["id"])
+        await query.edit_message_text(
+            f"✅ <b>{escape(kid['child_name'])}</b> o‘chirildi.\n👪 Ota-onasi: {parents}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")]]),
+        )
+
+
+async def panel_kid_handle_text(update, context):
+    msg = update.effective_message
+    raw = (msg.text or "").strip()
+    c = db()
+    if raw.startswith("@"):
+        row = c.execute(
+            "SELECT user_id FROM users WHERE lower(username)=lower(?)", (raw[1:],)
+        ).fetchone()
+    elif raw.lstrip("-").isdigit():
+        row = (int(raw),)
+    else:
+        row = None
+    if not row:
+        await msg.reply_text("❌ Foydalanuvchi topilmadi. ID yoki @username ni tekshiring.", reply_markup=PANEL_KID_CANCEL)
+        return
+    user_id = row[0]
+    if not kids_of(user_id):
+        await msg.reply_text(
+            f"ℹ️ {person_name(user_id)} (<code>{user_id}</code>) da farzand yo‘q.\nBoshqa ID yuboring yoki bekor qiling.",
+            reply_markup=PANEL_KID_CANCEL,
+        )
+        return
+    context.user_data.pop("panel_kid_state", None)
+    await msg.reply_text(
+        f"👶 {person_name(user_id)} (<code>{user_id}</code>) farzandlari.\nO‘chiriladiganini tanlang 👇",
+        reply_markup=panel_kid_list_markup(user_id),
+    )
 
 
 def fmt_money(n):
@@ -2379,6 +2478,11 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "panel:pemoji" or query.data.startswith("panel:pemoji:"):
         await pemoji_callback(query, context)
+        return
+
+    if query.data == "panel:kiddel" or query.data.startswith("panel:kiddel_"):
+        # panel_permission_for_callback: "kiddel*" PANEL_PERMISSIONS'da yo'q → faqat bot egalari.
+        await panel_kid_callback(query, context)
         return
 
     if query.data == "panel:crash" or query.data.startswith("panel:crash:"):
@@ -5708,7 +5812,7 @@ async def cmd_aktiv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         line = aktiv_t(
             chat.id, "line",
             medal=medals[i] if i < len(medals) else f"{i + 1}.",
-            name=pretty_name(first_name, username), count=count,
+            name=f'<a href="tg://user?id={uid}">{pretty_name(first_name, username)}</a>', count=count,
         )
         top = c.execute(
             """
@@ -9346,6 +9450,10 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
                     InlineKeyboardButton("🛡 Admin boshqaruvi", callback_data="panel:admins")
                 ]]),
             )
+        return
+
+    if user.id in CAREER_OWNER_IDS and context.user_data.get("panel_kid_state") == "waiting_id":
+        await panel_kid_handle_text(update, context)
         return
 
     if user.id in CAREER_OWNER_IDS and context.user_data.get("pemoji_state"):

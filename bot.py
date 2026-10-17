@@ -11889,6 +11889,7 @@ def init_bank():
         for table in ("bank_loans", "bank_deposits"):
             if "bank_id" not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN bank_id INTEGER NOT NULL DEFAULT 1")
+        c.execute("UPDATE banks SET active=1 WHERE id=1")
         if not c.execute("SELECT 1 FROM banks LIMIT 1").fetchone():
             # Avvalgi yagona bank — Gold Invest — o'sha sozlamalar bilan 1-bank bo'ladi.
             c.execute(
@@ -11899,6 +11900,7 @@ def init_bank():
 
 
 BANK_FIELDS = ("id", "name", "owner_id", "loan_rate", "deposit_rate", "apply_mode", "active")
+MAIN_BANK_ID = 1   # Gold Invest — asosiy bank: boshqariladi, lekin yopilmaydi
 
 
 def bank_get(bank_id):
@@ -12459,9 +12461,13 @@ def panel_bank_view(bank_id):
          InlineKeyboardButton("➕ Omonat %", callback_data=f"panel:bank_dr:{bid}:up")],
         [InlineKeyboardButton(f"📝 Ariza orqali: {'✅' if b['apply_mode'] else '❌'}", callback_data=f"panel:bank_mode:{bid}")],
         [InlineKeyboardButton("👤 Egasini o‘zgartirish", callback_data=f"panel:bank_owner:{bid}")],
-        [InlineKeyboardButton("⛔ Bankni yopish" if b["active"] else "✅ Bankni ochish", callback_data=f"panel:bank_act:{bid}")],
-        [InlineKeyboardButton("⬅️ Banklar", callback_data="panel:banks")],
     ]
+    if bid != MAIN_BANK_ID:
+        rows.append([InlineKeyboardButton("⛔ Bankni yopish" if b["active"] else "✅ Bankni ochish",
+                                          callback_data=f"panel:bank_act:{bid}")])
+    else:
+        text += "\n\n🏅 Asosiy bank — doim ochiq, faqat sozlamalari o‘zgaradi."
+    rows.append([InlineKeyboardButton("⬅️ Banklar", callback_data="panel:banks")])
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -12495,7 +12501,7 @@ async def panel_bank_callback(query, context):
         elif action == "bank_mode":
             with c:
                 c.execute("UPDATE banks SET apply_mode=1-apply_mode WHERE id=?", (bid,))
-        elif action == "bank_act":
+        elif action == "bank_act" and bid != MAIN_BANK_ID:
             with c:
                 c.execute("UPDATE banks SET active=1-active WHERE id=?", (bid,))
         text, kb = panel_bank_view(bid)

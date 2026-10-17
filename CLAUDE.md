@@ -26,7 +26,7 @@
 - /profil → 🏦 Banklar / 📈 Birja / 👶 Farzandlarim — URL tugmalar (`?start=bank|birja|kids`, `cmd_start`),
   bo'lim shaxsiy chatda ochiladi.
 - 🏦 Banklar (`cb_bank`, `bk:<uid>:<amal>:<bank_id>...`): ko'p bankli — `banks` jadvali (nomi, egasi, `loan_rate`,
-  `deposit_rate`, `apply_mode`, `active`); 1-bank Gold Invest. Owner panel → 🏦 Banklar boshqaruvi (`panel:banks`, `panel:bank_*`,
+  `deposit_rate`, `apply_mode`, `active`); 1-bank Gold Invest (`MAIN_BANK_ID`) — doim ochiq, yopib bo'lmaydi, faqat sozlanadi. Owner panel → 🏦 Banklar boshqaruvi (`panel:banks`, `panel:bank_*`,
   `panel_bank_callback`/`panel_bank_text`): qo'shish, foiz ±1%, ariza rejimi, egasi, yopish. Ariza rejimida foydalanuvchidan
   maqsad so'raladi (`bank_purpose_text`) → `bank_loan_apps`; bank egasiga to'liq ma'lumot (`applicant_info`) + ✅/❌ (`cb_bank_app`, `bka:`).
   Standart foizlar: kredit kuniga 13%, 1–7 kun, birinchisi 1 000$, keyingilari

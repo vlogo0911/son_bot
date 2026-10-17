@@ -10,8 +10,9 @@
   yangi casino o'yinlari shu yerga qo'shiladi.
 - Inline rejim (`@empire_statsbot` shaxsiy yozishmada): yashirin xabar + XO / RSP / Crash.
   Inline o'yinlar `GAMES` ichida `"i:<inline_message_id>"` kaliti bilan saqlanadi (`game_key`, `msg_target`).
-- Guruhda bot egasi / panel admini / guruh admini (`can_tag`) "bot" deb yozsa — har bir a'zo alohida xabarda belgilanadi
+- Guruhda bot egasi (`CAREER_OWNER_IDS`) yoki u ruxsat bergan a'zo (`can_tag`) "bot" deb yozsa — har bir a'zo alohida xabarda belgilanadi
   (`maybe_tag_all`); "bot kelish" → har biri "@username kelish"; "stop" to'xtatadi; "tez 0.7" — guruh uchun xabarlar oralig'i (0.7–1.5 s, `tag_speed` jadvali). A'zolar `group_members` jadvalida yig'iladi
   (`track_group_member`, `on_chat_member`), chunki Telegram API to'liq ro'yxatni bermaydi.
-- `/aktiv`: guruhdagi eng faol 15 a'zo (xabarlar soni + eng ko'p yozgan so'zi). Hisob `count_activity` orqali
+  Bot egasi xabarga reply qilib "ruxsat" / "xayr" yozsa — tag huquqi beriladi / olinadi (`tag_permissions`, guruh bo'yicha).
+- `/aktiv` (faqat guruh adminlari va bot egalari): guruhdagi eng faol 15 a'zo (xabarlar soni + eng ko'p yozgan so'zi). Hisob `count_activity` orqali
   `member_activity` / `member_words` jadvallarida, funksiya qo'shilgan paytdan boshlab yig'iladi.

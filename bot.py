@@ -4533,7 +4533,7 @@ HEAT = [(3, "heat_hot"), (10, "heat_warm"), (25, "heat_cool"), (10**9, "heat_col
 
 
 # ───────────────────────────── 📢 "bot" — guruh a'zolarini chaqirish ─────────────────────────────
-# Bot egasi, bot paneli admini yoki guruh admini guruhda "bot" deb yozsa, bot guruh a'zolarini
+# Bot egasi (yoki bot egasi xabariga reply qilib "ruxsat" bergan a'zo) guruhda "bot" deb yozsa, bot guruh a'zolarini
 # bittadan, har biri alohida xabarda chaqiradi. "bot kelish" — har bir a'zo "@username kelish" ko'rinishida
 # chaqiriladi. "stop" — jarayonni to'xtatadi. "tez 0.7" — xabarlar oralig'i (soniya).
 # Telegram botga guruh a'zolarining to'liq ro'yxatini bermaydi, shuning uchun bot
@@ -4547,6 +4547,8 @@ TAG_DELAY = 1.5         # xabarlar orasidagi standart pauza (soniya)
 TAG_DELAY_MIN = 0.7     # "tez" bilan o'rnatiladigan eng qisqa pauza
 TAG_DELAY_MAX = 1.5     # "tez" bilan o'rnatiladigan eng uzun pauza
 TAG_SPEED_WORDS = {"tez", "speed", "скорость", "жылдамдық"}
+TAG_GRANT_WORDS = {"ruxsat", "разрешить", "рұқсат"}
+TAG_REVOKE_WORDS = {"xayr", "запретить", "тыйым"}
 TAG_TASKS: dict[int, asyncio.Task] = {}
 
 TAG_TEXT = {
@@ -4559,6 +4561,9 @@ TAG_TEXT = {
         "speed_set": "⚡ Tag tezligi: har bir xabar oralig'i <b>{d}</b> soniya.",
         "speed_now": "⚡ Hozirgi tag tezligi: <b>{d}</b> soniya.\nO'zgartirish: <b>tez {lo}</b> … <b>tez {hi}</b>",
         "speed_bad": "⚠️ Tezlik {lo} dan {hi} soniyagacha bo'lishi kerak. Masalan: <b>tez 0.7</b>",
+        "perm_granted": "✅ <b>{name}</b> endi bu guruhda tag buyruqlaridan foydalana oladi (bot, stop, tez).",
+        "perm_revoked": "🚫 <b>{name}</b> tag buyruqlaridan foydalanish huquqidan mahrum qilindi.",
+        "perm_owner": "👑 <b>{name}</b> — bot egasi, uning huquqi doim bor.",
     },
     "eng": {
         "head": "📢 <b>Attention!</b>",
@@ -4569,6 +4574,9 @@ TAG_TEXT = {
         "speed_set": "⚡ Tag speed: <b>{d}</b> s between messages.",
         "speed_now": "⚡ Current tag speed: <b>{d}</b> s.\nChange it: <b>speed {lo}</b> … <b>speed {hi}</b>",
         "speed_bad": "⚠️ Speed must be between {lo} and {hi} seconds. Example: <b>speed 0.7</b>",
+        "perm_granted": "✅ <b>{name}</b> can now use the tag commands in this group (bot, stop, speed).",
+        "perm_revoked": "🚫 <b>{name}</b> can no longer use the tag commands.",
+        "perm_owner": "👑 <b>{name}</b> is a bot owner and always has access.",
     },
     "ru": {
         "head": "📢 <b>Внимание!</b>",
@@ -4579,6 +4587,9 @@ TAG_TEXT = {
         "speed_set": "⚡ Скорость упоминаний: <b>{d}</b> с между сообщениями.",
         "speed_now": "⚡ Текущая скорость: <b>{d}</b> с.\nИзменить: <b>скорость {lo}</b> … <b>скорость {hi}</b>",
         "speed_bad": "⚠️ Скорость должна быть от {lo} до {hi} секунд. Например: <b>скорость 0.7</b>",
+        "perm_granted": "✅ <b>{name}</b> теперь может использовать команды упоминания в этой группе.",
+        "perm_revoked": "🚫 <b>{name}</b> больше не может использовать команды упоминания.",
+        "perm_owner": "👑 <b>{name}</b> — владелец бота, доступ есть всегда.",
     },
     "kz": {
         "head": "📢 <b>Назар аударыңыз!</b>",
@@ -4589,6 +4600,9 @@ TAG_TEXT = {
         "speed_set": "⚡ Белгілеу жылдамдығы: хабарлар арасы <b>{d}</b> секунд.",
         "speed_now": "⚡ Қазіргі жылдамдық: <b>{d}</b> секунд.\nӨзгерту: <b>жылдамдық {lo}</b> … <b>жылдамдық {hi}</b>",
         "speed_bad": "⚠️ Жылдамдық {lo} мен {hi} секунд аралығында болуы керек. Мысалы: <b>жылдамдық 0.7</b>",
+        "perm_granted": "✅ <b>{name}</b> енді бұл топта белгілеу командаларын қолдана алады.",
+        "perm_revoked": "🚫 <b>{name}</b> белгілеу командаларын қолдана алмайды.",
+        "perm_owner": "👑 <b>{name}</b> — бот иесі, оның рұқсаты әрқашан бар.",
     },
 }
 
@@ -4630,6 +4644,15 @@ def init_group_members():
                 word TEXT NOT NULL,
                 cnt INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (chat_id, user_id, word)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS tag_permissions (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                granted_by INTEGER NOT NULL,
+                granted_at TEXT NOT NULL,
+                PRIMARY KEY (chat_id, user_id)
             )
         """)
         c.execute("""
@@ -4718,24 +4741,28 @@ AKTIV_TEXT = {
         "line": "{medal} <b>{name}</b> — {count} ta xabar",
         "word": "\n      💬 Ko'p yozgan so'zi: <i>{word}</i> ({times} marta)",
         "empty": "📭 Hali hisob yo'q. Bot shu paytdan boshlab guruhdagi xabarlarni sanaydi.",
+        "admins_only": "⛔ /aktiv faqat guruh adminlari uchun.",
     },
     "eng": {
         "title": "📊 <b>TOP {n} MOST ACTIVE MEMBERS</b>\n🗓 since {since}",
         "line": "{medal} <b>{name}</b> — {count} messages",
         "word": "\n      💬 Favourite word: <i>{word}</i> ({times} times)",
         "empty": "📭 No stats yet. The bot counts group messages from now on.",
+        "admins_only": "⛔ /aktiv is for group admins only.",
     },
     "ru": {
         "title": "📊 <b>ТОП-{n} САМЫХ АКТИВНЫХ</b>\n🗓 с {since}",
         "line": "{medal} <b>{name}</b> — {count} сообщ.",
         "word": "\n      💬 Любимое слово: <i>{word}</i> ({times} раз)",
         "empty": "📭 Статистики пока нет. Бот считает сообщения группы с этого момента.",
+        "admins_only": "⛔ /aktiv только для администраторов группы.",
     },
     "kz": {
         "title": "📊 <b>ЕҢ БЕЛСЕНДІ {n} МҮШЕ</b>\n🗓 {since} бастап",
         "line": "{medal} <b>{name}</b> — {count} хабарлама",
         "word": "\n      💬 Жиі жазған сөзі: <i>{word}</i> ({times} рет)",
         "empty": "📭 Әзірге статистика жоқ. Бот топ хабарламаларын осы сәттен бастап санайды.",
+        "admins_only": "⛔ /aktiv тек топ әкімшілері үшін.",
     },
 }
 
@@ -4785,6 +4812,15 @@ async def cmd_aktiv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if chat.type == ChatType.PRIVATE:
         await msg.reply_text(t(chat.id, "use_group"))
+        return
+
+    user = update.effective_user
+    anonymous_admin = bool(msg.sender_chat and msg.sender_chat.id == chat.id)
+    allowed = anonymous_admin or (user and (
+        user.id in CAREER_OWNER_IDS or await is_admin(context.bot, chat.id, user.id)
+    ))
+    if not allowed:
+        await msg.reply_text(aktiv_t(chat.id, "admins_only"))
         return
 
     c = db()
@@ -4892,21 +4928,58 @@ async def tag_members(bot, chat_id, note=""):
     await bot.send_message(chat_id, tag_t(chat_id, "done", n=tagged))
 
 
-async def can_tag(bot, msg, user):
-    """Bot egalari, bot paneli adminlari va shu guruh adminlari (anonim admin ham)."""
-    if msg.sender_chat and msg.sender_chat.id == msg.chat_id:
-        return True   # guruh nomidan yozgan anonim admin
-    if user.is_bot:
-        return False
-    if is_panel_admin(user.id):
+def can_tag(chat_id, user_id):
+    """Bot egalari va bot egasi shu guruhda "ruxsat" bergan a'zolar."""
+    if user_id in CAREER_OWNER_IDS:
         return True
-    return await is_admin(bot, msg.chat_id, user.id)
+    return db().execute(
+        "SELECT 1 FROM tag_permissions WHERE chat_id=? AND user_id=?", (chat_id, user_id)
+    ).fetchone() is not None
+
+
+async def maybe_tag_permission(msg, user):
+    """Bot egasi xabarga reply qilib "ruxsat" / "xayr" yozsa — tag huquqini beradi / oladi."""
+    text = msg.text.strip().lower()
+    if text not in TAG_GRANT_WORDS and text not in TAG_REVOKE_WORDS:
+        return False
+    target = msg.reply_to_message.from_user if msg.reply_to_message else None
+    if user.id not in CAREER_OWNER_IDS or not target or target.is_bot:
+        return False
+
+    chat_id = msg.chat_id
+    name = uname(target)
+    if target.id in CAREER_OWNER_IDS:
+        await msg.reply_text(tag_t(chat_id, "perm_owner", name=name))
+        return True
+
+    c = db()
+    with c:
+        if text in TAG_GRANT_WORDS:
+            save_user(target)
+            c.execute(
+                """
+                INSERT INTO tag_permissions(chat_id, user_id, granted_by, granted_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                    granted_by = excluded.granted_by, granted_at = excluded.granted_at
+                """,
+                (chat_id, target.id, user.id, datetime.utcnow().isoformat()),
+            )
+            key = "perm_granted"
+        else:
+            c.execute(
+                "DELETE FROM tag_permissions WHERE chat_id=? AND user_id=?", (chat_id, target.id)
+            )
+            key = "perm_revoked"
+    await msg.reply_text(tag_t(chat_id, key, name=name))
+    return True
 
 
 async def maybe_tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """'bot [matn]' / 'stop' buyrug'i bo'lsa — bajaradi va True qaytaradi."""
     msg = update.effective_message
     user = update.effective_user
+    if await maybe_tag_permission(msg, user):
+        return True
     raw = msg.text.strip()
     text = raw.lower()
     first, _, rest = raw.partition(" ")
@@ -4916,7 +4989,7 @@ async def maybe_tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return False
 
     chat_id = msg.chat_id
-    if not await can_tag(context.bot, msg, user):
+    if not can_tag(chat_id, user.id):
         return False
 
     if is_speed:
@@ -4967,14 +5040,10 @@ async def maybe_tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     user = update.effective_user
-    if not msg or not msg.text or not user:
+    if not msg or not msg.text or not user or user.is_bot:
         return
 
-    # Anonim admin xabari bot (GroupAnonymousBot) nomidan keladi — shuning uchun
-    # "bot" buyrug'i is_bot tekshiruvidan oldin ko'riladi.
     if await maybe_tag_all(update, context):
-        return
-    if user.is_bot:
         return
 
     chat_id = msg.chat_id

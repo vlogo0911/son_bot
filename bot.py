@@ -4534,7 +4534,7 @@ HEAT = [(3, "heat_hot"), (10, "heat_warm"), (25, "heat_cool"), (10**9, "heat_col
 
 # ───────────────────────────── 📢 "bot" — guruh a'zolarini chaqirish ─────────────────────────────
 # Bot egasi yoki bot paneli admini guruhda "bot" deb yozsa, bot guruh a'zolarini
-# 5 tadan belgilab chiqadi. "bot kelish" — har bir a'zo "@username kelish" ko'rinishida
+# bittadan, har biri alohida xabarda chaqiradi. "bot kelish" — har bir a'zo "@username kelish" ko'rinishida
 # chaqiriladi. "stop" — jarayonni to'xtatadi.
 # Telegram botga guruh a'zolarining to'liq ro'yxatini bermaydi, shuning uchun bot
 # guruhda yozgan / qo'shilgan a'zolarni group_members jadvalida o'zi yig'ib boradi.
@@ -4542,8 +4542,8 @@ HEAT = [(3, "heat_hot"), (10, "heat_warm"), (25, "heat_cool"), (10**9, "heat_col
 TAG_WORDS = {"bot", "бот"}
 TAG_STOP_WORDS = {"stop", "стоп", "bot stop", "бот стоп"}
 TAG_TEXT_MAX = 200      # "bot ..." dan keyingi matnning eng katta uzunligi
-TAG_BATCH = 5           # bitta xabardagi belgilar soni
-TAG_DELAY = 3.0         # xabarlar orasidagi pauza (guruh flood-limitidan saqlaydi)
+TAG_BATCH = 1           # bitta xabardagi belgilar soni (har bir a'zo — alohida xabar)
+TAG_DELAY = 3.0         # xabarlar orasidagi pauza: guruhda ~20 xabar/daqiqa limiti bor
 TAG_TASKS: dict[int, asyncio.Task] = {}
 
 TAG_TEXT = {

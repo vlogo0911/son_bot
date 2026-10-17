@@ -668,7 +668,8 @@ LANGS = {
 }
 
 LANG_ORDER = ["uz", "eng", "ru", "kz"]
-LANG_CACHE: dict[int, str] = {}
+# Kalit: chat_id (int) yoki inline xabardagi o'yin uchun "i:<inline_message_id>" (str).
+LANG_CACHE: dict[int | str, str] = {}
 
 
 def t(chat_id, key, **kwargs):
@@ -998,6 +999,8 @@ def save_user(user):
 
 def record(chat_id, user_id, outcome, points=0):
     """O'yin natijasi + kasb missiyalari progressi va mukofotlari."""
+    if is_inline_key(chat_id):
+        chat_id = INLINE_STATS_CHAT
     col = OUTCOME_COL[outcome]
     c = db()
 
@@ -1281,11 +1284,48 @@ async def is_admin(bot, chat_id, user_id):
     return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
 
 
+# ───────────────────────────── Inline xabardagi o'yinlar ─────────────────────────────
+# Shaxsiy yozishmada @bot orqali yuborilgan o'yin xabarida chat_id bo'lmaydi —
+# Telegram faqat inline_message_id beradi. Shunday o'yinlar GAMES ichida
+# "i:<inline_message_id>" kaliti bilan saqlanadi va shu kalit chat_id o'rnida ishlatiladi.
+
+INLINE_PREFIX = "i:"
+INLINE_STATS_CHAT = 0   # inline o'yinlar statistikasi (umumiy reytingga qo'shiladi)
+_INLINE_LANG_KEYS: list[str] = []
+
+
+def is_inline_key(chat_id):
+    return isinstance(chat_id, str) and chat_id.startswith(INLINE_PREFIX)
+
+
+def game_key(q):
+    """Callback tegishli bo'lgan o'yin kaliti: oddiy chat yoki inline xabar."""
+    if q.inline_message_id:
+        return INLINE_PREFIX + q.inline_message_id
+    return q.message.chat.id
+
+
+def msg_target(chat_id, message_id):
+    """edit_message_* uchun manzil argumentlari."""
+    if is_inline_key(chat_id):
+        return {"inline_message_id": chat_id[len(INLINE_PREFIX):]}
+    return {"chat_id": chat_id, "message_id": message_id}
+
+
+def set_inline_lang(key, lang):
+    LANG_CACHE[key] = lang if lang in LANGS else DEFAULT_LANG
+    _INLINE_LANG_KEYS.append(key)
+    while len(_INLINE_LANG_KEYS) > 1000:
+        old = _INLINE_LANG_KEYS.pop(0)
+        if old not in GAMES:
+            LANG_CACHE.pop(old, None)
+
+
 async def edit(bot, chat_id, message_id, text, kb=None):
     """Xabarni xavfsiz tahrirlaydi ("not modified" xatosini e'tiborsiz qoldiradi)."""
     try:
         await bot.edit_message_text(
-            text, chat_id=chat_id, message_id=message_id, reply_markup=kb
+            text, reply_markup=kb, **msg_target(chat_id, message_id)
         )
     except BadRequest as e:
         if "not modified" not in str(e).lower():
@@ -1333,19 +1373,19 @@ def end_game(chat_id, game):
 
 async def close_game_message(bot, chat_id, game, text):
     """O'yin xabarini yakuniy matn bilan almashtiradi (yoki yangi xabar yuboradi)."""
-    if game.get("msg_id") and game["type"] != "number":
+    inline = is_inline_key(chat_id)
+    if (game.get("msg_id") or inline) and game["type"] != "number":
+        target = msg_target(chat_id, game.get("msg_id"))
         try:
             if game.get("media"):
-                await bot.edit_message_caption(
-                    chat_id=chat_id, message_id=game["msg_id"], caption=text, reply_markup=None
-                )
+                await bot.edit_message_caption(caption=text, reply_markup=None, **target)
             else:
-                await bot.edit_message_text(
-                    text, chat_id=chat_id, message_id=game["msg_id"], reply_markup=None
-                )
+                await bot.edit_message_text(text, reply_markup=None, **target)
             return
-        except TelegramError:
-            pass
+        except TelegramError as e:
+            if inline:
+                logger.warning("inline o'yin xabarini yopib bo'lmadi: %s", e)
+                return
     try:
         await bot.send_message(chat_id, text)
     except TelegramError as e:
@@ -1387,8 +1427,12 @@ async def _expire(app, chat_id, game, seconds):
 
 def active(q, kind):
     """Tugma bosilgan xabar hozirgi o'yinga tegishlimi? (eski xabarlardan himoya)"""
-    game = GAMES.get(q.message.chat.id)
-    if game and game["type"] == kind and game.get("msg_id") == q.message.message_id:
+    key = game_key(q)
+    game = GAMES.get(key)
+    if not game or game["type"] != kind:
+        return None
+    # Inline o'yinning kaliti xabarning o'zi — boshqa xabar bo'lishi mumkin emas.
+    if is_inline_key(key) or game.get("msg_id") == q.message.message_id:
         return game
     return None
 
@@ -1402,12 +1446,38 @@ def menu_kb(chat_id):
         [InlineKeyboardButton(t(chat_id, "btn_rsp"), callback_data="g:rsp")],
         [InlineKeyboardButton(t(chat_id, "btn_xo"), callback_data="g:xo")],
         [InlineKeyboardButton(memory_t(chat_id, "btn"), callback_data="g:memory")],
-        [InlineKeyboardButton(cr_t(chat_id, "btn"), callback_data="g:crash")],
         [InlineKeyboardButton(croc_t(chat_id, "btn"), callback_data="g:croc")],
+        [InlineKeyboardButton(casino_t(chat_id, "btn"), callback_data="g:casino")],
+    ])
+
+
+# 🎰 Casino bo'limi: pul tikiladigan o'yinlar shu yerga qo'shib boriladi.
+CASINO_TEXT = {
+    "uz": {"btn": "🎰 Casino", "title": "🎰 <b>CASINO</b>\n\nPul tikib o‘ynaladigan o‘yinni tanlang 👇", "back": "⬅️ Orqaga"},
+    "eng": {"btn": "🎰 Casino", "title": "🎰 <b>CASINO</b>\n\nChoose a game to bet on 👇", "back": "⬅️ Back"},
+    "ru": {"btn": "🎰 Казино", "title": "🎰 <b>КАЗИНО</b>\n\nВыберите игру на деньги 👇", "back": "⬅️ Назад"},
+    "kz": {"btn": "🎰 Казино", "title": "🎰 <b>КАЗИНО</b>\n\nАқшаға ойнайтын ойынды таңдаңыз 👇", "back": "⬅️ Артқа"},
+}
+
+
+def casino_t(chat_id, key):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    return CASINO_TEXT.get(lang, CASINO_TEXT["uz"]).get(key) or CASINO_TEXT["uz"][key]
+
+
+def casino_kb(chat_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(cr_t(chat_id, "btn"), callback_data="g:crash")],
+        [InlineKeyboardButton(casino_t(chat_id, "back"), callback_data="g:back")],
     ])
 
 
 def again_row(chat_id):
+    if is_inline_key(chat_id):
+        # Inline xabarda guruh menyusi yo'q — o'yinlar ro'yxatini shu chatning o'zida ochamiz.
+        return [InlineKeyboardButton(
+            t(chat_id, "btn_again"), switch_inline_query_current_chat=""
+        )]
     return [InlineKeyboardButton(t(chat_id, "btn_again"), callback_data="g:menu")]
 
 
@@ -3884,6 +3954,14 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if kind == "casino":
+        await edit(context.bot, chat_id, msg.message_id, casino_t(chat_id, "title"), casino_kb(chat_id))
+        return
+
+    if kind == "back":
+        await edit(context.bot, chat_id, msg.message_id, t(chat_id, "menu_title"), menu_kb(chat_id))
+        return
+
     save_user(user)
     name = uname(user)
     app = context.application
@@ -4567,7 +4645,7 @@ def rsp_choose_text(chat_id, game):
 
 async def cb_rsp_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    chat_id = q.message.chat.id
+    chat_id = game_key(q)
     game = active(q, "rsp")
 
     if not game or game["state"] != "setup":
@@ -4588,7 +4666,7 @@ async def cb_rsp_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_rsp_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    chat_id = q.message.chat.id
+    chat_id = game_key(q)
     user = q.from_user
     game = active(q, "rsp")
 
@@ -4614,7 +4692,7 @@ async def cb_rsp_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_rsp_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    chat_id = q.message.chat.id
+    chat_id = game_key(q)
     user = q.from_user
     game = active(q, "rsp")
 
@@ -4738,7 +4816,7 @@ def xo_turn_text(chat_id, game):
 
 async def cb_xo_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    chat_id = q.message.chat.id
+    chat_id = game_key(q)
     user = q.from_user
     game = active(q, "xo")
 
@@ -4766,7 +4844,7 @@ async def cb_xo_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_xo_move(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    chat_id = q.message.chat.id
+    chat_id = game_key(q)
     user = q.from_user
     game = active(q, "xo")
 
@@ -4869,6 +4947,9 @@ def crash_growth_rate():
 def crash_group_allowed(chat_id):
     if not CRASH_GROUP_RESTRICT:
         return True
+    if is_inline_key(chat_id):
+        # Faqat ulangan guruhlar rejimida shaxsiy yozishmadagi Crash ham yopiq.
+        return False
     return db().execute(
         "SELECT 1 FROM crash_groups WHERE chat_id = ?", (int(chat_id),)
     ).fetchone() is not None
@@ -5355,16 +5436,15 @@ async def cr_edit(bot, chat_id, game, text, kb=None):
     if now - game.get("last_edit", 0.0) < CRASH_MIN_EDIT_GAP:
         return False
     game["last_edit"] = now
+    target = msg_target(chat_id, game["msg_id"])
     try:
         if game.get("media"):
             await bot.edit_message_caption(
-                chat_id=chat_id, message_id=game["msg_id"], caption=text,
-                reply_markup=kb, parse_mode=ParseMode.HTML,
+                caption=text, reply_markup=kb, parse_mode=ParseMode.HTML, **target,
             )
         else:
             await bot.edit_message_text(
-                text, chat_id=chat_id, message_id=game["msg_id"],
-                reply_markup=kb, parse_mode=ParseMode.HTML,
+                text, reply_markup=kb, parse_mode=ParseMode.HTML, **target,
             )
         return True
     except RetryAfter as e:
@@ -5398,6 +5478,18 @@ async def _send_retry(call, attempts=6):
 async def crash_publish_result(bot, chat_id, game, text, kb):
     """Natijani HAR DOIM alohida yangi xabar sifatida chiqaradi (flood bo'lsa ham kutib yuboradi),
     eski parvoz xabarini esa qisqa 'portladi' holatiga o'tkazadi."""
+    if is_inline_key(chat_id):
+        # Inline xabar egasi bo'lmagan chatga yangi xabar yuborib bo'lmaydi —
+        # natija o'yin xabarining o'zida chiqadi.
+        async def edit_inline():
+            return await bot.edit_message_text(
+                text, reply_markup=InlineKeyboardMarkup([again_row(chat_id)]),
+                parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+                **msg_target(chat_id, None),
+            )
+        await _send_retry(edit_inline)
+        return
+
     short = cr_t(chat_id, "crashed_short", cp=f"{game['cp']:.2f}")
 
     async def close_old():
@@ -5819,9 +5911,12 @@ async def _crash_auto_restart(app, chat_id):
 
 async def cb_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    chat_id = q.message.chat.id
+    await crash_action(q, context, q.data.split(":", 1)[1])
+
+
+async def crash_action(q, context, action):
+    chat_id = game_key(q)
     user = q.from_user
-    action = q.data.split(":", 1)[1]
     game = active(q, "crash")
 
     if action in ("join", "plus", "min") and (
@@ -8216,7 +8311,7 @@ async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         tr["empty"]
                     ),
                 )
-            ],
+            ] + inline_game_results(user),
             cache_time=0,
             is_personal=True,
         )
@@ -8300,6 +8395,138 @@ async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cache_time=0,
         is_personal=True,
     )
+
+
+# ───────────────────── 🎮 INLINE O'YINLAR (XO · RSP · CRASH) ─────────────────────
+# @bot yozilganda chiqadigan ro'yxatda o'yinlar ham bor. Tanlangan o'yin xabari
+# yuboriladi; o'yin esa birinchi tugma bosilganda (inline_message_id ma'lum
+# bo'lganda) yaratiladi va oddiy XO / RSP / Crash callback'lari bilan davom etadi.
+
+INLINE_GAME_DESC = {
+    "uz": {"xo": "Do‘stingiz bilan XO o‘ynang", "rsp": "Ikki kishilik tosh-qaychi-qog‘oz", "crash": "Pul tikib roketni kuzating"},
+    "eng": {"xo": "Play XO with a friend", "rsp": "Rock-paper-scissors for two", "crash": "Bet and watch the rocket"},
+    "ru": {"xo": "Сыграйте в XO с другом", "rsp": "Камень-ножницы-бумага на двоих", "crash": "Сделайте ставку и следите за ракетой"},
+    "kz": {"xo": "Досыңызбен XO ойнаңыз", "rsp": "Екі адамға тас-қайшы-қағаз", "crash": "Ақша салып, зымыранды бақылаңыз"},
+}
+
+
+def inline_lang(user):
+    return LANG_CACHE.get(user.id) or secret_lang(user)
+
+
+def inline_game_results(user):
+    lang = inline_lang(user)
+    save_user(user)
+    name = uname(user)
+    texts = LANGS.get(lang, LANGS[DEFAULT_LANG])
+    crash_texts = CRASH_TEXT.get(lang, CRASH_TEXT["uz"])
+    desc = INLINE_GAME_DESC.get(lang, INLINE_GAME_DESC["uz"])
+
+    def article(kind, title, text, join_label):
+        return InlineQueryResultArticle(
+            id=f"game-{kind}",
+            title=title,
+            description=desc[kind],
+            input_message_content=InputTextMessageContent(text, parse_mode=ParseMode.HTML),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                join_label, callback_data=f"ix:{kind}:{user.id}:{lang}",
+            )]]),
+        )
+
+    results = [
+        article("xo", texts["btn_xo"], texts["xo_lobby"].format(owner=name), texts["btn_join"]),
+        article(
+            "rsp", texts["btn_rsp"],
+            texts["rsp_lobby"].format(current=1, count=2, players=f"🙋 {name}\n⬜ …"),
+            texts["btn_join"],
+        ),
+    ]
+    if CRASH_ENABLED and not CRASH_GROUP_RESTRICT:
+        results.append(article(
+            "crash", crash_texts["btn"],
+            crash_texts["lobby"].format(min=CRASH_MIN_BET, sec=CRASH_COUNTDOWN),
+            crash_texts["b_join"],
+        ))
+    return results
+
+
+async def cb_inline_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q.inline_message_id:
+        await q.answer()
+        return
+
+    _, kind, owner_text, lang = q.data.split(":")
+    owner_id = int(owner_text)
+    key = game_key(q)
+    user = q.from_user
+
+    if key not in LANG_CACHE:
+        set_inline_lang(key, lang)
+
+    game = GAMES.get(key)
+    if game:
+        # O'yin allaqachon boshlangan (masalan, tugma eski holatda qolgan).
+        if kind == "crash" and game["type"] == "crash":
+            await crash_action(q, context, "join")
+        else:
+            await q.answer(t(key, "gone"), show_alert=True)
+        return
+
+    app = context.application
+
+    if kind == "crash":
+        if not CRASH_ENABLED or not crash_group_allowed(key):
+            await q.answer("⛔ Crash hozir faol emas.", show_alert=True)
+            return
+        # Puli yetmagan foydalanuvchi bosganda bo'sh raund ochilib qolmasin.
+        if wallet_balance(user.id) < CRASH_MIN_BET:
+            await q.answer(cr_t(key, "no_funds", min=CRASH_MIN_BET), show_alert=True)
+            return
+        game = new_game(
+            key, "crash", owner_id,
+            state="lobby", players={}, dropped=[], cp=None, t0=None, t_crash=None,
+            charged=False, settled=False,
+        )
+        arm(app, key, game, CRASH_LOBBY_TTL)
+        await crash_action(q, context, "join")
+        return
+
+    if user.id == owner_id:
+        await q.answer(t(key, "xo_own" if kind == "xo" else "rsp_already"), show_alert=True)
+        return
+
+    save_user(user)
+    names = {owner_id: pretty_name(*inline_owner_row(owner_id)), user.id: uname(user)}
+
+    if kind == "xo":
+        ids = [owner_id, user.id]
+        random.shuffle(ids)
+        game = new_game(
+            key, "xo", owner_id,
+            state="play", names=names, board=[""] * 9,
+            seat={"X": ids[0], "O": ids[1]}, turn="X",
+        )
+        await q.answer()
+        await edit(context.bot, key, None, xo_turn_text(key, game), xo_keyboard(key, game))
+        arm(app, key, game, XO_MOVE_TTL)
+        return
+
+    # kind == "rsp": shaxsiy yozishmada ikki kishi o'ynaydi
+    game = new_game(
+        key, "rsp", owner_id,
+        state="choose", count=2, names=names, choices={},
+    )
+    await q.answer()
+    await edit(context.bot, key, None, rsp_choose_text(key, game), rsp_choice_kb(key))
+    arm(app, key, game, RSP_CHOOSE_TTL)
+
+
+def inline_owner_row(user_id):
+    row = db().execute(
+        "SELECT first_name, username FROM users WHERE user_id=?", (user_id,)
+    ).fetchone()
+    return row if row else (None, None)
 
 
 async def secret_callback(
@@ -9883,7 +10110,8 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^panel:"))
     app.add_handler(CallbackQueryHandler(cb_memory, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(cb_croc, pattern=r"^croc:show$"))
-    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|croc|menu)$"))
+    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|croc|casino|back|menu)$"))
+    app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash):\d+:(uz|eng|ru|kz)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))
     app.add_handler(

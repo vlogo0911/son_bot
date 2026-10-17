@@ -4611,6 +4611,28 @@ def init_group_members():
             )
         """)
         c.execute("""
+            CREATE TABLE IF NOT EXISTS member_activity (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                messages INTEGER NOT NULL DEFAULT 0,
+                since TEXT NOT NULL,
+                PRIMARY KEY (chat_id, user_id)
+            )
+        """)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_member_activity_top "
+            "ON member_activity(chat_id, messages DESC)"
+        )
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS member_words (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                word TEXT NOT NULL,
+                cnt INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (chat_id, user_id, word)
+            )
+        """)
+        c.execute("""
             CREATE TABLE IF NOT EXISTS tag_speed (
                 chat_id INTEGER PRIMARY KEY,
                 delay REAL NOT NULL
@@ -4670,12 +4692,138 @@ async def track_group_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     try:
         member_seen(chat.id, update.effective_user)
+        if update.message:   # tahrirlangan xabarlar qayta sanalmaydi
+            count_activity(chat.id, update.effective_user, msg.text or msg.caption or "")
         for new in msg.new_chat_members or ():
             member_seen(chat.id, new)
         if msg.left_chat_member:
             member_left(chat.id, msg.left_chat_member.id)
     except sqlite3.Error:
         logger.exception("group_members yangilanmadi")
+
+
+# ───────────────────────────── 📊 /aktiv — eng faol a'zolar ─────────────────────────────
+# Bot guruhdagi har bir xabarni sanaydi (shu funksiya qo'shilgan paytdan boshlab —
+# Telegram botga eski xabarlar tarixini bermaydi) va har bir a'zoning so'zlarini yig'adi.
+
+AKTIV_TOP = 15
+AKTIV_MIN_WORD = 3          # bundan qisqa so'zlar ("va", "u") hisobga olinmaydi
+AKTIV_MAX_WORDS = 100       # bitta xabardan olinadigan so'zlar soni
+_AKTIV_CLEAN_RE = re.compile(r"(https?://\S+|www\.\S+|[@/#]\w+)", re.I)
+_AKTIV_WORD_RE = re.compile(r"[^\W\d_]+(?:['’ʻʼ‘`][^\W\d_]+)*")
+
+AKTIV_TEXT = {
+    "uz": {
+        "title": "📊 <b>ENG FAOL {n} A'ZO</b>\n🗓 {since} dan beri",
+        "line": "{medal} <b>{name}</b> — {count} ta xabar",
+        "word": "\n      💬 Ko'p yozgan so'zi: <i>{word}</i> ({times} marta)",
+        "empty": "📭 Hali hisob yo'q. Bot shu paytdan boshlab guruhdagi xabarlarni sanaydi.",
+    },
+    "eng": {
+        "title": "📊 <b>TOP {n} MOST ACTIVE MEMBERS</b>\n🗓 since {since}",
+        "line": "{medal} <b>{name}</b> — {count} messages",
+        "word": "\n      💬 Favourite word: <i>{word}</i> ({times} times)",
+        "empty": "📭 No stats yet. The bot counts group messages from now on.",
+    },
+    "ru": {
+        "title": "📊 <b>ТОП-{n} САМЫХ АКТИВНЫХ</b>\n🗓 с {since}",
+        "line": "{medal} <b>{name}</b> — {count} сообщ.",
+        "word": "\n      💬 Любимое слово: <i>{word}</i> ({times} раз)",
+        "empty": "📭 Статистики пока нет. Бот считает сообщения группы с этого момента.",
+    },
+    "kz": {
+        "title": "📊 <b>ЕҢ БЕЛСЕНДІ {n} МҮШЕ</b>\n🗓 {since} бастап",
+        "line": "{medal} <b>{name}</b> — {count} хабарлама",
+        "word": "\n      💬 Жиі жазған сөзі: <i>{word}</i> ({times} рет)",
+        "empty": "📭 Әзірге статистика жоқ. Бот топ хабарламаларын осы сәттен бастап санайды.",
+    },
+}
+
+
+def aktiv_t(chat_id, key, **kwargs):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    text = AKTIV_TEXT.get(lang, AKTIV_TEXT["uz"]).get(key) or AKTIV_TEXT["uz"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def aktiv_words(text):
+    text = _AKTIV_CLEAN_RE.sub(" ", text.lower())
+    words = [w for w in _AKTIV_WORD_RE.findall(text) if len(w) >= AKTIV_MIN_WORD]
+    return words[:AKTIV_MAX_WORDS]
+
+
+def count_activity(chat_id, user, text):
+    if not user or user.is_bot:
+        return
+    now = datetime.utcnow().isoformat()
+    c = db()
+    with c:
+        c.execute(
+            """
+            INSERT INTO member_activity(chat_id, user_id, messages, since) VALUES (?, ?, 1, ?)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET messages = messages + 1
+            """,
+            (chat_id, user.id, now),
+        )
+        words = {}
+        for w in aktiv_words(text):
+            words[w] = words.get(w, 0) + 1
+        if words:
+            c.executemany(
+                """
+                INSERT INTO member_words(chat_id, user_id, word, cnt) VALUES (?, ?, ?, ?)
+                ON CONFLICT(chat_id, user_id, word) DO UPDATE SET cnt = cnt + excluded.cnt
+                """,
+                [(chat_id, user.id, w, n) for w, n in words.items()],
+            )
+
+
+async def cmd_aktiv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    if not chat or not msg:
+        return
+    if chat.type == ChatType.PRIVATE:
+        await msg.reply_text(t(chat.id, "use_group"))
+        return
+
+    c = db()
+    rows = c.execute(
+        """
+        SELECT a.user_id, a.messages, u.first_name, u.username
+        FROM member_activity a LEFT JOIN users u ON u.user_id = a.user_id
+        WHERE a.chat_id = ?
+        ORDER BY a.messages DESC LIMIT ?
+        """,
+        (chat.id, AKTIV_TOP),
+    ).fetchall()
+    if not rows:
+        await msg.reply_text(aktiv_t(chat.id, "empty"))
+        return
+
+    since = c.execute(
+        "SELECT MIN(since) FROM member_activity WHERE chat_id = ?", (chat.id,)
+    ).fetchone()[0]
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [aktiv_t(chat.id, "title", n=len(rows), since=since[:10]), ""]
+    for i, (uid, count, first_name, username) in enumerate(rows):
+        line = aktiv_t(
+            chat.id, "line",
+            medal=medals[i] if i < len(medals) else f"{i + 1}.",
+            name=pretty_name(first_name, username), count=count,
+        )
+        top = c.execute(
+            """
+            SELECT word, cnt FROM member_words
+            WHERE chat_id = ? AND user_id = ?
+            ORDER BY cnt DESC, word LIMIT 1
+            """,
+            (chat.id, uid),
+        ).fetchone()
+        if top:
+            line += aktiv_t(chat.id, "word", word=escape(top[0]), times=top[1])
+        lines.append(line)
+    await msg.reply_text("\n".join(lines))
 
 
 async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7344,17 +7492,17 @@ async def post_init(application: Application):
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
-            ("reyting", "🏆 Reyting"), ("profil", "👤 Profil"), ("scrash", "🛑 Crashni to‘xtatish"),
+            ("reyting", "🏆 Reyting"), ("aktiv", "📊 Eng faollar"), ("profil", "👤 Profil"), ("scrash", "🛑 Crashni to‘xtatish"),
             ("qoidalar", "📚 Qoidalar"), ("lang", "🌐 Til"), ("help", "❓ Yordam"),
         ],
         "en": [
             ("emps", "🎮 Choose a game"), ("stop", "🛑 Stop the game"),
-            ("reyting", "🏆 Leaderboard"), ("profil", "👤 Profile"), ("scrash", "🛑 Stop Crash"),
+            ("reyting", "🏆 Leaderboard"), ("aktiv", "📊 Most active"), ("profil", "👤 Profile"), ("scrash", "🛑 Stop Crash"),
             ("qoidalar", "📚 Rules"), ("lang", "🌐 Language"), ("help", "❓ Help"),
         ],
         "ru": [
             ("emps", "🎮 Выбрать игру"), ("stop", "🛑 Остановить игру"),
-            ("reyting", "🏆 Рейтинг"), ("profil", "👤 Профиль"), ("scrash", "🛑 Остановить Crash"),
+            ("reyting", "🏆 Рейтинг"), ("aktiv", "📊 Самые активные"), ("profil", "👤 Профиль"), ("scrash", "🛑 Остановить Crash"),
             ("qoidalar", "📚 Правила"), ("lang", "🌐 Язык"), ("help", "❓ Помощь"),
         ],
     }
@@ -10355,6 +10503,7 @@ def main():
         (["emps", "games", "oyin"], cmd_emps),
         (["stop"], cmd_stop),
         (["reyting", "rating"], cmd_reyting),
+        (["aktiv", "active"], cmd_aktiv),
         (["profil", "profile"], cmd_profil),
         (["oila", "family"], cmd_oila),
         (["shop"], cmd_shop),

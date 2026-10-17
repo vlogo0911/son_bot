@@ -13,3 +13,5 @@
 - Guruhda bot egasi / panel admini (`is_panel_admin`) "bot" deb yozsa — har bir a'zo alohida xabarda belgilanadi
   (`maybe_tag_all`); "bot kelish" → har biri "@username kelish"; "stop" to'xtatadi; "tez 0.7" — guruh uchun xabarlar oralig'i (0.7–1.5 s, `tag_speed` jadvali). A'zolar `group_members` jadvalida yig'iladi
   (`track_group_member`, `on_chat_member`), chunki Telegram API to'liq ro'yxatni bermaydi.
+- `/aktiv`: guruhdagi eng faol 15 a'zo (xabarlar soni + eng ko'p yozgan so'zi). Hisob `count_activity` orqali
+  `member_activity` / `member_words` jadvallarida, funksiya qo'shilgan paytdan boshlab yig'iladi.

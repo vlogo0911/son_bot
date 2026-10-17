@@ -33,3 +33,8 @@
   ta'lim to'lovi qilingan bo'lsa). Bosqichlar 0–2 / bog'cha 3–6 / maktab 7–15 / kollej 16–18 / universitet 19–22 / ish.
   16 va 19 yoshda yo'l tanlanadi; ishlayotgan farzand kuniga 100/200/400$ maosh (ota-onaga teng). Ovqat/o'yinchoqlar `KID_ITEMS`,
   to'lovlar `KID_FEES`, maosh `KID_SALARY`; holat `family_children` ustunlarida, `kid_worker` har 60 s.
+- 💔 Ajrashish: "Ajrashish" bosilganda avval oqibatlar (`divorce_terms_text`) va farzand bo'lsa vasiylik tanlovi
+  (`rel:divgo:<custody_id>`, `pair_requests.custody_id`); juftga shu shartlar yuboriladi. Tasdiqlanganda (`rel:owner` va
+  /tasdiq) `divorce_settle`: ikkala hamyon puli teng bo'linadi, sovg'alar qiymati bo'yicha teng taqsimlanadi, farzandlarga
+  `custody_id` / `alimony_payer`. Aliment: farzand ishga kirguncha kuniga `ALIMONY_PER_CHILD` (75$) har bir farzand uchun,
+  `kid_tick` → `kid_apply_money` (balans minusga tushishi mumkin).

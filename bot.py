@@ -2013,6 +2013,7 @@ def panel_keyboard(user_id=None):
         rows.append([InlineKeyboardButton("🛡 Adminlarni boshqarish", callback_data="panel:admins")])
     if is_owner:
         rows.append([InlineKeyboardButton("💰 Pul statistikasi", callback_data="panel:money")])
+        rows.append([InlineKeyboardButton("🏦 Banklar boshqaruvi", callback_data="panel:banks")])
         rows.append([InlineKeyboardButton("👶 Farzand o‘chirish", callback_data="panel:kiddel")])
         rows.append([InlineKeyboardButton("🎰 Crash sozlamalari", callback_data="panel:crash")])
         rows.append([InlineKeyboardButton("✨ Premium emoji", callback_data="panel:pemoji")])
@@ -2188,7 +2189,7 @@ def panel_money_text(c):
         f"📊 O'rtacha (puli borlar, egalarsiz): <b>{fmt_money(average)}$</b>",
         f"🔝 Eng katta balans (egalarsiz): <b>{fmt_money(others_max)}$</b>",
         "",
-        "🏅 <b>Gold Invest</b>",
+        "🏦 <b>Banklar</b>",
         f"💸 Faol kreditlar: <b>{loans_n}</b> ta · qaytarilishi kerak <b>{fmt_money(loans_due)}$</b>",
         f"🏦 Faol omonatlar: <b>{deps_n}</b> ta · <b>{fmt_money(deps_amount)}$</b> → to'lanadi {fmt_money(deps_payout)}$",
         f"🔻 Minus balanslar: <b>{debtors}</b> ta · jami qarz <b>{fmt_money(debt)}$</b>",
@@ -2482,6 +2483,11 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "panel:pemoji" or query.data.startswith("panel:pemoji:"):
         await pemoji_callback(query, context)
+        return
+
+    if query.data == "panel:banks" or query.data.startswith("panel:bank_"):
+        # "banks"/"bank_*" PANEL_PERMISSIONS'da yo'q → faqat bot egalari.
+        await panel_bank_callback(query, context)
         return
 
     if query.data == "panel:kiddel" or query.data.startswith("panel:kiddel_"):
@@ -9369,6 +9375,8 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     raw = msg.text.strip()
+    if context.user_data.get("bank_purpose") and await bank_purpose_text(update, context):
+        return
     if (context.user_data.get("gs_wait_welcome") or context.user_data.get("gs_wait_words")) \
             and await settings_private_text(update, context):
         return
@@ -9459,6 +9467,10 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
                     InlineKeyboardButton("🛡 Admin boshqaruvi", callback_data="panel:admins")
                 ]]),
             )
+        return
+
+    if user.id in CAREER_OWNER_IDS and context.user_data.get("panel_bank_state"):
+        await panel_bank_text(update, context)
         return
 
     if user.id in CAREER_OWNER_IDS and context.user_data.get("panel_kid_state") == "waiting_id":
@@ -11583,8 +11595,10 @@ async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(result)
 
 
-# ───────────────────────────── 🏦 BANKLAR (Gold Invest) ─────────────────────────────
-# /profil → 🏦 Banklar. Hozircha bitta bank: Gold Invest.
+# ───────────────────────────── 🏦 BANKLAR (ko'p bankli) ─────────────────────────────
+# /profil → 🏦 Banklar. Banklar `banks` jadvalida (1-bank — Gold Invest); owner panel → 🏦 Banklar boshqaruvi:
+# bank qo'shish, foizlar, ariza rejimi (kredit bank egasi tasdig'i bilan), egasi, yopish/ochish.
+# Quyidagi qiymatlar — yangi bank uchun standart foizlar.
 #   Kredit: kuniga 13%, 1–7 kun. Birinchi kredit — 1 000$, keyingilari 1 000$ … 50 000$.
 #           Muddat tugaganda summa hamyondan avtomatik yechiladi (balans minusga tushishi mumkin).
 #   Omonat: 5 000$ … 30 000$, 3–10 kun, kuniga 5%. Muddatidan oldin yechilmaydi,
@@ -11606,13 +11620,13 @@ BANK_TEXT = {
     "uz": {
         "banks": "🏦 <b>BANKLAR</b>\n\nBankni tanlang 👇\n\n🎮 Simulator — haqiqiy pul emas",
         "home": (
-            "🏅 <b>GOLD INVEST BANK</b>\n\n💵 Hamyon: <b>{wallet}$</b>\n\n"
+            "🏦 <b>{bank}</b>\n\n💵 Hamyon: <b>{wallet}$</b>\n\n"
             "💸 Kredit: {loan}\n🏦 Omonat: {deposit}\n\n"
             "📈 Kredit — kuniga {loan_rate}% · 1–7 kun\n📈 Omonat — kuniga {dep_rate}% · 3–10 kun"
         ),
         "none": "yo‘q",
-        "loan_line": "<b>{due}$</b> qaytariladi · {when} gacha",
-        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · {when} da tushadi",
+        "loan_line": "<b>{due}$</b> qaytariladi · {when} gacha · 🏦 {bank}",
+        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · {when} da tushadi · 🏦 {bank}",
         "b_loan": "💸 Kredit olish", "b_repay": "✅ Kreditni to‘lash · {due}$", "b_deposit": "🏦 Omonat ochish",
         "b_back": "⬅️ Orqaga", "b_banks": "🏦 Banklar",
         "loan_first": (
@@ -11638,19 +11652,28 @@ BANK_TEXT = {
         "dep_loan": "⛔ Kredit to‘lanmaguncha (yoki balans minusda bo‘lsa) omonat ochib bo‘lmaydi.",
         "no_funds": "💸 Hamyonda yetarli pul yo‘q (balans: {bal}$).",
         "not_yours": "⛔ Bu menyu sizniki emas — o‘zingiz /profil yozing.",
-        "n_loan": "🏅 <b>Gold Invest</b>: kredit muddati tugadi — hamyondan <b>{due}$</b> yechildi.\n💰 Balans: {bal}$",
-        "n_dep": "🏅 <b>Gold Invest</b>: omonat muddati tugadi — hamyonga <b>{payout}$</b> tushdi (foyda +{profit}$).\n💰 Balans: {bal}$",
+        "apply_note": "📝 Bu bankda kredit <b>ariza orqali</b> beriladi — bank egasi ko‘rib chiqib tasdiqlaydi.",
+        "apply_private": "📝 Ariza shaxsiy chatda beriladi: /profil → 🏦 Banklar.",
+        "purpose_ask": "📝 <b>{bank}</b> · {amount}$ · {days} kun → qaytariladi {due}$\n\nKredit olish <b>maqsadini</b> yozing (masalan: biznes, uy, birja…) 👇",
+        "purpose_sent": "📨 Arizangiz bank egasiga yuborildi. Javobni kuting ⏳",
+        "apply_pending": "⏳ Sizda ko‘rib chiqilayotgan kredit arizasi bor.",
+        "apply_ok": "✅ <b>{bank}</b> kredit arizangizni tasdiqladi! <b>+{amount}$</b>\n📅 {days} kun · qaytariladi {due}$ · muddat {when}",
+        "apply_no": "❌ <b>{bank}</b> kredit arizangizni rad etdi.",
+        "apply_fail_owner": "😓 Bank egasiga xabar yetib bormadi — keyinroq urinib ko‘ring.",
+        "bank_closed": "⛔ Bu bank hozir ishlamayapti.",
+        "n_loan": "🏦 <b>{bank}</b>: kredit muddati tugadi — hamyondan <b>{due}$</b> yechildi.\n💰 Balans: {bal}$",
+        "n_dep": "🏦 <b>{bank}</b>: omonat muddati tugadi — hamyonga <b>{payout}$</b> tushdi (foyda +{profit}$).\n💰 Balans: {bal}$",
     },
     "eng": {
         "banks": "🏦 <b>BANKS</b>\n\nChoose a bank 👇\n\n🎮 Simulator — not real money",
         "home": (
-            "🏅 <b>GOLD INVEST BANK</b>\n\n💵 Wallet: <b>{wallet}$</b>\n\n"
+            "🏦 <b>{bank}</b>\n\n💵 Wallet: <b>{wallet}$</b>\n\n"
             "💸 Loan: {loan}\n🏦 Deposit: {deposit}\n\n"
             "📈 Loan — {loan_rate}% per day · 1–7 days\n📈 Deposit — {dep_rate}% per day · 3–10 days"
         ),
         "none": "none",
-        "loan_line": "<b>{due}$</b> to repay · until {when}",
-        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · paid on {when}",
+        "loan_line": "<b>{due}$</b> to repay · until {when} · 🏦 {bank}",
+        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · paid on {when} · 🏦 {bank}",
         "b_loan": "💸 Take a loan", "b_repay": "✅ Repay loan · {due}$", "b_deposit": "🏦 Open a deposit",
         "b_back": "⬅️ Back", "b_banks": "🏦 Banks",
         "loan_first": (
@@ -11676,19 +11699,28 @@ BANK_TEXT = {
         "dep_loan": "⛔ You can't open a deposit while you have a loan or a negative balance.",
         "no_funds": "💸 Not enough money in your wallet (balance: {bal}$).",
         "not_yours": "⛔ This menu is not yours — type /profile yourself.",
-        "n_loan": "🏅 <b>Gold Invest</b>: your loan is due — <b>{due}$</b> was taken from your wallet.\n💰 Balance: {bal}$",
-        "n_dep": "🏅 <b>Gold Invest</b>: your deposit matured — <b>{payout}$</b> was paid to your wallet (profit +{profit}$).\n💰 Balance: {bal}$",
+        "apply_note": "📝 Loans here are by <b>application</b> — the bank owner reviews and approves.",
+        "apply_private": "📝 Applications are made in private chat: /profile → 🏦 Banks.",
+        "purpose_ask": "📝 <b>{bank}</b> · {amount}$ · {days} days → repay {due}$\n\nWrite the <b>purpose</b> of the loan 👇",
+        "purpose_sent": "📨 Your application was sent to the bank owner. Please wait ⏳",
+        "apply_pending": "⏳ You already have a loan application under review.",
+        "apply_ok": "✅ <b>{bank}</b> approved your loan! <b>+{amount}$</b>\n📅 {days} days · repay {due}$ · due {when}",
+        "apply_no": "❌ <b>{bank}</b> rejected your loan application.",
+        "apply_fail_owner": "😓 Couldn't reach the bank owner — try again later.",
+        "bank_closed": "⛔ This bank is closed now.",
+        "n_loan": "🏦 <b>{bank}</b>: your loan is due — <b>{due}$</b> was taken from your wallet.\n💰 Balance: {bal}$",
+        "n_dep": "🏦 <b>{bank}</b>: your deposit matured — <b>{payout}$</b> was paid to your wallet (profit +{profit}$).\n💰 Balance: {bal}$",
     },
     "ru": {
         "banks": "🏦 <b>БАНКИ</b>\n\nВыберите банк 👇\n\n🎮 Симулятор — не настоящие деньги",
         "home": (
-            "🏅 <b>GOLD INVEST BANK</b>\n\n💵 Кошелёк: <b>{wallet}$</b>\n\n"
+            "🏦 <b>{bank}</b>\n\n💵 Кошелёк: <b>{wallet}$</b>\n\n"
             "💸 Кредит: {loan}\n🏦 Вклад: {deposit}\n\n"
             "📈 Кредит — {loan_rate}% в день · 1–7 дней\n📈 Вклад — {dep_rate}% в день · 3–10 дней"
         ),
         "none": "нет",
-        "loan_line": "<b>{due}$</b> к возврату · до {when}",
-        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · выплата {when}",
+        "loan_line": "<b>{due}$</b> к возврату · до {when} · 🏦 {bank}",
+        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · выплата {when} · 🏦 {bank}",
         "b_loan": "💸 Взять кредит", "b_repay": "✅ Погасить кредит · {due}$", "b_deposit": "🏦 Открыть вклад",
         "b_back": "⬅️ Назад", "b_banks": "🏦 Банки",
         "loan_first": (
@@ -11714,19 +11746,28 @@ BANK_TEXT = {
         "dep_loan": "⛔ Нельзя открыть вклад, пока есть кредит или баланс в минусе.",
         "no_funds": "💸 Недостаточно денег в кошельке (баланс: {bal}$).",
         "not_yours": "⛔ Это не ваше меню — напишите /profil сами.",
-        "n_loan": "🏅 <b>Gold Invest</b>: срок кредита истёк — с кошелька списано <b>{due}$</b>.\n💰 Баланс: {bal}$",
-        "n_dep": "🏅 <b>Gold Invest</b>: срок вклада истёк — на кошелёк поступило <b>{payout}$</b> (прибыль +{profit}$).\n💰 Баланс: {bal}$",
+        "apply_note": "📝 Кредит в этом банке выдаётся <b>по заявке</b> — владелец банка рассматривает и одобряет.",
+        "apply_private": "📝 Заявка подаётся в личке: /profil → 🏦 Банки.",
+        "purpose_ask": "📝 <b>{bank}</b> · {amount}$ · {days} дн. → к возврату {due}$\n\nНапишите <b>цель</b> кредита 👇",
+        "purpose_sent": "📨 Заявка отправлена владельцу банка. Ждите ответа ⏳",
+        "apply_pending": "⏳ У вас уже есть заявка на рассмотрении.",
+        "apply_ok": "✅ <b>{bank}</b> одобрил ваш кредит! <b>+{amount}$</b>\n📅 {days} дн. · к возврату {due}$ · срок {when}",
+        "apply_no": "❌ <b>{bank}</b> отклонил вашу заявку.",
+        "apply_fail_owner": "😓 Не удалось связаться с владельцем банка — попробуйте позже.",
+        "bank_closed": "⛔ Этот банк сейчас закрыт.",
+        "n_loan": "🏦 <b>{bank}</b>: срок кредита истёк — с кошелька списано <b>{due}$</b>.\n💰 Баланс: {bal}$",
+        "n_dep": "🏦 <b>{bank}</b>: срок вклада истёк — на кошелёк поступило <b>{payout}$</b> (прибыль +{profit}$).\n💰 Баланс: {bal}$",
     },
     "kz": {
         "banks": "🏦 <b>БАНКТЕР</b>\n\nБанкті таңдаңыз 👇\n\n🎮 Симулятор — нақты ақша емес",
         "home": (
-            "🏅 <b>GOLD INVEST BANK</b>\n\n💵 Әмиян: <b>{wallet}$</b>\n\n"
+            "🏦 <b>{bank}</b>\n\n💵 Әмиян: <b>{wallet}$</b>\n\n"
             "💸 Несие: {loan}\n🏦 Салым: {deposit}\n\n"
             "📈 Несие — күніне {loan_rate}% · 1–7 күн\n📈 Салым — күніне {dep_rate}% · 3–10 күн"
         ),
         "none": "жоқ",
-        "loan_line": "<b>{due}$</b> қайтарылады · {when} дейін",
-        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · {when} түседі",
+        "loan_line": "<b>{due}$</b> қайтарылады · {when} дейін · 🏦 {bank}",
+        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · {when} түседі · 🏦 {bank}",
         "b_loan": "💸 Несие алу", "b_repay": "✅ Несиені өтеу · {due}$", "b_deposit": "🏦 Салым ашу",
         "b_back": "⬅️ Артқа", "b_banks": "🏦 Банктер",
         "loan_first": (
@@ -11752,8 +11793,17 @@ BANK_TEXT = {
         "dep_loan": "⛔ Несие өтелмейінше (немесе баланс минуста болса) салым ашуға болмайды.",
         "no_funds": "💸 Әмиянда ақша жеткіліксіз (баланс: {bal}$).",
         "not_yours": "⛔ Бұл мәзір сіздікі емес — өзіңіз /profil жазыңыз.",
-        "n_loan": "🏅 <b>Gold Invest</b>: несие мерзімі бітті — әмияннан <b>{due}$</b> алынды.\n💰 Баланс: {bal}$",
-        "n_dep": "🏅 <b>Gold Invest</b>: салым мерзімі бітті — әмиянға <b>{payout}$</b> түсті (пайда +{profit}$).\n💰 Баланс: {bal}$",
+        "apply_note": "📝 Бұл банкте несие <b>өтініш арқылы</b> беріледі — банк иесі қарап, бекітеді.",
+        "apply_private": "📝 Өтініш жеке чатта беріледі: /profil → 🏦 Банктер.",
+        "purpose_ask": "📝 <b>{bank}</b> · {amount}$ · {days} күн → қайтарылады {due}$\n\nНесие алу <b>мақсатын</b> жазыңыз 👇",
+        "purpose_sent": "📨 Өтінішіңіз банк иесіне жіберілді. Жауапты күтіңіз ⏳",
+        "apply_pending": "⏳ Сізде қаралып жатқан несие өтініші бар.",
+        "apply_ok": "✅ <b>{bank}</b> несиеңізді бекітті! <b>+{amount}$</b>\n📅 {days} күн · қайтарылады {due}$ · мерзімі {when}",
+        "apply_no": "❌ <b>{bank}</b> өтінішіңізді қабылдамады.",
+        "apply_fail_owner": "😓 Банк иесіне хабар жетпеді — кейінірек көріңіз.",
+        "bank_closed": "⛔ Бұл банк қазір жабық.",
+        "n_loan": "🏦 <b>{bank}</b>: несие мерзімі бітті — әмияннан <b>{due}$</b> алынды.\n💰 Баланс: {bal}$",
+        "n_dep": "🏦 <b>{bank}</b>: салым мерзімі бітті — әмиянға <b>{payout}$</b> түсті (пайда +{profit}$).\n💰 Баланс: {bal}$",
     },
 }
 
@@ -11769,12 +11819,12 @@ def fmt_when(ts):
     return time.strftime("%d.%m %H:%M", time.gmtime(int(ts) + TASHKENT_OFFSET))
 
 
-def loan_due(amount, days):
-    return amount + round(amount * LOAN_RATE * days)
+def loan_due(amount, days, rate=LOAN_RATE):
+    return amount + round(amount * rate * days)
 
 
-def deposit_payout(amount, days):
-    return amount + round(amount * DEPOSIT_RATE * days)
+def deposit_payout(amount, days, rate=DEPOSIT_RATE):
+    return amount + round(amount * rate * days)
 
 
 def init_bank():
@@ -11808,19 +11858,82 @@ def init_bank():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_bank_deposits_user ON bank_deposits(user_id, status)")
+        # Ko'p bankli tizim: har bir bankning o'z foizlari, egasi va kredit berish tartibi bor.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS banks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                owner_id INTEGER NOT NULL,
+                loan_rate REAL NOT NULL,
+                deposit_rate REAL NOT NULL,
+                apply_mode INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS bank_loan_apps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bank_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                days INTEGER NOT NULL,
+                due INTEGER NOT NULL,
+                purpose TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL,
+                decided_by INTEGER,
+                decided_at INTEGER
+            )
+        """)
+        for table in ("bank_loans", "bank_deposits"):
+            if "bank_id" not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN bank_id INTEGER NOT NULL DEFAULT 1")
+        c.execute("UPDATE banks SET active=1 WHERE id=1")
+        if not c.execute("SELECT 1 FROM banks LIMIT 1").fetchone():
+            # Avvalgi yagona bank — Gold Invest — o'sha sozlamalar bilan 1-bank bo'ladi.
+            c.execute(
+                "INSERT INTO banks(id, name, owner_id, loan_rate, deposit_rate, apply_mode, active, created_at) "
+                "VALUES (1, 'Gold Invest', ?, ?, ?, 0, 1, ?)",
+                (min(CAREER_OWNER_IDS), LOAN_RATE, DEPOSIT_RATE, int(time.time())),
+            )
+
+
+BANK_FIELDS = ("id", "name", "owner_id", "loan_rate", "deposit_rate", "apply_mode", "active")
+MAIN_BANK_ID = 1   # Gold Invest — asosiy bank: boshqariladi, lekin yopilmaydi
+
+
+def bank_get(bank_id):
+    row = db().execute(f"SELECT {', '.join(BANK_FIELDS)} FROM banks WHERE id=?", (bank_id,)).fetchone()
+    return dict(zip(BANK_FIELDS, row)) if row else None
+
+
+def banks_all(only_active=False):
+    sql = f"SELECT {', '.join(BANK_FIELDS)} FROM banks" + (" WHERE active=1" if only_active else "") + " ORDER BY id"
+    return [dict(zip(BANK_FIELDS, r)) for r in db().execute(sql)]
+
+
+def pct(rate):
+    return f"{rate * 100:g}"
 
 
 def active_loan(user_id):
     return db().execute(
-        "SELECT id, amount, days, due, due_at FROM bank_loans WHERE user_id=? AND status='active'",
+        "SELECT id, amount, days, due, due_at, bank_id FROM bank_loans WHERE user_id=? AND status='active'",
         (user_id,),
     ).fetchone()
 
 
 def active_deposit(user_id):
     return db().execute(
-        "SELECT id, amount, days, payout, matures_at FROM bank_deposits WHERE user_id=? AND status='active'",
+        "SELECT id, amount, days, payout, matures_at, bank_id FROM bank_deposits WHERE user_id=? AND status='active'",
         (user_id,),
+    ).fetchone()
+
+
+def pending_app(user_id):
+    return db().execute(
+        "SELECT id, bank_id FROM bank_loan_apps WHERE user_id=? AND status='pending'", (user_id,)
     ).fetchone()
 
 
@@ -11849,95 +11962,114 @@ def bank_btn(uid, label, *parts):
     return InlineKeyboardButton(label, callback_data=":".join(["bk", str(uid), *map(str, parts)]))
 
 
+def bank_name(bank_id):
+    bank = bank_get(bank_id)
+    return escape(bank["name"]) if bank else "?"
+
+
 def bank_banks_view(chat_id, uid):
-    return bank_t(chat_id, "banks"), InlineKeyboardMarkup([
-        [bank_btn(uid, "🏅 Gold Invest", "gold")],
-    ])
+    rows = [
+        [bank_btn(uid, f"🏦 {b['name']} · 💸 {pct(b['loan_rate'])}% · 🏦 {pct(b['deposit_rate'])}%"
+                       + (" · 📝" if b["apply_mode"] else ""), "b", b["id"])]
+        for b in banks_all(only_active=True)
+    ]
+    return bank_t(chat_id, "banks"), InlineKeyboardMarkup(rows or [[bank_btn(uid, "🔄", "banks")]])
 
 
-def bank_home_view(chat_id, uid):
+def bank_home_view(chat_id, uid, bank):
     loan = active_loan(uid)
     dep = active_deposit(uid)
     loan_text = (
-        bank_t(chat_id, "loan_line", due=fmt_money(loan[3]), when=fmt_when(loan[4]))
+        bank_t(chat_id, "loan_line", due=fmt_money(loan[3]), when=fmt_when(loan[4]), bank=bank_name(loan[5]))
         if loan else bank_t(chat_id, "none")
     )
     dep_text = (
-        bank_t(chat_id, "dep_line", amount=fmt_money(dep[1]), payout=fmt_money(dep[3]), when=fmt_when(dep[4]))
+        bank_t(chat_id, "dep_line", amount=fmt_money(dep[1]), payout=fmt_money(dep[3]), when=fmt_when(dep[4]),
+               bank=bank_name(dep[5]))
         if dep else bank_t(chat_id, "none")
     )
     text = bank_t(
-        chat_id, "home", wallet=fmt_money(wallet_balance(uid)), loan=loan_text, deposit=dep_text,
-        loan_rate=round(LOAN_RATE * 100), dep_rate=round(DEPOSIT_RATE * 100),
+        chat_id, "home", bank=escape(bank["name"]), wallet=fmt_money(wallet_balance(uid)), loan=loan_text,
+        deposit=dep_text, loan_rate=pct(bank["loan_rate"]), dep_rate=pct(bank["deposit_rate"]),
     )
+    if bank["apply_mode"]:
+        text += "\n" + bank_t(chat_id, "apply_note")
     rows = []
     if loan:
-        rows.append([bank_btn(uid, bank_t(chat_id, "b_repay", due=fmt_money(loan[3])), "repay")])
+        rows.append([bank_btn(uid, bank_t(chat_id, "b_repay", due=fmt_money(loan[3])), "repay", bank["id"])])
     else:
-        rows.append([bank_btn(uid, bank_t(chat_id, "b_loan"), "loan")])
+        rows.append([bank_btn(uid, bank_t(chat_id, "b_loan"), "loan", bank["id"])])
     if not dep:
-        rows.append([bank_btn(uid, bank_t(chat_id, "b_deposit"), "dep")])
+        rows.append([bank_btn(uid, bank_t(chat_id, "b_deposit"), "dep", bank["id"])])
     rows.append([bank_btn(uid, bank_t(chat_id, "b_banks"), "banks")])
     return text, InlineKeyboardMarkup(rows)
 
 
-def bank_back_row(chat_id, uid):
-    return [bank_btn(uid, bank_t(chat_id, "b_back"), "gold")]
+def bank_back_row(chat_id, uid, bank):
+    return [bank_btn(uid, bank_t(chat_id, "b_back"), "b", bank["id"])]
 
 
-def bank_loan_term_view(chat_id, uid, amount, first):
-    rows, row = [], []
-    for d in LOAN_DAYS:
-        row.append(bank_btn(
-            uid, f"{d} {bank_t(chat_id, 'days')} → {fmt_money(loan_due(amount, d))}$", "lt", amount, d,
-        ))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append(bank_back_row(chat_id, uid))
-    rate = round(LOAN_RATE * 100)
+def bank_loan_term_view(chat_id, uid, bank, amount, first):
+    rate = bank["loan_rate"]
+    buttons = [
+        bank_btn(uid, f"{d} {bank_t(chat_id, 'days')} → {fmt_money(loan_due(amount, d, rate))}$", "lt", bank["id"], amount, d)
+        for d in LOAN_DAYS
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append(bank_back_row(chat_id, uid, bank))
     warn = bank_t(chat_id, "warn")
-    if first:
-        text = bank_t(chat_id, "loan_first", amount=fmt_money(amount), rate=rate, warn=warn)
-    else:
-        text = bank_t(chat_id, "loan_term", amount=fmt_money(amount), rate=rate, warn=warn)
+    key = "loan_first" if first else "loan_term"
+    text = bank_t(chat_id, key, amount=fmt_money(amount), rate=pct(rate), warn=warn)
+    if bank["apply_mode"]:
+        text += "\n\n" + bank_t(chat_id, "apply_note")
     return text, InlineKeyboardMarkup(rows)
 
 
-def bank_loan_amount_view(chat_id, uid):
+def bank_loan_amount_view(chat_id, uid, bank):
     per_day = bank_t(chat_id, "per_day")
+    rate = bank["loan_rate"]
     buttons = [
-        bank_btn(uid, f"{fmt_money(a)}$ · +{fmt_money(round(a * LOAN_RATE))}${per_day}", "la", a)
+        bank_btn(uid, f"{fmt_money(a)}$ · +{fmt_money(round(a * rate))}${per_day}", "la", bank["id"], a)
         for a in LOAN_AMOUNTS
     ]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-    rows.append(bank_back_row(chat_id, uid))
-    return bank_t(chat_id, "loan_amount", rate=round(LOAN_RATE * 100)), InlineKeyboardMarkup(rows)
+    rows.append(bank_back_row(chat_id, uid, bank))
+    return bank_t(chat_id, "loan_amount", rate=pct(rate)), InlineKeyboardMarkup(rows)
 
 
-def bank_dep_amount_view(chat_id, uid):
-    buttons = [bank_btn(uid, f"{fmt_money(a)}$", "da", a) for a in DEPOSIT_AMOUNTS]
+def bank_dep_amount_view(chat_id, uid, bank):
+    buttons = [bank_btn(uid, f"{fmt_money(a)}$", "da", bank["id"], a) for a in DEPOSIT_AMOUNTS]
     rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
-    rows.append(bank_back_row(chat_id, uid))
+    rows.append(bank_back_row(chat_id, uid, bank))
     text = bank_t(
-        chat_id, "dep_amount", rate=round(DEPOSIT_RATE * 100),
+        chat_id, "dep_amount", rate=pct(bank["deposit_rate"]),
         min=fmt_money(DEPOSIT_AMOUNTS[0]), max=fmt_money(DEPOSIT_AMOUNTS[-1]),
         wallet=fmt_money(wallet_balance(uid)),
     )
     return text, InlineKeyboardMarkup(rows)
 
 
-def bank_dep_term_view(chat_id, uid, amount):
+def bank_dep_term_view(chat_id, uid, bank, amount):
     days_label = bank_t(chat_id, "days")
+    rate = bank["deposit_rate"]
     buttons = [
-        bank_btn(uid, f"{d} {days_label} → {fmt_money(deposit_payout(amount, d))}$", "dt", amount, d)
+        bank_btn(uid, f"{d} {days_label} → {fmt_money(deposit_payout(amount, d, rate))}$", "dt", bank["id"], amount, d)
         for d in DEPOSIT_DAYS
     ]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-    rows.append(bank_back_row(chat_id, uid))
-    return bank_t(chat_id, "dep_term", amount=fmt_money(amount), rate=round(DEPOSIT_RATE * 100)), InlineKeyboardMarkup(rows)
+    rows.append(bank_back_row(chat_id, uid, bank))
+    return bank_t(chat_id, "dep_term", amount=fmt_money(amount), rate=pct(rate)), InlineKeyboardMarkup(rows)
+
+
+def issue_loan(c, uid, bank_id, amount, days, due, now):
+    """Kreditni beradi (tranzaksiya ichida). Qaytaradi: due_at."""
+    due_at = now + days * DAY_SECONDS
+    c.execute(
+        "INSERT INTO bank_loans(user_id, amount, days, due, taken_at, due_at, bank_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (uid, amount, days, due, now, due_at, bank_id),
+    )
+    _wallet_add(c, uid, amount)
+    return due_at
 
 
 async def cb_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11966,65 +12098,86 @@ async def cb_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show(bank_banks_view(chat_id, uid))
         return
 
-    if action == "gold":
+    # "gold" — eski xabarlardagi tugma (1-bank).
+    try:
+        bank = bank_get(1 if action == "gold" else int(parts[3]))
+    except (IndexError, ValueError):
+        bank = None
+    if not bank or not bank["active"]:
+        await q.answer(bank_t(chat_id, "bank_closed"), show_alert=True)
+        await show(bank_banks_view(chat_id, uid))
+        return
+    nums = [int(p) for p in parts[4:] if p.lstrip("-").isdigit()]
+
+    if action in ("b", "gold"):
         await q.answer()
-        await show(bank_home_view(chat_id, uid))
+        await show(bank_home_view(chat_id, uid, bank))
         return
 
     c = db()
     now = int(time.time())
 
-    if action == "loan":
+    async def loan_blocked():
         if active_loan(uid):
             await q.answer(bank_t(chat_id, "loan_has"), show_alert=True)
-            return
+            return True
+        if pending_app(uid):
+            await q.answer(bank_t(chat_id, "apply_pending"), show_alert=True)
+            return True
         if wallet_balance(uid) < 0:
             await q.answer(bank_t(chat_id, "loan_debt"), show_alert=True)
+            return True
+        return False
+
+    if action == "loan":
+        if await loan_blocked():
             return
         await q.answer()
         if had_loan_before(uid):
-            await show(bank_loan_amount_view(chat_id, uid))
+            await show(bank_loan_amount_view(chat_id, uid, bank))
         else:
-            await show(bank_loan_term_view(chat_id, uid, LOAN_FIRST, first=True))
+            await show(bank_loan_term_view(chat_id, uid, bank, LOAN_FIRST, first=True))
         return
 
     if action == "la":
-        amount = int(parts[3])
+        amount = nums[0] if nums else 0
         if amount not in LOAN_AMOUNTS or not had_loan_before(uid):
             await q.answer()
             return
         await q.answer()
-        await show(bank_loan_term_view(chat_id, uid, amount, first=False))
+        await show(bank_loan_term_view(chat_id, uid, bank, amount, first=False))
         return
 
     if action == "lt":
-        amount, days = int(parts[3]), int(parts[4])
+        amount, days = (nums + [0, 0])[:2]
         allowed = LOAN_AMOUNTS if had_loan_before(uid) else [LOAN_FIRST]
         if amount not in allowed or days not in LOAN_DAYS:
             await q.answer()
             return
-        if active_loan(uid):
-            await q.answer(bank_t(chat_id, "loan_has"), show_alert=True)
+        if await loan_blocked():
             return
-        if wallet_balance(uid) < 0:
-            await q.answer(bank_t(chat_id, "loan_debt"), show_alert=True)
-            return
-        due = loan_due(amount, days)
-        due_at = now + days * DAY_SECONDS
+        due = loan_due(amount, days, bank["loan_rate"])
         save_user(user)
+        if bank["apply_mode"]:
+            # Ariza rejimi: faqat maqsad so'raladi, keyin bank egasi ko'rib chiqadi.
+            if q.message.chat.type != ChatType.PRIVATE:
+                await q.answer(bank_t(chat_id, "apply_private"), show_alert=True)
+                return
+            context.user_data["bank_purpose"] = {"bank": bank["id"], "amount": amount, "days": days, "due": due}
+            await q.answer()
+            await show((bank_t(chat_id, "purpose_ask", bank=escape(bank["name"]), amount=fmt_money(amount),
+                               days=days, due=fmt_money(due)),
+                        InlineKeyboardMarkup([bank_back_row(chat_id, uid, bank)])))
+            return
         with c:
-            c.execute(
-                "INSERT INTO bank_loans(user_id, amount, days, due, taken_at, due_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (uid, amount, days, due, now, due_at),
-            )
-            _wallet_add(c, uid, amount)
+            due_at = issue_loan(c, uid, bank["id"], amount, days, due, now)
         await q.answer()
-        await show(bank_home_view(chat_id, uid), bank_t(
+        await show(bank_home_view(chat_id, uid, bank), bank_t(
             chat_id, "loan_ok", amount=fmt_money(amount), days=days, due=fmt_money(due), when=fmt_when(due_at),
         ))
         await log_money_event(
             context.bot,
-            f"🏅 <b>KREDIT</b>\n{person_name(uid)}: +{amount}$ · {days} kun · qaytariladi {due}$",
+            f"🏦 <b>KREDIT</b> · {escape(bank['name'])}\n{person_name(uid)}: +{amount}$ · {days} kun · qaytariladi {due}$",
         )
         return
 
@@ -12032,9 +12185,9 @@ async def cb_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loan = active_loan(uid)
         if not loan:
             await q.answer()
-            await show(bank_home_view(chat_id, uid))
+            await show(bank_home_view(chat_id, uid, bank))
             return
-        loan_id, _, _, due, _ = loan
+        loan_id, _, _, due, _, loan_bank = loan
         with c:
             paid = _wallet_take(c, uid, due)
             if paid:
@@ -12046,8 +12199,8 @@ async def cb_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer(bank_t(chat_id, "no_funds", bal=fmt_money(wallet_balance(uid))), show_alert=True)
             return
         await q.answer()
-        await show(bank_home_view(chat_id, uid), bank_t(chat_id, "repay_ok", due=fmt_money(due)))
-        await log_money_event(context.bot, f"🏅 <b>KREDIT TO‘LANDI</b>\n{person_name(uid)}: −{due}$")
+        await show(bank_home_view(chat_id, uid, bank), bank_t(chat_id, "repay_ok", due=fmt_money(due)))
+        await log_money_event(context.bot, f"🏦 <b>KREDIT TO‘LANDI</b> · {bank_name(loan_bank)}\n{person_name(uid)}: −{due}$")
         return
 
     if action == "dep":
@@ -12058,11 +12211,11 @@ async def cb_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer(bank_t(chat_id, "dep_loan"), show_alert=True)
             return
         await q.answer()
-        await show(bank_dep_amount_view(chat_id, uid))
+        await show(bank_dep_amount_view(chat_id, uid, bank))
         return
 
     if action == "da":
-        amount = int(parts[3])
+        amount = nums[0] if nums else 0
         if amount not in DEPOSIT_AMOUNTS:
             await q.answer()
             return
@@ -12070,11 +12223,11 @@ async def cb_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer(bank_t(chat_id, "no_funds", bal=fmt_money(wallet_balance(uid))), show_alert=True)
             return
         await q.answer()
-        await show(bank_dep_term_view(chat_id, uid, amount))
+        await show(bank_dep_term_view(chat_id, uid, bank, amount))
         return
 
     if action == "dt":
-        amount, days = int(parts[3]), int(parts[4])
+        amount, days = (nums + [0, 0])[:2]
         if amount not in DEPOSIT_AMOUNTS or days not in DEPOSIT_DAYS:
             await q.answer()
             return
@@ -12084,30 +12237,318 @@ async def cb_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if active_loan(uid):
             await q.answer(bank_t(chat_id, "dep_loan"), show_alert=True)
             return
-        payout = deposit_payout(amount, days)
+        payout = deposit_payout(amount, days, bank["deposit_rate"])
         matures_at = now + days * DAY_SECONDS
         with c:
             taken = _wallet_take(c, uid, amount)
             if taken:
                 c.execute(
-                    """INSERT INTO bank_deposits(user_id, amount, days, payout, created_at, matures_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (uid, amount, days, payout, now, matures_at),
+                    """INSERT INTO bank_deposits(user_id, amount, days, payout, created_at, matures_at, bank_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (uid, amount, days, payout, now, matures_at, bank["id"]),
                 )
         if not taken:
             await q.answer(bank_t(chat_id, "no_funds", bal=fmt_money(wallet_balance(uid))), show_alert=True)
             return
         await q.answer()
-        await show(bank_home_view(chat_id, uid), bank_t(
+        await show(bank_home_view(chat_id, uid, bank), bank_t(
             chat_id, "dep_ok", amount=fmt_money(amount), days=days, payout=fmt_money(payout), when=fmt_when(matures_at),
         ))
         await log_money_event(
             context.bot,
-            f"🏅 <b>OMONAT</b>\n{person_name(uid)}: −{amount}$ · {days} kun · tushadi {payout}$",
+            f"🏦 <b>OMONAT</b> · {escape(bank['name'])}\n{person_name(uid)}: −{amount}$ · {days} kun · tushadi {payout}$",
         )
         return
 
     await q.answer()
+
+
+# ── 📝 Kredit arizasi (bank ariza rejimida) ──
+
+def applicant_info(uid):
+    """Bank egasi uchun kredit oluvchi haqida to'liq ma'lumot."""
+    c = db()
+    wallet = wallet_balance(uid)
+    hist = c.execute(
+        "SELECT COUNT(*), COALESCE(SUM(amount), 0), COALESCE(SUM(status='paid'), 0), COALESCE(SUM(status='auto'), 0) "
+        "FROM bank_loans WHERE user_id=?", (uid,)
+    ).fetchone()
+    dep = active_deposit(uid)
+    games = c.execute(
+        "SELECT COALESCE(SUM(games), 0), COALESCE(SUM(wins), 0), COALESCE(SUM(points), 0) FROM chat_stats WHERE user_id=?",
+        (uid,),
+    ).fetchone()
+    birja = sum(value for *_, value in birja_portfolio_value(uid))
+    pair = active_pair(uid)
+    kids = c.execute(
+        "SELECT COUNT(*) FROM family_children WHERE parent1_id=? OR parent2_id=?", (uid, uid)
+    ).fetchone()[0]
+    lines = [
+        f"💰 Hamyon: <b>{fmt_money(wallet)}$</b>" + (" 🔻 (minusda)" if wallet < 0 else ""),
+        f"🏦 Faol omonat: " + (f"{fmt_money(dep[1])}$ → {fmt_money(dep[3])}$ ({bank_name(dep[5])})" if dep else "yo‘q"),
+        f"📈 Birja portfeli: {fmt_money(round(birja))}$",
+        f"📜 Kredit tarixi: {hist[0]} ta (jami {fmt_money(hist[1])}$) · ✅ o‘z vaqtida: {hist[2]} · ⚠️ avto-yechilgan: {hist[3]}",
+        f"🎮 O‘yinlar: {games[0]} ta · g‘alaba {games[1]} · {games[2]} ball",
+        f"💞 Juftlik: {'bor' if pair else 'yo‘q'} · 👶 Farzandlar: {kids}",
+    ]
+    return "\n".join(lines)
+
+
+async def bank_purpose_text(update, context):
+    """Shaxsiy chatda kredit maqsadini qabul qilib, arizani bank egasiga yuboradi. True — qayta ishlandi."""
+    state = context.user_data.pop("bank_purpose", None)
+    if not state:
+        return False
+    msg = update.effective_message
+    user = update.effective_user
+    uid = user.id
+    bank = bank_get(state["bank"])
+    purpose = msg.text.strip()[:500]
+    if not bank or not bank["active"] or not bank["apply_mode"]:
+        await msg.reply_text(bank_t(uid, "bank_closed"))
+        return True
+    if active_loan(uid) or pending_app(uid) or wallet_balance(uid) < 0:
+        await msg.reply_text(bank_t(uid, "apply_pending" if pending_app(uid) else "loan_has"))
+        return True
+    c = db()
+    with c:
+        app_id = c.execute(
+            "INSERT INTO bank_loan_apps(bank_id, user_id, amount, days, due, purpose, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (bank["id"], uid, state["amount"], state["days"], state["due"], purpose, int(time.time())),
+        ).lastrowid
+    text = (
+        f"📝 <b>KREDIT ARIZASI</b> #{app_id}\n\n"
+        f"{user_mention(uid, user.first_name)} (<code>{uid}</code>) sizning <b>{escape(bank['name'])}</b> "
+        f"bankingizdan kredit olmoqchi.\n\n"
+        f"💵 Summa: <b>{fmt_money(state['amount'])}$</b> · 📅 {state['days']} kun · "
+        f"💳 qaytaradi: <b>{fmt_money(state['due'])}$</b> ({pct(bank['loan_rate'])}% / kun)\n"
+        f"🎯 Maqsad: <i>{escape(purpose)}</i>\n\n"
+        f"<b>Ma’lumotlar:</b>\n{applicant_info(uid)}"
+    )
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"bka:{app_id}:yes"),
+        InlineKeyboardButton("❌ Rad etish", callback_data=f"bka:{app_id}:no"),
+    ]])
+    recipients = [bank["owner_id"]] + [o for o in sorted(CAREER_OWNER_IDS) if o != bank["owner_id"]]
+    delivered = 0
+    for rid in recipients:
+        try:
+            await context.bot.send_message(rid, text, reply_markup=kb)
+            delivered += 1
+        except TelegramError:
+            pass
+        if delivered and rid == bank["owner_id"]:
+            break   # bank egasiga yetdi — bot egalarini bezovta qilmaymiz
+    if not delivered:
+        with c:
+            c.execute("UPDATE bank_loan_apps SET status='cancelled' WHERE id=?", (app_id,))
+        await msg.reply_text(bank_t(uid, "apply_fail_owner"))
+        return True
+    await msg.reply_text(bank_t(uid, "purpose_sent"))
+    return True
+
+
+async def cb_bank_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    _, app_text, answer = q.data.split(":")
+    c = db()
+    row = c.execute(
+        "SELECT bank_id, user_id, amount, days, due, status FROM bank_loan_apps WHERE id=?", (int(app_text),)
+    ).fetchone()
+    if not row:
+        await q.answer("Ariza topilmadi.", show_alert=True)
+        return
+    bank_id, uid, amount, days, due, status = row
+    bank = bank_get(bank_id)
+    decider = q.from_user.id
+    if decider not in CAREER_OWNER_IDS and (not bank or decider != bank["owner_id"]):
+        await q.answer("⛔ Faqat bank egasi qaror qila oladi.", show_alert=True)
+        return
+    if status != "pending":
+        await q.answer("Bu ariza allaqachon ko‘rib chiqilgan.", show_alert=True)
+        return
+    now = int(time.time())
+    name = escape(bank["name"]) if bank else "?"
+    if answer == "yes":
+        if active_loan(uid) or wallet_balance(uid) < 0:
+            verdict, ok = "rejected", False
+            note = "⚠️ Tasdiqlab bo‘lmadi: foydalanuvchida faol kredit bor yoki balansi minusda — ariza yopildi."
+        else:
+            with c:
+                cur = c.execute(
+                    "UPDATE bank_loan_apps SET status='approved', decided_by=?, decided_at=? WHERE id=? AND status='pending'",
+                    (decider, now, int(app_text)),
+                )
+                due_at = issue_loan(c, uid, bank_id, amount, days, due, now) if cur.rowcount == 1 else None
+            if due_at is None:
+                await q.answer("Bu ariza allaqachon ko‘rib chiqilgan.", show_alert=True)
+                return
+            verdict, ok = "approved", True
+            note = f"✅ Tasdiqlandi — {fmt_money(amount)}$ berildi ({user_mention(decider, q.from_user.first_name)})"
+            await bank_notify(context.bot, uid, "apply_ok", bank=name, amount=fmt_money(amount), days=days,
+                              due=fmt_money(due), when=fmt_when(due_at))
+            await log_money_event(
+                context.bot,
+                f"🏦 <b>KREDIT (ariza #{app_text})</b> · {name}\n{person_name(uid)}: +{amount}$ · {days} kun · qaytariladi {due}$",
+            )
+    else:
+        verdict, ok = "rejected", False
+        note = f"❌ Rad etildi ({user_mention(decider, q.from_user.first_name)})"
+    if not ok:
+        with c:
+            c.execute(
+                "UPDATE bank_loan_apps SET status=?, decided_by=?, decided_at=? WHERE id=? AND status='pending'",
+                (verdict, decider, now, int(app_text)),
+            )
+        await bank_notify(context.bot, uid, "apply_no", bank=name)
+    await q.answer()
+    try:
+        await q.edit_message_text(q.message.text_html + "\n\n" + note, reply_markup=None)
+    except TelegramError:
+        pass
+
+
+# ── 👑 Owner panel: banklar boshqaruvi ──
+
+def panel_banks_view():
+    rows = []
+    for b in banks_all():
+        mark = "" if b["active"] else " ⛔"
+        mode = " 📝" if b["apply_mode"] else ""
+        rows.append([InlineKeyboardButton(
+            f"🏦 {b['name']} · {pct(b['loan_rate'])}% / {pct(b['deposit_rate'])}%{mode}{mark}",
+            callback_data=f"panel:bank_v:{b['id']}",
+        )])
+    rows.append([InlineKeyboardButton("➕ Bank qo‘shish", callback_data="panel:bank_add")])
+    rows.append([InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")])
+    text = (
+        "🏦 <b>BANKLAR BOSHQARUVI</b>\n\n"
+        "Bankni tanlang yoki yangisini qo‘shing.\n"
+        "💸 kredit % / 🏦 omonat % (kunlik) · 📝 — kredit ariza orqali · ⛔ — yopiq"
+    )
+    return text, InlineKeyboardMarkup(rows)
+
+
+def panel_bank_view(bank_id):
+    b = bank_get(bank_id)
+    if not b:
+        return panel_banks_view()
+    c = db()
+    loans = c.execute(
+        "SELECT COUNT(*), COALESCE(SUM(due), 0) FROM bank_loans WHERE bank_id=? AND status='active'", (bank_id,)
+    ).fetchone()
+    deps = c.execute(
+        "SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM bank_deposits WHERE bank_id=? AND status='active'", (bank_id,)
+    ).fetchone()
+    apps = c.execute(
+        "SELECT COUNT(*) FROM bank_loan_apps WHERE bank_id=? AND status='pending'", (bank_id,)
+    ).fetchone()[0]
+    text = (
+        f"🏦 <b>{escape(b['name'])}</b>{'' if b['active'] else ' ⛔ yopiq'}\n\n"
+        f"👤 Egasi: {person_name(b['owner_id'])} (<code>{b['owner_id']}</code>)\n"
+        f"💸 Kredit foizi: <b>{pct(b['loan_rate'])}%</b> / kun\n"
+        f"🏦 Omonat foizi: <b>{pct(b['deposit_rate'])}%</b> / kun\n"
+        f"📝 Kredit berish: <b>{'ariza orqali (egasi tasdiqlaydi)' if b['apply_mode'] else 'avtomatik'}</b>\n\n"
+        f"📊 Faol kreditlar: {loans[0]} ta · {fmt_money(loans[1])}$\n"
+        f"🏦 Faol omonatlar: {deps[0]} ta · {fmt_money(deps[1])}$\n"
+        f"⏳ Kutilayotgan arizalar: {apps} ta"
+    )
+    bid = b["id"]
+    rows = [
+        [InlineKeyboardButton("➖ Kredit %", callback_data=f"panel:bank_lr:{bid}:down"),
+         InlineKeyboardButton("➕ Kredit %", callback_data=f"panel:bank_lr:{bid}:up")],
+        [InlineKeyboardButton("➖ Omonat %", callback_data=f"panel:bank_dr:{bid}:down"),
+         InlineKeyboardButton("➕ Omonat %", callback_data=f"panel:bank_dr:{bid}:up")],
+        [InlineKeyboardButton(f"📝 Ariza orqali: {'✅' if b['apply_mode'] else '❌'}", callback_data=f"panel:bank_mode:{bid}")],
+        [InlineKeyboardButton("👤 Egasini o‘zgartirish", callback_data=f"panel:bank_owner:{bid}")],
+    ]
+    if bid != MAIN_BANK_ID:
+        rows.append([InlineKeyboardButton("⛔ Bankni yopish" if b["active"] else "✅ Bankni ochish",
+                                          callback_data=f"panel:bank_act:{bid}")])
+    else:
+        text += "\n\n🏅 Asosiy bank — doim ochiq, faqat sozlamalari o‘zgaradi."
+    rows.append([InlineKeyboardButton("⬅️ Banklar", callback_data="panel:banks")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+PANEL_BANK_CANCEL = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:banks")]])
+
+
+async def panel_bank_callback(query, context):
+    parts = query.data.split(":")
+    action = parts[1]
+    bid = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+    context.user_data.pop("panel_bank_state", None)
+    c = db()
+    if action == "bank_add":
+        context.user_data["panel_bank_state"] = {"kind": "add"}
+        await query.edit_message_text("🏦 Yangi bank nomini yuboring (2–40 belgi):", reply_markup=PANEL_BANK_CANCEL)
+        return
+    if action == "bank_owner" and bid:
+        context.user_data["panel_bank_state"] = {"kind": "owner", "bank": bid}
+        await query.edit_message_text(
+            "👤 Bankning yangi egasining Telegram ID sini yoki @username ini yuboring:", reply_markup=PANEL_BANK_CANCEL,
+        )
+        return
+    b = bank_get(bid) if bid else None
+    if b:
+        if action in ("bank_lr", "bank_dr"):
+            col, lo, hi = ("loan_rate", 0.01, 0.50) if action == "bank_lr" else ("deposit_rate", 0.0, 0.20)
+            step = 0.01 if parts[3] == "up" else -0.01
+            value = round(min(hi, max(lo, b[col] + step)), 4)
+            with c:
+                c.execute(f"UPDATE banks SET {col}=? WHERE id=?", (value, bid))
+        elif action == "bank_mode":
+            with c:
+                c.execute("UPDATE banks SET apply_mode=1-apply_mode WHERE id=?", (bid,))
+        elif action == "bank_act" and bid != MAIN_BANK_ID:
+            with c:
+                c.execute("UPDATE banks SET active=1-active WHERE id=?", (bid,))
+        text, kb = panel_bank_view(bid)
+    else:
+        text, kb = panel_banks_view()
+    try:
+        await query.edit_message_text(text, reply_markup=kb)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
+async def panel_bank_text(update, context):
+    """Owner panel: yangi bank nomi yoki bank egasi ID si."""
+    state = context.user_data.get("panel_bank_state")
+    msg = update.effective_message
+    raw = (msg.text or "").strip()
+    c = db()
+    if state["kind"] == "add":
+        if not 2 <= len(raw) <= 40:
+            await msg.reply_text("❌ Nom 2–40 belgi bo‘lsin. Qayta yuboring:", reply_markup=PANEL_BANK_CANCEL)
+            return
+        with c:
+            bid = c.execute(
+                "INSERT INTO banks(name, owner_id, loan_rate, deposit_rate, apply_mode, active, created_at) "
+                "VALUES (?, ?, ?, ?, 0, 1, ?)",
+                (raw, update.effective_user.id, LOAN_RATE, DEPOSIT_RATE, int(time.time())),
+            ).lastrowid
+        context.user_data.pop("panel_bank_state", None)
+        text, kb = panel_bank_view(bid)
+        await msg.reply_text("✅ Yangi bank qo‘shildi!\n\n" + text, reply_markup=kb)
+        return
+    # kind == "owner"
+    if raw.startswith("@"):
+        row = c.execute("SELECT user_id FROM users WHERE lower(username)=lower(?)", (raw[1:],)).fetchone()
+    elif raw.isdigit():
+        row = (int(raw),)
+    else:
+        row = None
+    if not row:
+        await msg.reply_text("❌ Foydalanuvchi topilmadi. ID yoki @username yuboring:", reply_markup=PANEL_BANK_CANCEL)
+        return
+    with c:
+        c.execute("UPDATE banks SET owner_id=? WHERE id=?", (row[0], state["bank"]))
+    context.user_data.pop("panel_bank_state", None)
+    text, kb = panel_bank_view(state["bank"])
+    await msg.reply_text("✅ Bank egasi o‘zgartirildi.\n\n" + text, reply_markup=kb)
 
 
 async def bank_settle_due(bot):
@@ -12115,9 +12556,9 @@ async def bank_settle_due(bot):
     now = int(time.time())
     c = db()
     loans = c.execute(
-        "SELECT id, user_id, due FROM bank_loans WHERE status='active' AND due_at<=?", (now,)
+        "SELECT id, user_id, due, bank_id FROM bank_loans WHERE status='active' AND due_at<=?", (now,)
     ).fetchall()
-    for loan_id, uid, due in loans:
+    for loan_id, uid, due, bank_id in loans:
         with c:
             cur = c.execute(
                 "UPDATE bank_loans SET status='auto', closed_at=? WHERE id=? AND status='active'",
@@ -12127,13 +12568,13 @@ async def bank_settle_due(bot):
                 continue
             _wallet_add(c, uid, -due)   # balans minusga tushishi mumkin — bu qarz
         bal = wallet_balance(uid)
-        await bank_notify(bot, uid, "n_loan", due=fmt_money(due), bal=fmt_money(bal))
+        await bank_notify(bot, uid, "n_loan", due=fmt_money(due), bal=fmt_money(bal), bank=bank_name(bank_id))
         await log_money_event(bot, f"🏅 <b>KREDIT AVTO-YECHILDI</b>\n{person_name(uid)}: −{due}$ (balans {bal}$)")
 
     deposits = c.execute(
-        "SELECT id, user_id, amount, payout FROM bank_deposits WHERE status='active' AND matures_at<=?", (now,)
+        "SELECT id, user_id, amount, payout, bank_id FROM bank_deposits WHERE status='active' AND matures_at<=?", (now,)
     ).fetchall()
-    for dep_id, uid, amount, payout in deposits:
+    for dep_id, uid, amount, payout, bank_id in deposits:
         with c:
             cur = c.execute(
                 "UPDATE bank_deposits SET status='paid', closed_at=? WHERE id=? AND status='active'",
@@ -12143,7 +12584,8 @@ async def bank_settle_due(bot):
                 continue
             _wallet_add(c, uid, payout)
         bal = wallet_balance(uid)
-        await bank_notify(bot, uid, "n_dep", payout=fmt_money(payout), profit=fmt_money(payout - amount), bal=fmt_money(bal))
+        await bank_notify(bot, uid, "n_dep", payout=fmt_money(payout), profit=fmt_money(payout - amount),
+                          bal=fmt_money(bal), bank=bank_name(bank_id))
         await log_money_event(bot, f"🏅 <b>OMONAT TUSHDI</b>\n{person_name(uid)}: +{payout}$")
 
 
@@ -15221,6 +15663,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|croc|casino|frog|back|menu)$"))
     app.add_handler(CallbackQueryHandler(cb_frog, pattern=r"^fr:"))
     app.add_handler(CallbackQueryHandler(cb_bank, pattern=r"^bk:\d+:"))
+    app.add_handler(CallbackQueryHandler(cb_bank_app, pattern=r"^bka:\d+:(yes|no)$"))
     app.add_handler(CallbackQueryHandler(cb_birja, pattern=r"^bx:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_kid, pattern=r"^kid:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_captcha, pattern=r"^cap:\d+:\d+$"))

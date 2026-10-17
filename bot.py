@@ -4533,7 +4533,7 @@ HEAT = [(3, "heat_hot"), (10, "heat_warm"), (25, "heat_cool"), (10**9, "heat_col
 
 
 # ───────────────────────────── 📢 "bot" — guruh a'zolarini chaqirish ─────────────────────────────
-# Bot egasi yoki bot paneli admini guruhda "bot" deb yozsa, bot guruh a'zolarini
+# Bot egasi, bot paneli admini yoki guruh admini guruhda "bot" deb yozsa, bot guruh a'zolarini
 # bittadan, har biri alohida xabarda chaqiradi. "bot kelish" — har bir a'zo "@username kelish" ko'rinishida
 # chaqiriladi. "stop" — jarayonni to'xtatadi. "tez 0.7" — xabarlar oralig'i (soniya).
 # Telegram botga guruh a'zolarining to'liq ro'yxatini bermaydi, shuning uchun bot
@@ -4892,6 +4892,17 @@ async def tag_members(bot, chat_id, note=""):
     await bot.send_message(chat_id, tag_t(chat_id, "done", n=tagged))
 
 
+async def can_tag(bot, msg, user):
+    """Bot egalari, bot paneli adminlari va shu guruh adminlari (anonim admin ham)."""
+    if msg.sender_chat and msg.sender_chat.id == msg.chat_id:
+        return True   # guruh nomidan yozgan anonim admin
+    if user.is_bot:
+        return False
+    if is_panel_admin(user.id):
+        return True
+    return await is_admin(bot, msg.chat_id, user.id)
+
+
 async def maybe_tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """'bot [matn]' / 'stop' buyrug'i bo'lsa — bajaradi va True qaytaradi."""
     msg = update.effective_message
@@ -4903,10 +4914,10 @@ async def maybe_tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_speed = first.lower() in TAG_SPEED_WORDS and len(rest.split()) <= 1
     if not is_start and not is_speed and text not in TAG_STOP_WORDS:
         return False
-    if not is_panel_admin(user.id):
-        return False
 
     chat_id = msg.chat_id
+    if not await can_tag(context.bot, msg, user):
+        return False
 
     if is_speed:
         limits = {"lo": TAG_DELAY_MIN, "hi": TAG_DELAY_MAX}
@@ -4956,10 +4967,14 @@ async def maybe_tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     user = update.effective_user
-    if not msg or not msg.text or not user or user.is_bot:
+    if not msg or not msg.text or not user:
         return
 
+    # Anonim admin xabari bot (GroupAnonymousBot) nomidan keladi — shuning uchun
+    # "bot" buyrug'i is_bot tekshiruvidan oldin ko'riladi.
     if await maybe_tag_all(update, context):
+        return
+    if user.is_bot:
         return
 
     chat_id = msg.chat_id

@@ -4535,7 +4535,7 @@ HEAT = [(3, "heat_hot"), (10, "heat_warm"), (25, "heat_cool"), (10**9, "heat_col
 # ───────────────────────────── 📢 "bot" — guruh a'zolarini chaqirish ─────────────────────────────
 # Bot egasi yoki bot paneli admini guruhda "bot" deb yozsa, bot guruh a'zolarini
 # bittadan, har biri alohida xabarda chaqiradi. "bot kelish" — har bir a'zo "@username kelish" ko'rinishida
-# chaqiriladi. "stop" — jarayonni to'xtatadi.
+# chaqiriladi. "stop" — jarayonni to'xtatadi. "tez 0.7" — xabarlar oralig'i (soniya).
 # Telegram botga guruh a'zolarining to'liq ro'yxatini bermaydi, shuning uchun bot
 # guruhda yozgan / qo'shilgan a'zolarni group_members jadvalida o'zi yig'ib boradi.
 
@@ -4543,7 +4543,10 @@ TAG_WORDS = {"bot", "бот"}
 TAG_STOP_WORDS = {"stop", "стоп", "bot stop", "бот стоп"}
 TAG_TEXT_MAX = 200      # "bot ..." dan keyingi matnning eng katta uzunligi
 TAG_BATCH = 1           # bitta xabardagi belgilar soni (har bir a'zo — alohida xabar)
-TAG_DELAY = 3.0         # xabarlar orasidagi pauza: guruhda ~20 xabar/daqiqa limiti bor
+TAG_DELAY = 1.5         # xabarlar orasidagi standart pauza (soniya)
+TAG_DELAY_MIN = 0.7     # "tez" bilan o'rnatiladigan eng qisqa pauza
+TAG_DELAY_MAX = 1.5     # "tez" bilan o'rnatiladigan eng uzun pauza
+TAG_SPEED_WORDS = {"tez", "speed", "скорость", "жылдамдық"}
 TAG_TASKS: dict[int, asyncio.Task] = {}
 
 TAG_TEXT = {
@@ -4553,6 +4556,9 @@ TAG_TEXT = {
         "empty": "🤷 Bot hali bu guruh a'zolarini bilmaydi. A'zolar guruhda yozganda ular ro'yxatga qo'shiladi.",
         "done": "✅ <b>{n}</b> ta a'zo chaqirildi.",
         "stopped": "🛑 Chaqirish to'xtatildi ({n} ta a'zo chaqirildi).",
+        "speed_set": "⚡ Tag tezligi: har bir xabar oralig'i <b>{d}</b> soniya.",
+        "speed_now": "⚡ Hozirgi tag tezligi: <b>{d}</b> soniya.\nO'zgartirish: <b>tez {lo}</b> … <b>tez {hi}</b>",
+        "speed_bad": "⚠️ Tezlik {lo} dan {hi} soniyagacha bo'lishi kerak. Masalan: <b>tez 0.7</b>",
     },
     "eng": {
         "head": "📢 <b>Attention!</b>",
@@ -4560,6 +4566,9 @@ TAG_TEXT = {
         "empty": "🤷 The bot doesn't know this group's members yet. Members are added when they write in the group.",
         "done": "✅ <b>{n}</b> members tagged.",
         "stopped": "🛑 Tagging stopped ({n} members tagged).",
+        "speed_set": "⚡ Tag speed: <b>{d}</b> s between messages.",
+        "speed_now": "⚡ Current tag speed: <b>{d}</b> s.\nChange it: <b>speed {lo}</b> … <b>speed {hi}</b>",
+        "speed_bad": "⚠️ Speed must be between {lo} and {hi} seconds. Example: <b>speed 0.7</b>",
     },
     "ru": {
         "head": "📢 <b>Внимание!</b>",
@@ -4567,6 +4576,9 @@ TAG_TEXT = {
         "empty": "🤷 Бот пока не знает участников этой группы. Они добавляются, когда пишут в группе.",
         "done": "✅ Упомянуто участников: <b>{n}</b>.",
         "stopped": "🛑 Упоминание остановлено (упомянуто: {n}).",
+        "speed_set": "⚡ Скорость упоминаний: <b>{d}</b> с между сообщениями.",
+        "speed_now": "⚡ Текущая скорость: <b>{d}</b> с.\nИзменить: <b>скорость {lo}</b> … <b>скорость {hi}</b>",
+        "speed_bad": "⚠️ Скорость должна быть от {lo} до {hi} секунд. Например: <b>скорость 0.7</b>",
     },
     "kz": {
         "head": "📢 <b>Назар аударыңыз!</b>",
@@ -4574,6 +4586,9 @@ TAG_TEXT = {
         "empty": "🤷 Бот бұл топтың мүшелерін әлі білмейді. Олар топта жазғанда тізімге қосылады.",
         "done": "✅ <b>{n}</b> мүше белгіленді.",
         "stopped": "🛑 Белгілеу тоқтатылды ({n} мүше белгіленді).",
+        "speed_set": "⚡ Белгілеу жылдамдығы: хабарлар арасы <b>{d}</b> секунд.",
+        "speed_now": "⚡ Қазіргі жылдамдық: <b>{d}</b> секунд.\nӨзгерту: <b>жылдамдық {lo}</b> … <b>жылдамдық {hi}</b>",
+        "speed_bad": "⚠️ Жылдамдық {lo} мен {hi} секунд аралығында болуы керек. Мысалы: <b>жылдамдық 0.7</b>",
     },
 }
 
@@ -4595,11 +4610,34 @@ def init_group_members():
                 PRIMARY KEY (chat_id, user_id)
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS tag_speed (
+                chat_id INTEGER PRIMARY KEY,
+                delay REAL NOT NULL
+            )
+        """)
         # Birinchi ishga tushishda guruhda o'ynagan a'zolarni ro'yxatga olamiz.
         c.execute("""
             INSERT OR IGNORE INTO group_members(chat_id, user_id, last_seen)
             SELECT chat_id, user_id, ? FROM chat_stats WHERE chat_id < 0
         """, (datetime.utcnow().isoformat(),))
+
+
+def tag_delay(chat_id):
+    row = db().execute("SELECT delay FROM tag_speed WHERE chat_id=?", (chat_id,)).fetchone()
+    if not row:
+        return TAG_DELAY
+    return min(TAG_DELAY_MAX, max(TAG_DELAY_MIN, float(row[0])))
+
+
+def set_tag_delay(chat_id, delay):
+    c = db()
+    with c:
+        c.execute(
+            "INSERT INTO tag_speed(chat_id, delay) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET delay = excluded.delay",
+            (chat_id, delay),
+        )
 
 
 def member_seen(chat_id, user):
@@ -4698,7 +4736,8 @@ async def tag_members(bot, chat_id, note=""):
             await _send_retry(lambda: bot.send_message(chat_id, text))
             tagged += len(batch)
             if i + TAG_BATCH < len(items):
-                await asyncio.sleep(TAG_DELAY)
+                # Har safar o'qiymiz — "tez" jarayon davomida ham darhol ta'sir qiladi.
+                await asyncio.sleep(tag_delay(chat_id))
     except asyncio.CancelledError:
         await bot.send_message(chat_id, tag_t(chat_id, "stopped", n=tagged))
         raise
@@ -4713,12 +4752,30 @@ async def maybe_tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = raw.lower()
     first, _, rest = raw.partition(" ")
     is_start = first.lower() in TAG_WORDS
-    if not is_start and text not in TAG_STOP_WORDS:
+    is_speed = first.lower() in TAG_SPEED_WORDS and len(rest.split()) <= 1
+    if not is_start and not is_speed and text not in TAG_STOP_WORDS:
         return False
     if not is_panel_admin(user.id):
         return False
 
     chat_id = msg.chat_id
+
+    if is_speed:
+        limits = {"lo": TAG_DELAY_MIN, "hi": TAG_DELAY_MAX}
+        value = rest.strip().replace(",", ".")
+        if not value:
+            await msg.reply_text(tag_t(chat_id, "speed_now", d=tag_delay(chat_id), **limits))
+            return True
+        try:
+            delay = round(float(value), 2)
+        except ValueError:
+            return False   # "tez ketdi" kabi oddiy gap — buyruq emas
+        if not TAG_DELAY_MIN <= delay <= TAG_DELAY_MAX:
+            await msg.reply_text(tag_t(chat_id, "speed_bad", **limits))
+            return True
+        set_tag_delay(chat_id, delay)
+        await msg.reply_text(tag_t(chat_id, "speed_set", d=delay))
+        return True
     running = TAG_TASKS.get(chat_id)
 
     if text in TAG_STOP_WORDS:

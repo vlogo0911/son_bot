@@ -1749,10 +1749,10 @@ async def cmd_oila(update: Update, context: ContextTypes.DEFAULT_TYPE):
     money = sum(int(r[1] or 0) for r in money_rows)
     count = family_child_count(pair[0])
     child_rows = db().execute(
-        "SELECT child_name,gender FROM family_children WHERE pair_id=? ORDER BY id",
+        "SELECT child_name,gender,id FROM family_children WHERE pair_id=? ORDER BY id",
         (pair[0],),
     ).fetchall()
-    names = [f"👶 {escape(n)} — {escape(child_gender_label(user.id, g))}" for n, g in child_rows]
+    names = [kid_summary(user.id, n, g, kid_row(kid_id)) for n, g, kid_id in child_rows]
     a, b = person_name(uid1), person_name(uid2)
     price = next_child_cost(pair[0])
     lang = family_lang(user.id)
@@ -1773,9 +1773,10 @@ async def cmd_oila(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, (_pid, x, y, total, cash) in enumerate(rows, 1):
         ranking.append(f"{i}. {person_name(x)} ❤️ {person_name(y)} — <b>{total}</b> 🏆 · <b>{cash}</b> 💵")
     lines.append(family_text(user.id, "rank", ranking="\n".join(ranking) if ranking else "—"))
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(family_text(user.id, "child"), url=family_url(context, "child"))
-    ]])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(family_text(user.id, "child"), url=family_url(context, "child"))],
+        [InlineKeyboardButton(kid_t(user.id, "oila_btn"), callback_data=f"kid:{user.id}:open")],
+    ])
     await msg.reply_text("\n".join(lines), reply_markup=kb)
 
 
@@ -3160,12 +3161,12 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     child_lines = []
     if pair:
         child_rows = c.execute(
-            "SELECT child_name,gender FROM family_children WHERE pair_id=? ORDER BY id",
+            "SELECT child_name,gender,id FROM family_children WHERE pair_id=? ORDER BY id",
             (pair[0],),
         ).fetchall()
         child_lines = [
-            f"👶 {escape(child_name)} — {escape(child_gender_label(user.id, child_gender))}"
-            for child_name, child_gender in child_rows
+            kid_summary(user.id, child_name, child_gender, kid_row(kid_id))
+            for child_name, child_gender, kid_id in child_rows
         ]
     profile_lang = family_lang(user.id)
     child_prefix = {"uz": "👶 Farzandlar", "eng": "👶 Children", "ru": "👶 Дети", "kz": "👶 Балалар"}.get(profile_lang, "👶 Children")
@@ -8245,20 +8246,21 @@ async def post_init(application: Application):
     application.create_task(croc_prepare_words(), name="croc-words")
     application.create_task(bank_worker(application), name="bank-worker")
     application.create_task(birja_worker(application), name="birja-worker")
+    application.create_task(kid_worker(application), name="kid-worker")
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
-            ("reyting", "🏆 Reyting"), ("aktiv", "📊 Eng faollar"), ("profil", "👤 Profil"), ("scrash", "🛑 Crashni to‘xtatish"),
+            ("reyting", "🏆 Reyting"), ("aktiv", "📊 Eng faollar"), ("profil", "👤 Profil"), ("farzand", "👶 Farzandlarim"), ("scrash", "🛑 Crashni to‘xtatish"),
             ("qoidalar", "📚 Qoidalar"), ("lang", "🌐 Til"), ("help", "❓ Yordam"),
         ],
         "en": [
             ("emps", "🎮 Choose a game"), ("stop", "🛑 Stop the game"),
-            ("reyting", "🏆 Leaderboard"), ("aktiv", "📊 Most active"), ("profil", "👤 Profile"), ("scrash", "🛑 Stop Crash"),
+            ("reyting", "🏆 Leaderboard"), ("aktiv", "📊 Most active"), ("profil", "👤 Profile"), ("farzand", "👶 My children"), ("scrash", "🛑 Stop Crash"),
             ("qoidalar", "📚 Rules"), ("lang", "🌐 Language"), ("help", "❓ Help"),
         ],
         "ru": [
             ("emps", "🎮 Выбрать игру"), ("stop", "🛑 Остановить игру"),
-            ("reyting", "🏆 Рейтинг"), ("aktiv", "📊 Самые активные"), ("profil", "👤 Профиль"), ("scrash", "🛑 Остановить Crash"),
+            ("reyting", "🏆 Рейтинг"), ("aktiv", "📊 Самые активные"), ("profil", "👤 Профиль"), ("farzand", "👶 Мои дети"), ("scrash", "🛑 Остановить Crash"),
             ("qoidalar", "📚 Правила"), ("lang", "🌐 Язык"), ("help", "❓ Помощь"),
         ],
     }
@@ -10300,7 +10302,8 @@ async def cmd_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     who = {"uz":"Kimga yubormoqchisiz?","eng":"Who do you want to send it to?","ru":"Кому хотите отправить?","kz":"Кімге жібергіңіз келеді?"}
     kb = InlineKeyboardMarkup([
       [InlineKeyboardButton({"uz":"💞 Juftimga","eng":"💞 To my partner","ru":"💞 Моей паре","kz":"💞 Жұбыма"}.get(lang,"💞 Juftimga"), callback_data="shop:partner"),
-       InlineKeyboardButton({"uz":"👤 Boshqaga","eng":"👤 Someone else","ru":"👤 Другому","kz":"👤 Басқаға"}.get(lang,"👤 Boshqaga"), callback_data="shop:other")]
+       InlineKeyboardButton({"uz":"👤 Boshqaga","eng":"👤 Someone else","ru":"👤 Другому","kz":"👤 Басқаға"}.get(lang,"👤 Boshqaga"), callback_data="shop:other")],
+      [InlineKeyboardButton(kid_t(user.id, "shop_btn"), callback_data=f"kid:{user.id}:open")],
     ])
     await update.effective_message.reply_text(f"{labels.get(lang, labels['uz'])}\n\n{who.get(lang, who['uz'])}", reply_markup=kb)
 
@@ -12474,6 +12477,648 @@ async def cb_birja(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 
+# ───────────────────────────── 👶 FARZANDLAR (o'sish, parvarish, ta'lim, ish) ─────────────────────────────
+# Farzand real vaqtda o'sadi: KID_YEAR soniya (1 kun) = 1 yosh — lekin faqat to'q va xursand bo'lsa
+# va ta'lim bosqichida shu yilgi to'lov qilingan bo'lsa. To'qlik / kayfiyat soatiga kamayadi.
+# Bosqichlar: 👶 0–2 · 🧒 bog'cha 3–6 · 🎒 maktab 7–15 · 🏫 kollej 16–18 · 🎓 universitet 19–22 · 💼 ish.
+# 16 yoshda: kollej yoki ish; 19 yoshda: universitet yoki ish; 23 da universitetdan keyin ishga kiradi.
+# Ishlayotgan farzand har kuni ma'lumotiga qarab maosh olib keladi (ota-onaga teng bo'linadi).
+# Callback: "kid:<uid>:<amal>:..." — menyuni ochgan ota/ona boshqaradi.
+
+KID_YEAR = 86400
+KID_TICK = 60
+KID_MAX_CATCHUP = 3600      # bot to'xtab qolgan vaqt farzandga "jarima" bo'lmasin
+KID_HUNGER_RATE = 4.0       # to'qlik soatiga kamayishi (100 → 0 ~25 soatda)
+KID_HAPPY_RATE = 3.0        # kayfiyat soatiga kamayishi (100 → 0 ~33 soatda)
+KID_FEES = {"kinder": 100, "school": 200, "college": 500, "uni": 1000}   # $ / yil
+KID_SALARY = {"school": 100, "college": 200, "uni": 400}                 # $ / kun
+KID_ALERT_HUNGRY, KID_ALERT_SAD, KID_ALERT_FEE, KID_ALERT_DECIDE = 1, 2, 4, 8
+
+# kalit: (tur, yoshdan, yoshgacha, narx, ta'sir, {til: nomi})
+KID_ITEMS = {
+    "milk": ("food", 0, 2, 20, 40, {"uz": "🍼 Sut aralashmasi", "eng": "🍼 Baby formula", "ru": "🍼 Детская смесь", "kz": "🍼 Балалар қоспасы"}),
+    "puree": ("food", 0, 3, 25, 45, {"uz": "🥕 Pyure", "eng": "🥕 Puree", "ru": "🥕 Пюре", "kz": "🥕 Пюре"}),
+    "porridge": ("food", 1, 6, 30, 50, {"uz": "🥣 Bo‘tqa", "eng": "🥣 Porridge", "ru": "🥣 Каша", "kz": "🥣 Ботқа"}),
+    "fruit": ("food", 1, 22, 15, 20, {"uz": "🍎 Mevalar", "eng": "🍎 Fruit", "ru": "🍎 Фрукты", "kz": "🍎 Жемістер"}),
+    "lunch": ("food", 3, 22, 45, 60, {"uz": "🍲 Issiq ovqat", "eng": "🍲 Hot meal", "ru": "🍲 Горячий обед", "kz": "🍲 Ыстық тамақ"}),
+    "pizza": ("food", 7, 22, 70, 70, {"uz": "🍕 Pitsa", "eng": "🍕 Pizza", "ru": "🍕 Пицца", "kz": "🍕 Пицца"}),
+    "feast": ("food", 12, 22, 110, 100, {"uz": "🍱 To‘yimli tushlik", "eng": "🍱 Big lunch", "ru": "🍱 Сытный обед", "kz": "🍱 Тойымды түскі ас"}),
+    "rattle": ("toy", 0, 2, 15, 25, {"uz": "🪇 Shaqildoq", "eng": "🪇 Rattle", "ru": "🪇 Погремушка", "kz": "🪇 Сылдырмақ"}),
+    "teddy": ("toy", 0, 6, 40, 45, {"uz": "🧸 Ayiqcha", "eng": "🧸 Teddy bear", "ru": "🧸 Мишка", "kz": "🧸 Қонжық"}),
+    "blocks": ("toy", 2, 8, 35, 40, {"uz": "🧱 Kubiklar", "eng": "🧱 Blocks", "ru": "🧱 Кубики", "kz": "🧱 Текшелер"}),
+    "ball": ("toy", 4, 15, 30, 35, {"uz": "⚽ To‘p", "eng": "⚽ Ball", "ru": "⚽ Мяч", "kz": "⚽ Доп"}),
+    "bike": ("toy", 6, 15, 150, 80, {"uz": "🚲 Velosiped", "eng": "🚲 Bicycle", "ru": "🚲 Велосипед", "kz": "🚲 Велосипед"}),
+    "console": ("toy", 10, 22, 300, 100, {"uz": "🎮 O‘yin pristavkasi", "eng": "🎮 Game console", "ru": "🎮 Игровая приставка", "kz": "🎮 Ойын приставкасы"}),
+    "phone": ("toy", 13, 22, 450, 100, {"uz": "📱 Smartfon", "eng": "📱 Smartphone", "ru": "📱 Смартфон", "kz": "📱 Смартфон"}),
+    "laptop": ("toy", 16, 22, 700, 100, {"uz": "💻 Noutbuk", "eng": "💻 Laptop", "ru": "💻 Ноутбук", "kz": "💻 Ноутбук"}),
+}
+
+KID_TEXT = {
+    "uz": {
+        "list": "👶 <b>FARZANDLARIM</b>\n\nFarzandni tanlang 👇",
+        "none": "👶 Sizda hali farzand yo‘q. /oila bo‘limidan farzand ko‘rishingiz mumkin.",
+        "head": "{icon} <b>{name}</b> · {gender}\n🎂 Yoshi: <b>{age}</b> · {stage}",
+        "needs": "🍽 To‘qlik: {hbar} {h}%\n😊 Kayfiyat: {jbar} {j}%\n📈 Keyingi yoshgacha: {left}",
+        "work": "🎓 Ma’lumoti: {edu}\n💵 Kunlik maosh: <b>{salary}$</b> (ota-onaga teng bo‘linadi)\n⏰ Keyingi maosh: {left}",
+        "ok": "✅ Sog‘lom va baxtli — o‘syapti",
+        "hungry": "⚠️ Och — o‘sish to‘xtagan. Ovqatlantiring!",
+        "sad": "⚠️ Zerikkan — o‘sish to‘xtagan. O‘yinchoq oling!",
+        "fee": "⚠️ {place} to‘lovi to‘lanmagan ({fee}$) — o‘sish to‘xtagan.",
+        "decide16": "🎓 Maktabni tugatdi! Keyingi yo‘lni tanlang 👇",
+        "decide19": "🎓 Kollejni tugatdi! Keyingi yo‘lni tanlang 👇",
+        "hours": "{h} soat {m} daq",
+        "b_food": "🍽 Ovqatlantirish", "b_toy": "🧸 O‘yinchoq", "b_fee": "💳 {place} to‘lovi · {fee}$",
+        "b_back": "⬅️ Orqaga", "b_list": "👶 Farzandlarim", "b_kid": "⬅️ {name}",
+        "b_college": "🏫 Kollejga ({fee}$/yil)", "b_uni": "🎓 Universitetga ({fee}$/yil)", "b_work": "💼 Ishga ({salary}$/kun)",
+        "food_menu": "🍽 <b>{name} uchun ovqat</b>\n\n🍽 To‘qlik: {h}%\n💵 Hamyon: {wallet}$\n\nTanlang 👇",
+        "toy_menu": "🧸 <b>{name} uchun o‘yinchoq</b>\n\n😊 Kayfiyat: {j}%\n💵 Hamyon: {wallet}$\n\nTanlang 👇",
+        "food_line": "+{eff} to‘qlik", "toy_line": "+{eff} kayfiyat",
+        "bought": "✅ {item} olindi (−{price}$)",
+        "full_food": "😋 {name} to‘q — hozir ovqat kerak emas.",
+        "full_toy": "😊 {name} juda xursand — hozir o‘yinchoq kerak emas.",
+        "fee_ok": "✅ {place} to‘lovi to‘landi (−{fee}$)",
+        "path_college": "🏫 {name} kollejga o‘qishga kirdi!",
+        "path_uni": "🎓 {name} universitetga o‘qishga kirdi!",
+        "path_work": "💼 {name} ishga kirdi! Kuniga {salary}$ maosh olib keladi.",
+        "no_funds": "💸 Hamyonda yetarli pul yo‘q (balans: {bal}$).",
+        "not_parent": "⛔ Bu sizning farzandingiz emas.",
+        "not_yours": "⛔ Bu menyu sizniki emas.",
+        "n_hungry": "🍼 <b>{name}</b> och qoldi — o‘sishi to‘xtadi! Ovqatlantiring: /farzand",
+        "n_sad": "🧸 <b>{name}</b> zerikib qoldi — o‘sishi to‘xtadi! O‘yinchoq oling: /farzand",
+        "n_stage": "🎉 <b>{name}</b> {age} yoshga to‘ldi — endi {stage}!",
+        "n_fee": "💳 <b>{name}</b> {age} yoshda: {place} to‘lovi ({fee}$) kerak, aks holda o‘sish to‘xtaydi: /farzand",
+        "n_decide": "🎓 <b>{name}</b> {place}ni tugatdi! Keyingi yo‘lni tanlang: /farzand",
+        "n_work": "💼 <b>{name}</b> universitetni tugatib ishga kirdi! Kuniga {salary}$ maosh olib keladi.",
+        "shop_btn": "👶 Farzandlar uchun (ovqat, o‘yinchoq)",
+        "oila_btn": "👶 Farzandlarim",
+        "stages": {"baby": "👶 Chaqaloq", "kinder": "🧒 Bog‘cha", "school": "🎒 Maktab", "college": "🏫 Kollej",
+                   "uni": "🎓 Universitet", "work": "💼 Ishlaydi"},
+        "places": {"kinder": "Bog‘cha", "school": "Maktab", "college": "Kollej", "uni": "Universitet"},
+        "edu": {"school": "o‘rta maktab", "college": "kollej", "uni": "oliy (universitet)"},
+        "age_unit": "yosh",
+    },
+    "eng": {
+        "list": "👶 <b>MY CHILDREN</b>\n\nChoose a child 👇",
+        "none": "👶 You have no children yet. You can have one in the /family section.",
+        "head": "{icon} <b>{name}</b> · {gender}\n🎂 Age: <b>{age}</b> · {stage}",
+        "needs": "🍽 Fullness: {hbar} {h}%\n😊 Mood: {jbar} {j}%\n📈 Until next birthday: {left}",
+        "work": "🎓 Education: {edu}\n💵 Daily salary: <b>{salary}$</b> (split between parents)\n⏰ Next salary: {left}",
+        "ok": "✅ Healthy and happy — growing",
+        "hungry": "⚠️ Hungry — growth stopped. Feed them!",
+        "sad": "⚠️ Bored — growth stopped. Buy a toy!",
+        "fee": "⚠️ {place} fee unpaid ({fee}$) — growth stopped.",
+        "decide16": "🎓 Finished school! Choose the next path 👇",
+        "decide19": "🎓 Finished college! Choose the next path 👇",
+        "hours": "{h} h {m} min",
+        "b_food": "🍽 Feed", "b_toy": "🧸 Toy", "b_fee": "💳 {place} fee · {fee}$",
+        "b_back": "⬅️ Back", "b_list": "👶 My children", "b_kid": "⬅️ {name}",
+        "b_college": "🏫 College ({fee}$/yr)", "b_uni": "🎓 University ({fee}$/yr)", "b_work": "💼 Work ({salary}$/day)",
+        "food_menu": "🍽 <b>Food for {name}</b>\n\n🍽 Fullness: {h}%\n💵 Wallet: {wallet}$\n\nChoose 👇",
+        "toy_menu": "🧸 <b>A toy for {name}</b>\n\n😊 Mood: {j}%\n💵 Wallet: {wallet}$\n\nChoose 👇",
+        "food_line": "+{eff} fullness", "toy_line": "+{eff} mood",
+        "bought": "✅ Bought {item} (−{price}$)",
+        "full_food": "😋 {name} is full — no food needed now.",
+        "full_toy": "😊 {name} is very happy — no toy needed now.",
+        "fee_ok": "✅ {place} fee paid (−{fee}$)",
+        "path_college": "🏫 {name} entered college!",
+        "path_uni": "🎓 {name} entered university!",
+        "path_work": "💼 {name} started working! Brings {salary}$ a day.",
+        "no_funds": "💸 Not enough money in your wallet (balance: {bal}$).",
+        "not_parent": "⛔ This is not your child.",
+        "not_yours": "⛔ This menu is not yours.",
+        "n_hungry": "🍼 <b>{name}</b> is hungry — growth stopped! Feed them: /farzand",
+        "n_sad": "🧸 <b>{name}</b> is bored — growth stopped! Buy a toy: /farzand",
+        "n_stage": "🎉 <b>{name}</b> turned {age} — now {stage}!",
+        "n_fee": "💳 <b>{name}</b> is {age}: the {place} fee ({fee}$) is due, otherwise growth stops: /farzand",
+        "n_decide": "🎓 <b>{name}</b> finished {place}! Choose the next path: /farzand",
+        "n_work": "💼 <b>{name}</b> graduated and started working! Brings {salary}$ a day.",
+        "shop_btn": "👶 For children (food, toys)",
+        "oila_btn": "👶 My children",
+        "stages": {"baby": "👶 Baby", "kinder": "🧒 Kindergarten", "school": "🎒 School", "college": "🏫 College",
+                   "uni": "🎓 University", "work": "💼 Working"},
+        "places": {"kinder": "Kindergarten", "school": "School", "college": "College", "uni": "University"},
+        "edu": {"school": "secondary school", "college": "college", "uni": "higher (university)"},
+        "age_unit": "y.o.",
+    },
+    "ru": {
+        "list": "👶 <b>МОИ ДЕТИ</b>\n\nВыберите ребёнка 👇",
+        "none": "👶 У вас пока нет детей. Завести ребёнка можно в разделе /oila.",
+        "head": "{icon} <b>{name}</b> · {gender}\n🎂 Возраст: <b>{age}</b> · {stage}",
+        "needs": "🍽 Сытость: {hbar} {h}%\n😊 Настроение: {jbar} {j}%\n📈 До следующего дня рождения: {left}",
+        "work": "🎓 Образование: {edu}\n💵 Зарплата в день: <b>{salary}$</b> (поровну родителям)\n⏰ Следующая зарплата: {left}",
+        "ok": "✅ Здоров и счастлив — растёт",
+        "hungry": "⚠️ Голоден — рост остановлен. Покормите!",
+        "sad": "⚠️ Скучает — рост остановлен. Купите игрушку!",
+        "fee": "⚠️ Не оплачено: {place} ({fee}$) — рост остановлен.",
+        "decide16": "🎓 Окончил школу! Выберите дальнейший путь 👇",
+        "decide19": "🎓 Окончил колледж! Выберите дальнейший путь 👇",
+        "hours": "{h} ч {m} мин",
+        "b_food": "🍽 Покормить", "b_toy": "🧸 Игрушка", "b_fee": "💳 Оплата: {place} · {fee}$",
+        "b_back": "⬅️ Назад", "b_list": "👶 Мои дети", "b_kid": "⬅️ {name}",
+        "b_college": "🏫 В колледж ({fee}$/год)", "b_uni": "🎓 В университет ({fee}$/год)", "b_work": "💼 Работать ({salary}$/день)",
+        "food_menu": "🍽 <b>Еда для: {name}</b>\n\n🍽 Сытость: {h}%\n💵 Кошелёк: {wallet}$\n\nВыберите 👇",
+        "toy_menu": "🧸 <b>Игрушка для: {name}</b>\n\n😊 Настроение: {j}%\n💵 Кошелёк: {wallet}$\n\nВыберите 👇",
+        "food_line": "+{eff} сытость", "toy_line": "+{eff} настроение",
+        "bought": "✅ Куплено: {item} (−{price}$)",
+        "full_food": "😋 {name} сыт(а) — еда сейчас не нужна.",
+        "full_toy": "😊 {name} очень доволен(льна) — игрушка сейчас не нужна.",
+        "fee_ok": "✅ Оплачено: {place} (−{fee}$)",
+        "path_college": "🏫 {name} поступил(а) в колледж!",
+        "path_uni": "🎓 {name} поступил(а) в университет!",
+        "path_work": "💼 {name} начал(а) работать! Приносит {salary}$ в день.",
+        "no_funds": "💸 Недостаточно денег в кошельке (баланс: {bal}$).",
+        "not_parent": "⛔ Это не ваш ребёнок.",
+        "not_yours": "⛔ Это не ваше меню.",
+        "n_hungry": "🍼 <b>{name}</b> голоден(дна) — рост остановлен! Покормите: /farzand",
+        "n_sad": "🧸 <b>{name}</b> скучает — рост остановлен! Купите игрушку: /farzand",
+        "n_stage": "🎉 <b>{name}</b> исполнилось {age} — теперь {stage}!",
+        "n_fee": "💳 <b>{name}</b> {age} лет: нужна оплата — {place} ({fee}$), иначе рост остановится: /farzand",
+        "n_decide": "🎓 <b>{name}</b> окончил(а) обучение ({place})! Выберите дальнейший путь: /farzand",
+        "n_work": "💼 <b>{name}</b> окончил(а) университет и начал(а) работать! Приносит {salary}$ в день.",
+        "shop_btn": "👶 Для детей (еда, игрушки)",
+        "oila_btn": "👶 Мои дети",
+        "stages": {"baby": "👶 Малыш", "kinder": "🧒 Детский сад", "school": "🎒 Школа", "college": "🏫 Колледж",
+                   "uni": "🎓 Университет", "work": "💼 Работает"},
+        "places": {"kinder": "Детский сад", "school": "Школа", "college": "Колледж", "uni": "Университет"},
+        "edu": {"school": "среднее", "college": "колледж", "uni": "высшее (университет)"},
+        "age_unit": "лет",
+    },
+    "kz": {
+        "list": "👶 <b>БАЛАЛАРЫМ</b>\n\nБаланы таңдаңыз 👇",
+        "none": "👶 Сізде әлі бала жоқ. /oila бөлімінен бала сүюге болады.",
+        "head": "{icon} <b>{name}</b> · {gender}\n🎂 Жасы: <b>{age}</b> · {stage}",
+        "needs": "🍽 Тоқтық: {hbar} {h}%\n😊 Көңіл-күй: {jbar} {j}%\n📈 Келесі жасқа дейін: {left}",
+        "work": "🎓 Білімі: {edu}\n💵 Күндік жалақы: <b>{salary}$</b> (ата-анаға тең бөлінеді)\n⏰ Келесі жалақы: {left}",
+        "ok": "✅ Сау әрі бақытты — өсіп жатыр",
+        "hungry": "⚠️ Аш — өсу тоқтады. Тамақтандырыңыз!",
+        "sad": "⚠️ Жалықты — өсу тоқтады. Ойыншық алыңыз!",
+        "fee": "⚠️ {place} төлемі төленбеген ({fee}$) — өсу тоқтады.",
+        "decide16": "🎓 Мектепті бітірді! Келесі жолды таңдаңыз 👇",
+        "decide19": "🎓 Колледжді бітірді! Келесі жолды таңдаңыз 👇",
+        "hours": "{h} сағ {m} мин",
+        "b_food": "🍽 Тамақтандыру", "b_toy": "🧸 Ойыншық", "b_fee": "💳 {place} төлемі · {fee}$",
+        "b_back": "⬅️ Артқа", "b_list": "👶 Балаларым", "b_kid": "⬅️ {name}",
+        "b_college": "🏫 Колледжге ({fee}$/жыл)", "b_uni": "🎓 Университетке ({fee}$/жыл)", "b_work": "💼 Жұмысқа ({salary}$/күн)",
+        "food_menu": "🍽 <b>{name} үшін тамақ</b>\n\n🍽 Тоқтық: {h}%\n💵 Әмиян: {wallet}$\n\nТаңдаңыз 👇",
+        "toy_menu": "🧸 <b>{name} үшін ойыншық</b>\n\n😊 Көңіл-күй: {j}%\n💵 Әмиян: {wallet}$\n\nТаңдаңыз 👇",
+        "food_line": "+{eff} тоқтық", "toy_line": "+{eff} көңіл-күй",
+        "bought": "✅ {item} алынды (−{price}$)",
+        "full_food": "😋 {name} тоқ — қазір тамақ керек емес.",
+        "full_toy": "😊 {name} өте бақытты — қазір ойыншық керек емес.",
+        "fee_ok": "✅ {place} төлемі төленді (−{fee}$)",
+        "path_college": "🏫 {name} колледжге түсті!",
+        "path_uni": "🎓 {name} университетке түсті!",
+        "path_work": "💼 {name} жұмысқа орналасты! Күніне {salary}$ әкеледі.",
+        "no_funds": "💸 Әмиянда ақша жеткіліксіз (баланс: {bal}$).",
+        "not_parent": "⛔ Бұл сіздің балаңыз емес.",
+        "not_yours": "⛔ Бұл мәзір сіздікі емес.",
+        "n_hungry": "🍼 <b>{name}</b> ашығып қалды — өсуі тоқтады! Тамақтандырыңыз: /farzand",
+        "n_sad": "🧸 <b>{name}</b> жалығып қалды — өсуі тоқтады! Ойыншық алыңыз: /farzand",
+        "n_stage": "🎉 <b>{name}</b> {age} жасқа толды — енді {stage}!",
+        "n_fee": "💳 <b>{name}</b> {age} жаста: {place} төлемі ({fee}$) керек, әйтпесе өсу тоқтайды: /farzand",
+        "n_decide": "🎓 <b>{name}</b> оқуын бітірді ({place})! Келесі жолды таңдаңыз: /farzand",
+        "n_work": "💼 <b>{name}</b> университетті бітіріп, жұмысқа орналасты! Күніне {salary}$ әкеледі.",
+        "shop_btn": "👶 Балалар үшін (тамақ, ойыншық)",
+        "oila_btn": "👶 Балаларым",
+        "stages": {"baby": "👶 Нәресте", "kinder": "🧒 Балабақша", "school": "🎒 Мектеп", "college": "🏫 Колледж",
+                   "uni": "🎓 Университет", "work": "💼 Жұмыс істейді"},
+        "places": {"kinder": "Балабақша", "school": "Мектеп", "college": "Колледж", "uni": "Университет"},
+        "edu": {"school": "орта мектеп", "college": "колледж", "uni": "жоғары (университет)"},
+        "age_unit": "жас",
+    },
+}
+
+KID_COLUMNS = {
+    "age": "INTEGER NOT NULL DEFAULT 0",
+    "hunger": "REAL NOT NULL DEFAULT 100",
+    "happy": "REAL NOT NULL DEFAULT 100",
+    "growth": "REAL NOT NULL DEFAULT 0",          # joriy yoshdagi o'sish (soniya)
+    "last_tick": "INTEGER NOT NULL DEFAULT 0",
+    "fee_age": "INTEGER NOT NULL DEFAULT -1",     # qaysi yosh uchun ta'lim to'lovi qilingan
+    "track": "TEXT NOT NULL DEFAULT ''",          # '' | 'college' | 'uni'
+    "working": "INTEGER NOT NULL DEFAULT 0",
+    "edu": "TEXT NOT NULL DEFAULT ''",            # ishlayotgan bo'lsa: school | college | uni
+    "last_salary": "INTEGER NOT NULL DEFAULT 0",
+    "alerts": "INTEGER NOT NULL DEFAULT 0",       # yuborilgan ogohlantirishlar (takrorlanmasin)
+}
+KID_FIELDS = ("id", "pair_id", "parent1_id", "parent2_id", "gender", "child_name", *KID_COLUMNS)
+
+
+def kid_lang(user_id):
+    lang = family_lang(user_id)
+    return lang if lang in KID_TEXT else "uz"
+
+
+def kid_t(user_id, key, **kwargs):
+    text = KID_TEXT[kid_lang(user_id)].get(key) or KID_TEXT["uz"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def kid_word(user_id, group, key):
+    return KID_TEXT[kid_lang(user_id)][group][key]
+
+
+def init_kids():
+    c = db()
+    have = {row[1] for row in c.execute("PRAGMA table_info(family_children)")}
+    with c:
+        for col, decl in KID_COLUMNS.items():
+            if col not in have:
+                c.execute(f"ALTER TABLE family_children ADD COLUMN {col} {decl}")
+
+
+def kid_stage(kid):
+    age = kid["age"]
+    if kid["working"]:
+        return "work"
+    if age <= 2:
+        return "baby"
+    if age <= 6:
+        return "kinder"
+    if age <= 15:
+        return "school"
+    if age <= 18:
+        return "college" if kid["track"] else "school"     # 16 yosh: tanlov kutilmoqda
+    return "uni" if kid["track"] == "uni" else "college"   # 19 yosh: tanlov kutilmoqda
+
+
+def kid_block(kid):
+    """O'sishni nima to'xtatib turibdi: None | hungry | sad | fee | decide."""
+    if kid["working"]:
+        return None
+    if kid["age"] == 16 and kid["track"] == "":
+        return "decide"
+    if kid["age"] == 19 and kid["track"] == "college":
+        return "decide"
+    if kid["hunger"] <= 0:
+        return "hungry"
+    if kid["happy"] <= 0:
+        return "sad"
+    stage = kid_stage(kid)
+    if stage in KID_FEES and kid["fee_age"] < kid["age"]:
+        return "fee"
+    return None
+
+
+def kid_row(kid_id):
+    row = db().execute(f"SELECT {', '.join(KID_FIELDS)} FROM family_children WHERE id=?", (kid_id,)).fetchone()
+    return dict(zip(KID_FIELDS, row)) if row else None
+
+
+def kids_of(user_id):
+    rows = db().execute(
+        f"SELECT {', '.join(KID_FIELDS)} FROM family_children WHERE parent1_id=? OR parent2_id=? ORDER BY id",
+        (user_id, user_id),
+    ).fetchall()
+    return [dict(zip(KID_FIELDS, r)) for r in rows]
+
+
+def kid_save(c, kid):
+    cols = [col for col in KID_COLUMNS]
+    c.execute(
+        f"UPDATE family_children SET {', '.join(f'{col}=?' for col in cols)} WHERE id=?",
+        [kid[col] for col in cols] + [kid["id"]],
+    )
+
+
+def kid_tick(kid, now):
+    """Farzand holatini `now` gacha yangilaydi. Qaytaradi: [(hodisa, {..})] — xabar yuborish uchun."""
+    events = []
+    if not kid["last_tick"]:
+        kid["last_tick"] = now
+        if kid["working"] and not kid["last_salary"]:
+            kid["last_salary"] = now
+        return events
+    dt = min(max(0, now - kid["last_tick"]), KID_MAX_CATCHUP)
+    kid["last_tick"] = now
+
+    if kid["working"]:
+        if not kid["last_salary"]:
+            kid["last_salary"] = now
+        elif now - kid["last_salary"] >= KID_YEAR:
+            kid["last_salary"] += KID_YEAR * ((now - kid["last_salary"]) // KID_YEAR)
+            events.append(("salary", {"salary": KID_SALARY.get(kid["edu"], 0)}))
+        return events
+
+    kid["hunger"] = max(0.0, kid["hunger"] - KID_HUNGER_RATE * dt / 3600)
+    kid["happy"] = max(0.0, kid["happy"] - KID_HAPPY_RATE * dt / 3600)
+    if kid["hunger"] <= 0 and not kid["alerts"] & KID_ALERT_HUNGRY:
+        kid["alerts"] |= KID_ALERT_HUNGRY
+        events.append(("n_hungry", {}))
+    if kid["happy"] <= 0 and not kid["alerts"] & KID_ALERT_SAD:
+        kid["alerts"] |= KID_ALERT_SAD
+        events.append(("n_sad", {}))
+
+    block = kid_block(kid)
+    if block == "fee" and not kid["alerts"] & KID_ALERT_FEE:
+        kid["alerts"] |= KID_ALERT_FEE
+        stage = kid_stage(kid)
+        events.append(("n_fee", {"place": stage, "fee": KID_FEES[stage]}))
+    if block == "decide" and not kid["alerts"] & KID_ALERT_DECIDE:
+        kid["alerts"] |= KID_ALERT_DECIDE
+        events.append(("n_decide", {"place": "school" if kid["age"] == 16 else "college"}))
+    if block:
+        return events
+
+    kid["growth"] += dt
+    if kid["growth"] >= KID_YEAR:
+        kid["growth"] = 0.0
+        before = kid_stage(kid)
+        kid["age"] += 1
+        kid["alerts"] &= ~(KID_ALERT_FEE | KID_ALERT_DECIDE)
+        if kid["age"] >= 23 and kid["track"] == "uni":
+            kid.update(working=1, edu="uni", last_salary=now)
+            events.append(("n_work", {"salary": KID_SALARY["uni"]}))
+            return events
+        after = kid_stage(kid)
+        if after != before and after not in ("college", "uni"):
+            events.append(("n_stage", {"stage": after}))
+    return events
+
+
+async def kid_apply_events(bot, kid, events):
+    """Hodisalarni bajaradi: maosh to'laydi va ota-onaga xabar yuboradi."""
+    parents = [kid["parent1_id"], kid["parent2_id"]]
+    for event, data in events:
+        if event == "salary":
+            salary = data["salary"]
+            share = salary // 2
+            c = db()
+            with c:
+                _wallet_add(c, parents[0], salary - share)
+                _wallet_add(c, parents[1], share)
+            continue
+        for pid in parents:
+            kwargs = {"name": escape(kid["child_name"]), "age": kid["age"]}
+            if "stage" in data:
+                kwargs["stage"] = kid_word(pid, "stages", data["stage"])
+            if "place" in data:
+                kwargs["place"] = kid_word(pid, "places", data["place"])
+            if "fee" in data:
+                kwargs["fee"] = data["fee"]
+            if "salary" in data:
+                kwargs["salary"] = data["salary"]
+            try:
+                await bot.send_message(pid, kid_t(pid, event, **kwargs))
+            except TelegramError:
+                pass
+
+
+async def kid_worker(application):
+    while True:
+        try:
+            now = int(time.time())
+            ids = [r[0] for r in db().execute("SELECT id FROM family_children")]
+            for kid_id in ids:
+                kid = kid_row(kid_id)
+                if not kid:
+                    continue
+                events = kid_tick(kid, now)
+                c = db()
+                with c:
+                    kid_save(c, kid)
+                if events:
+                    await kid_apply_events(application.bot, kid, events)
+        except Exception:  # noqa: BLE001
+            logger.exception("Farzandlar: holatni yangilashda xato")
+        await asyncio.sleep(KID_TICK)
+
+
+def kid_fresh(kid_id):
+    """Ko'rsatishdan oldin holatni hozirgi vaqtga yangilaydi (xabarlarsiz)."""
+    kid = kid_row(kid_id)
+    if not kid:
+        return None
+    kid_tick(kid, int(time.time()))
+    c = db()
+    with c:
+        kid_save(c, kid)
+    return kid
+
+
+def kid_icon(kid):
+    return {"baby": "👶", "kinder": "🧒", "school": "🎒", "college": "🏫", "uni": "🎓", "work": "💼"}[kid_stage(kid)]
+
+
+def kid_summary(user_id, name, gender, kid=None):
+    """Profil va oila bo'limidagi qisqa qator."""
+    base = f"{escape(name)} — {escape(child_gender_label(user_id, gender))}"
+    if not kid:
+        return f"👶 {base}"
+    unit = KID_TEXT[kid_lang(user_id)]["age_unit"]
+    return f"{kid_icon(kid)} {base} · {kid['age']} {unit} ({kid_word(user_id, 'stages', kid_stage(kid))})"
+
+
+def kid_btn(uid, label, *parts):
+    return InlineKeyboardButton(label, callback_data=":".join(["kid", str(uid), *map(str, parts)]))
+
+
+def kid_hours(uid, seconds):
+    seconds = max(0, int(seconds))
+    return kid_t(uid, "hours", h=seconds // 3600, m=seconds % 3600 // 60)
+
+
+def kid_list_view(uid):
+    kids = kids_of(uid)
+    if not kids:
+        return kid_t(uid, "none"), None
+    unit = KID_TEXT[kid_lang(uid)]["age_unit"]
+    rows = [
+        [kid_btn(uid, f"{kid_icon(k)} {k['child_name']} · {k['age']} {unit}", "v", k["id"])]
+        for k in kids
+    ]
+    return kid_t(uid, "list"), InlineKeyboardMarkup(rows)
+
+
+def kid_view(uid, kid):
+    stage = kid_stage(kid)
+    lines = [kid_t(
+        uid, "head", icon=kid_icon(kid), name=escape(kid["child_name"]),
+        gender=escape(child_gender_label(uid, kid["gender"])), age=kid["age"],
+        stage=kid_word(uid, "stages", stage),
+    ), ""]
+    rows = []
+    if kid["working"]:
+        lines.append(kid_t(
+            uid, "work", edu=kid_word(uid, "edu", kid["edu"]), salary=KID_SALARY.get(kid["edu"], 0),
+            left=kid_hours(uid, KID_YEAR - (time.time() - kid["last_salary"])),
+        ))
+    else:
+        h, j = round(kid["hunger"]), round(kid["happy"])
+        lines.append(kid_t(
+            uid, "needs", hbar=bar(h, 8), h=h, jbar=bar(j, 8), j=j,
+            left=kid_hours(uid, KID_YEAR - kid["growth"]),
+        ))
+        block = kid_block(kid)
+        if block == "fee":
+            lines.append(kid_t(uid, "fee", place=kid_word(uid, "places", stage), fee=KID_FEES[stage]))
+        elif block == "decide":
+            lines.append(kid_t(uid, "decide16" if kid["age"] == 16 else "decide19"))
+        elif block:
+            lines.append(kid_t(uid, block))
+        else:
+            lines.append(kid_t(uid, "ok"))
+
+        if block == "decide":
+            nxt = "college" if kid["age"] == 16 else "uni"
+            done = "school" if kid["age"] == 16 else "college"
+            rows.append([kid_btn(uid, kid_t(uid, f"b_{nxt}", fee=KID_FEES[nxt]), "p", kid["id"], nxt)])
+            rows.append([kid_btn(uid, kid_t(uid, "b_work", salary=KID_SALARY[done]), "p", kid["id"], "work")])
+        rows.append([
+            kid_btn(uid, kid_t(uid, "b_food"), "f", kid["id"]),
+            kid_btn(uid, kid_t(uid, "b_toy"), "t", kid["id"]),
+        ])
+        if stage in KID_FEES and kid["fee_age"] < kid["age"] and block != "decide":
+            rows.append([kid_btn(
+                uid, kid_t(uid, "b_fee", place=kid_word(uid, "places", stage), fee=KID_FEES[stage]), "fee", kid["id"],
+            )])
+    rows.append([kid_btn(uid, kid_t(uid, "b_list"), "list")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def kid_items_view(uid, kid, kind):
+    lang = kid_lang(uid)
+    rows = []
+    for key, (k, lo, hi, price, eff, names) in KID_ITEMS.items():
+        if k != kind or not lo <= kid["age"] <= hi:
+            continue
+        effect = kid_t(uid, "food_line" if kind == "food" else "toy_line", eff=eff)
+        rows.append([kid_btn(uid, f"{names.get(lang, names['uz'])} — {price}$ · {effect}", "b", kid["id"], key)])
+    rows.append([kid_btn(uid, kid_t(uid, "b_kid", name=kid["child_name"]), "v", kid["id"])])
+    text = kid_t(
+        uid, "food_menu" if kind == "food" else "toy_menu", name=escape(kid["child_name"]),
+        h=round(kid["hunger"]), j=round(kid["happy"]), wallet=fmt_money(wallet_balance(uid)),
+    )
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def cmd_farzand(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return
+    save_user(user)
+    text, kb = kid_list_view(user.id)
+    await msg.reply_text(text, reply_markup=kb)
+
+
+async def cb_kid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split(":")
+    uid = int(parts[1])
+    action = parts[2]
+    user = q.from_user
+    if user.id != uid:
+        await q.answer(kid_t(user.id, "not_yours"), show_alert=True)
+        return
+
+    async def show(view, notice=None):
+        text, kb = view
+        if notice:
+            text = notice + "\n\n" + text
+        if action == "open":
+            await context.bot.send_message(q.message.chat.id, text, reply_markup=kb)
+        else:
+            await edit(context.bot, q.message.chat.id, q.message.message_id, text, kb)
+
+    if action in ("open", "list"):
+        await q.answer()
+        await show(kid_list_view(uid))
+        return
+
+    kid = kid_fresh(int(parts[3])) if len(parts) > 3 and parts[3].isdigit() else None
+    if not kid or uid not in (kid["parent1_id"], kid["parent2_id"]):
+        await q.answer(kid_t(uid, "not_parent"), show_alert=True)
+        return
+    name = escape(kid["child_name"])
+
+    if action == "v":
+        await q.answer()
+        await show(kid_view(uid, kid))
+        return
+
+    if kid["working"]:
+        await q.answer()
+        await show(kid_view(uid, kid))
+        return
+
+    if action in ("f", "t"):
+        await q.answer()
+        await show(kid_items_view(uid, kid, "food" if action == "f" else "toy"))
+        return
+
+    c = db()
+    if action == "b":
+        item = KID_ITEMS.get(parts[4] if len(parts) > 4 else "")
+        if not item or not item[1] <= kid["age"] <= item[2]:
+            await q.answer()
+            return
+        kind, _, _, price, eff, names = item
+        stat = "hunger" if kind == "food" else "happy"
+        if kid[stat] >= 100:
+            await q.answer(kid_t(uid, "full_food" if kind == "food" else "full_toy", name=kid["child_name"]), show_alert=True)
+            return
+        kid[stat] = min(100.0, kid[stat] + eff)
+        kid["alerts"] &= ~(KID_ALERT_HUNGRY if kind == "food" else KID_ALERT_SAD)
+        with c:
+            paid = _wallet_take(c, uid, price)
+            if paid:
+                kid_save(c, kid)
+        if not paid:
+            await q.answer(kid_t(uid, "no_funds", bal=fmt_money(wallet_balance(uid))), show_alert=True)
+            return
+        await q.answer()
+        item_name = names.get(kid_lang(uid), names["uz"])
+        await show(kid_items_view(uid, kid, kind), kid_t(uid, "bought", item=item_name, price=price))
+        return
+
+    if action == "fee":
+        stage = kid_stage(kid)
+        if stage not in KID_FEES or kid["fee_age"] >= kid["age"]:
+            await q.answer()
+            await show(kid_view(uid, kid))
+            return
+        fee = KID_FEES[stage]
+        kid["fee_age"] = kid["age"]
+        kid["alerts"] &= ~KID_ALERT_FEE
+        with c:
+            paid = _wallet_take(c, uid, fee)
+            if paid:
+                kid_save(c, kid)
+        if not paid:
+            await q.answer(kid_t(uid, "no_funds", bal=fmt_money(wallet_balance(uid))), show_alert=True)
+            return
+        await q.answer()
+        await show(kid_view(uid, kid), kid_t(uid, "fee_ok", place=kid_word(uid, "places", stage), fee=fee))
+        return
+
+    if action == "p":
+        choice = parts[4] if len(parts) > 4 else ""
+        if kid_block(kid) != "decide":
+            await q.answer()
+            await show(kid_view(uid, kid))
+            return
+        done = "school" if kid["age"] == 16 else "college"
+        nxt = "college" if kid["age"] == 16 else "uni"
+        if choice == "work":
+            kid.update(working=1, edu=done, last_salary=int(time.time()))
+            notice = kid_t(uid, "path_work", name=name, salary=KID_SALARY[done])
+        elif choice == nxt:
+            kid["track"] = nxt
+            notice = kid_t(uid, f"path_{nxt}", name=name)
+        else:
+            await q.answer()
+            return
+        kid["alerts"] &= ~KID_ALERT_DECIDE
+        with c:
+            kid_save(c, kid)
+        await q.answer()
+        await show(kid_view(uid, kid), notice)
+        return
+
+    await q.answer()
+
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
         print(
@@ -12488,6 +13133,7 @@ def main():
     init_group_members()
     init_bank()
     init_birja()
+    init_kids()
     load_crash_config()
 
     app = (
@@ -12512,6 +13158,7 @@ def main():
         (["aktiv", "active"], cmd_aktiv),
         (["profil", "profile"], cmd_profil),
         (["oila", "family"], cmd_oila),
+        (["farzand", "kids"], cmd_farzand),
         (["shop"], cmd_shop),
         (["pul"], cmd_pul),
         (["hisob"], cmd_hisob),
@@ -12549,6 +13196,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_frog, pattern=r"^fr:"))
     app.add_handler(CallbackQueryHandler(cb_bank, pattern=r"^bk:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_birja, pattern=r"^bx:\d+:"))
+    app.add_handler(CallbackQueryHandler(cb_kid, pattern=r"^kid:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash|memory):\d+:(uz|eng|ru|kz)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))

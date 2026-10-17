@@ -40,3 +40,7 @@
   /tasdiq) `divorce_settle`: ikkala hamyon puli teng bo'linadi, sovg'alar qiymati bo'yicha teng taqsimlanadi, farzandlarga
   `custody_id` / `alimony_payer`. Aliment: farzand ishga kirguncha kuniga `ALIMONY_PER_CHILD` (75$) har bir farzand uchun,
   `kid_tick` → `kid_apply_money` (balans minusga tushishi mumkin).
+- 🛡 Guruh himoyasi (Group Help uslubida, kulgili matnlar `MOD_TEXT`): `/settings` (`cb_settings`, `gs:<chat>:<kalit>`,
+  `group_settings` jadvali; standart faqat salomlashish yoqiq), captcha (`cb_captcha`, emoji tanlash, 120 s), anti-reklama va
+  anti-flood (`guard_messages`, handler group -2, `ApplicationHandlerStop`), `/warn /unwarn /warns /mute /unmute /ban /unban /kick`
+  (`cmd_mod`, `group_warns`; limitdan keyin 1 kun mute yoki ban). Bot guruhda admin bo'lishi kerak.

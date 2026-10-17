@@ -3326,8 +3326,143 @@ async def notify_pair_owners(application, request_id, title):
     return sent
 
 
+def parent_role(user_id):
+    row = db().execute("SELECT gender FROM user_gender WHERE user_id=?", (user_id,)).fetchone()
+    return row[0] if row else None
+
+
+def divorce_kids(pair_id):
+    return db().execute(
+        "SELECT id, child_name, working FROM family_children WHERE pair_id=? ORDER BY id", (pair_id,)
+    ).fetchall()
+
+
+def divorce_default_custody(pair):
+    """Eski arizalar uchun: ona (aniqlansa), aks holda juftlikning ikkinchi a'zosi."""
+    for uid in (pair[1], pair[2]):
+        if parent_role(uid) == "female":
+            return uid
+    return pair[2]
+
+
+def divorce_terms_text(pair, custody_id=None):
+    """Ajrashish oqibatlari: pul, sovg'alar, farzandlar va aliment."""
+    if not pair:
+        return ""
+    a, b = pair[1], pair[2]
+    wa, wb = wallet_balance(a), wallet_balance(b)
+    total = wa + wb
+    gifts = db().execute(
+        "SELECT COUNT(*), COALESCE(SUM(price), 0) FROM gift_log WHERE recipient_id IN (?, ?)", (a, b)
+    ).fetchone()
+    lines = [
+        "⚠️ <b>Ajrashish oqibatlari:</b>",
+        f"💵 Ikkalangiz hamyonidagi pul jamlanib teng bo‘linadi: {person_name(a)} {fmt_money(wa)}$ + "
+        f"{person_name(b)} {fmt_money(wb)}$ → har biringizga ≈ <b>{fmt_money(total // 2)}$</b>",
+        f"🎁 Olingan sovg‘alar ({gifts[0]} ta, {fmt_money(gifts[1])}$) qiymati bo‘yicha teng taqsimlanadi",
+    ]
+    kids = divorce_kids(pair[0])
+    minors = [k for k in kids if not k[2]]
+    if kids:
+        lines.append(
+            f"👶 Farzandlar ({len(kids)} ta) bir tomonda qoladi. Ikkinchi tomon har bir farzand uchun kuniga "
+            f"<b>{ALIMONY_PER_CHILD}$</b> aliment to‘laydi (farzand ishga kirguncha) — pul uning hisobidan "
+            "avtomatik o‘tkaziladi, balans minusga tushishi mumkin."
+        )
+    if kids and custody_id:
+        payer = b if custody_id == a else a
+        lines.append(
+            f"🏠 Farzandlar <b>{person_name(custody_id)}</b> bilan qoladi · 💸 {person_name(payer)} kuniga "
+            f"<b>{fmt_money(ALIMONY_PER_CHILD * len(minors))}$</b> aliment to‘laydi"
+        )
+    lines.append("ℹ️ Bankdagi kredit/omonat va birjadagi aktivlar har kimning o‘zida qoladi.")
+    return "\n".join(lines)
+
+
+def divorce_choice_kb(pair, uid):
+    if not divorce_kids(pair[0]):
+        rows = [[InlineKeyboardButton("💔 Ajrashish so‘rovini yuborish", callback_data="rel:divgo:0")]]
+    else:
+        rows = []
+        for member in (pair[1], pair[2]):
+            role = parent_role(member)
+            prefix = {"male": "👨 Otada", "female": "👩 Onada"}.get(role, "🏠 Shu odamda")
+            name = (db().execute("SELECT first_name FROM users WHERE user_id=?", (member,)).fetchone() or ["?"])[0]
+            rows.append([InlineKeyboardButton(f"{prefix} qolsin — {name}", callback_data=f"rel:divgo:{member}")])
+    rows.append([InlineKeyboardButton("❌ Bekor qilish", callback_data="rel:divcancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def divorce_settle(c, pair, custody_id):
+    """Ajrashish tasdiqlanganda (tranzaksiya ichida): pul va sovg'alarni teng bo'ladi,
+    farzandlar vasiyligi va alimentni belgilaydi. Qaytaradi: xabar uchun ma'lumot."""
+    a, b = pair[1], pair[2]
+    for uid in (a, b):
+        c.execute("INSERT OR IGNORE INTO user_wallet(user_id, money) VALUES (?, 0)", (uid,))
+    wa = c.execute("SELECT money FROM user_wallet WHERE user_id=?", (a,)).fetchone()[0]
+    wb = c.execute("SELECT money FROM user_wallet WHERE user_id=?", (b,)).fetchone()[0]
+    total = int(wa) + int(wb)
+    na, nb = total - total // 2, total // 2
+    c.execute("UPDATE user_wallet SET money=? WHERE user_id=?", (na, a))
+    c.execute("UPDATE user_wallet SET money=? WHERE user_id=?", (nb, b))
+
+    # Sovg'alar: qimmatidan boshlab, hozircha qiymati kamroq tomonga beriladi.
+    shares = {a: [0, 0], b: [0, 0]}
+    gifts = c.execute(
+        "SELECT id, price FROM gift_log WHERE recipient_id IN (?, ?) ORDER BY price DESC, id", (a, b)
+    ).fetchall()
+    for gift_id, price in gifts:
+        to = a if shares[a][1] <= shares[b][1] else b
+        shares[to][0] += 1
+        shares[to][1] += price
+        c.execute("UPDATE gift_log SET recipient_id=? WHERE id=?", (to, gift_id))
+
+    kids = c.execute("SELECT id FROM family_children WHERE pair_id=?", (pair[0],)).fetchall()
+    payer = None
+    if kids:
+        if custody_id not in (a, b):
+            custody_id = divorce_default_custody(pair)
+        payer = b if custody_id == a else a
+        c.execute(
+            "UPDATE family_children SET custody_id=?, alimony_payer=?, last_alimony=? WHERE pair_id=?",
+            (custody_id, payer, int(time.time()), pair[0]),
+        )
+    return {
+        "a": a, "b": b, "money": (int(wa), int(wb), na, nb), "gifts": shares,
+        "kids": len(kids), "custody": custody_id if kids else None, "payer": payer,
+    }
+
+
+async def divorce_notify(bot, st):
+    if not st:
+        return
+    a, b = st["a"], st["b"]
+    wa, wb, na, nb = st["money"]
+    lines = [
+        "💔 <b>Ajrashish yakunlandi — taqsimot</b>",
+        "",
+        f"💵 Pul: {person_name(a)} {fmt_money(wa)}$ → <b>{fmt_money(na)}$</b> · "
+        f"{person_name(b)} {fmt_money(wb)}$ → <b>{fmt_money(nb)}$</b>",
+        f"🎁 Sovg‘alar: {person_name(a)} {st['gifts'][a][0]} ta ({fmt_money(st['gifts'][a][1])}$) · "
+        f"{person_name(b)} {st['gifts'][b][0]} ta ({fmt_money(st['gifts'][b][1])}$)",
+    ]
+    if st["kids"]:
+        lines.append(
+            f"👶 Farzandlar ({st['kids']} ta) <b>{person_name(st['custody'])}</b> bilan qoladi.\n"
+            f"💸 {person_name(st['payer'])} har bir farzand uchun kuniga {ALIMONY_PER_CHILD}$ aliment to‘laydi "
+            "(farzand ishga kirguncha, hisobidan avtomatik yechiladi)."
+        )
+    text = "\n".join(lines)
+    for uid in (a, b):
+        try:
+            await bot.send_message(uid, text)
+        except TelegramError:
+            pass
+    await log_money_event(bot, text)
+
+
 async def create_rel_request(application, request_type, requester_id,
-                             target_id=None, group_id=None):
+                             target_id=None, group_id=None, custody_id=None):
     c = db()
     pending = c.execute(
         """SELECT id FROM pair_requests
@@ -3345,9 +3480,9 @@ async def create_rel_request(application, request_type, requester_id,
     with c:
         cur = c.execute(
             """INSERT INTO pair_requests
-               (request_type, requester_id, target_id, group_id, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (request_type, requester_id, target_id, group_id, initial_status, now),
+               (request_type, requester_id, target_id, group_id, status, created_at, custody_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (request_type, requester_id, target_id, group_id, initial_status, now, custody_id),
         )
         request_id = cur.lastrowid
 
@@ -3360,8 +3495,9 @@ async def create_rel_request(application, request_type, requester_id,
             await application.bot.send_message(
                 chat_id=target_id,
                 text=f"💔 <b>Ajrashish so‘rovi</b>\n"
-                     f"{person_name(requester_id)} siz bilan ajrashishni so‘radi. "
-                     "Rozilik bildirasizmi?",
+                     f"{person_name(requester_id)} siz bilan ajrashishni so‘radi.\n\n"
+                     + divorce_terms_text(active_pair(requester_id), custody_id)
+                     + "\n\nShu shartlarga rozimisiz?",
                 reply_markup=kb,
             )
         except TelegramError:
@@ -3651,6 +3787,18 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "divorce" and not active_pair(uid):
             await q.answer("Sizda hozir juft yo‘q.", show_alert=True)
             return
+        if action == "divorce":
+            # Avval oqibatlar ko'rsatiladi; farzand bo'lsa — kim bilan qolishi tanlanadi.
+            pair = active_pair(uid)
+            await q.answer()
+            await q.edit_message_text(
+                divorce_terms_text(pair) + "\n\n" + (
+                    "👶 Farzandlar kim bilan qolsin? Tanlovingiz juftingizga yuboriladi — u rozi bo‘lsa, shunday bo‘ladi."
+                    if divorce_kids(pair[0]) else "Ajrashish so‘rovini yuborasizmi?"
+                ),
+                reply_markup=divorce_choice_kb(pair, uid),
+            )
+            return
         if action == "quit":
             row = c.execute(
                 "SELECT profession_id FROM users WHERE user_id=?", (uid,)
@@ -3674,6 +3822,32 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "⏳ Arizangiz bot egalariga yuborildi. Ulardan biri tasdiqlashi kerak."
         await q.edit_message_text(text)
+        return
+
+    if data == "rel:divcancel":
+        await q.answer()
+        await q.edit_message_text("❎ Ajrashish bekor qilindi.")
+        return
+
+    if data.startswith("rel:divgo:"):
+        pair = active_pair(uid)
+        if not pair:
+            await q.answer("Sizda hozir juft yo‘q.", show_alert=True)
+            return
+        custody_id = int(data.rsplit(":", 1)[1])
+        has_kids = bool(divorce_kids(pair[0]))
+        if (has_kids and custody_id not in (pair[1], pair[2])) or (not has_kids and custody_id):
+            await q.answer("Noto‘g‘ri tanlov.", show_alert=True)
+            return
+        target_id = pair[2] if pair[1] == uid else pair[1]
+        rid = await create_rel_request(
+            context.application, "divorce", uid, target_id=target_id, custody_id=custody_id or None
+        )
+        await q.answer()
+        await q.edit_message_text(
+            "💌 Ajrashish so‘rovi juftingizga shaxsiy xabarda yuborildi. Avval uning roziligi kerak."
+            if rid else "⏳ Sizda bu turdagi ariza allaqachon kutilmoqda."
+        )
         return
 
     if data.startswith("rel:divorce:"):
@@ -3834,11 +4008,13 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     show_alert=True,
                 )
                 return
+            custody = c.execute("SELECT custody_id FROM pair_requests WHERE id=?", (rid,)).fetchone()[0]
             with c:
                 c.execute(
                     "UPDATE pairs SET status='ended', ended_at=? WHERE id=? AND status='active'",
                     (now, pair[0]),
                 )
+                settlement = divorce_settle(c, pair, custody)
         elif kind == "quit_job":
             with c:
                 c.execute(
@@ -3883,6 +4059,8 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(target, "💔 Juftlik arizasi tasdiqlandi.")
             except TelegramError:
                 pass
+        if kind == "divorce":
+            await divorce_notify(context.bot, settlement)
         await q.answer("Tasdiqlandi!")
         await q.edit_message_text(f"✅ {rid}-ariza tasdiqlandi.")
 
@@ -11207,6 +11385,10 @@ async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            WHERE id=? AND status='active'""",
                         (now, pair[0]),
                     )
+                    custody = c.execute(
+                        "SELECT custody_id FROM pair_requests WHERE id=?", (rid,)
+                    ).fetchone()[0]
+                    settlement = divorce_settle(c, pair, custody)
 
                     # Shu juftlikning boshqa ochiq ajrashish arizalari
                     # ham kutilyotgan holatda qolmasin.
@@ -11253,6 +11435,9 @@ async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except TelegramError:
                 pass
+
+            if kind == "divorce":
+                await divorce_notify(context.bot, settlement)
 
             if target and kind in ("pair", "divorce"):
                 try:
@@ -12534,6 +12719,7 @@ KID_TEXT = {
         "needs": "🍽 To‘qlik: {hbar} {h}%\n😊 Kayfiyat: {jbar} {j}%\n📈 Keyingi yoshgacha: {left}",
         "work": "🎓 Ma’lumoti: {edu}\n💵 Kunlik maosh: <b>{salary}$</b> (ota-onaga teng bo‘linadi)\n⏰ Keyingi maosh: {left}",
         "ok": "✅ Sog‘lom va baxtli — o‘syapti",
+        "custody": "🏠 {name} bilan yashaydi · 💸 Aliment: {payer} kuniga {amount}$",
         "hungry": "⚠️ Och — o‘sish to‘xtagan. Ovqatlantiring!",
         "sad": "⚠️ Zerikkan — o‘sish to‘xtagan. O‘yinchoq oling!",
         "fee": "⚠️ {place} to‘lovi to‘lanmagan ({fee}$) — o‘sish to‘xtagan.",
@@ -12577,6 +12763,7 @@ KID_TEXT = {
         "needs": "🍽 Fullness: {hbar} {h}%\n😊 Mood: {jbar} {j}%\n📈 Until next birthday: {left}",
         "work": "🎓 Education: {edu}\n💵 Daily salary: <b>{salary}$</b> (split between parents)\n⏰ Next salary: {left}",
         "ok": "✅ Healthy and happy — growing",
+        "custody": "🏠 Lives with {name} · 💸 Child support: {payer} pays {amount}$ a day",
         "hungry": "⚠️ Hungry — growth stopped. Feed them!",
         "sad": "⚠️ Bored — growth stopped. Buy a toy!",
         "fee": "⚠️ {place} fee unpaid ({fee}$) — growth stopped.",
@@ -12620,6 +12807,7 @@ KID_TEXT = {
         "needs": "🍽 Сытость: {hbar} {h}%\n😊 Настроение: {jbar} {j}%\n📈 До следующего дня рождения: {left}",
         "work": "🎓 Образование: {edu}\n💵 Зарплата в день: <b>{salary}$</b> (поровну родителям)\n⏰ Следующая зарплата: {left}",
         "ok": "✅ Здоров и счастлив — растёт",
+        "custody": "🏠 Живёт с: {name} · 💸 Алименты: {payer} — {amount}$ в день",
         "hungry": "⚠️ Голоден — рост остановлен. Покормите!",
         "sad": "⚠️ Скучает — рост остановлен. Купите игрушку!",
         "fee": "⚠️ Не оплачено: {place} ({fee}$) — рост остановлен.",
@@ -12663,6 +12851,7 @@ KID_TEXT = {
         "needs": "🍽 Тоқтық: {hbar} {h}%\n😊 Көңіл-күй: {jbar} {j}%\n📈 Келесі жасқа дейін: {left}",
         "work": "🎓 Білімі: {edu}\n💵 Күндік жалақы: <b>{salary}$</b> (ата-анаға тең бөлінеді)\n⏰ Келесі жалақы: {left}",
         "ok": "✅ Сау әрі бақытты — өсіп жатыр",
+        "custody": "🏠 {name} қасында тұрады · 💸 Алимент: {payer} күніне {amount}$",
         "hungry": "⚠️ Аш — өсу тоқтады. Тамақтандырыңыз!",
         "sad": "⚠️ Жалықты — өсу тоқтады. Ойыншық алыңыз!",
         "fee": "⚠️ {place} төлемі төленбеген ({fee}$) — өсу тоқтады.",
@@ -12713,7 +12902,11 @@ KID_COLUMNS = {
     "edu": "TEXT NOT NULL DEFAULT ''",            # ishlayotgan bo'lsa: school | college | uni
     "last_salary": "INTEGER NOT NULL DEFAULT 0",
     "alerts": "INTEGER NOT NULL DEFAULT 0",       # yuborilgan ogohlantirishlar (takrorlanmasin)
+    "custody_id": "INTEGER NOT NULL DEFAULT 0",   # ajrashgandan keyin farzand kim bilan qoladi
+    "alimony_payer": "INTEGER NOT NULL DEFAULT 0",  # kuniga aliment to'laydigan ota/ona
+    "last_alimony": "INTEGER NOT NULL DEFAULT 0",
 }
+ALIMONY_PER_CHILD = 75      # $ / kun / farzand — farzand ishga kirguncha
 KID_FIELDS = ("id", "pair_id", "parent1_id", "parent2_id", "gender", "child_name", *KID_COLUMNS)
 
 
@@ -12734,10 +12927,13 @@ def kid_word(user_id, group, key):
 def init_kids():
     c = db()
     have = {row[1] for row in c.execute("PRAGMA table_info(family_children)")}
+    req_cols = {row[1] for row in c.execute("PRAGMA table_info(pair_requests)")}
     with c:
         for col, decl in KID_COLUMNS.items():
             if col not in have:
                 c.execute(f"ALTER TABLE family_children ADD COLUMN {col} {decl}")
+        if "custody_id" not in req_cols:
+            c.execute("ALTER TABLE pair_requests ADD COLUMN custody_id INTEGER")
 
 
 def kid_stage(kid):
@@ -12805,6 +13001,11 @@ def kid_tick(kid, now):
     dt = min(max(0, now - kid["last_tick"]), KID_MAX_CATCHUP)
     kid["last_tick"] = now
 
+    if kid["alimony_payer"] and not kid["working"] and now - kid["last_alimony"] >= KID_YEAR:
+        days = (now - kid["last_alimony"]) // KID_YEAR
+        kid["last_alimony"] += KID_YEAR * days
+        events.append(("alimony", {"amount": ALIMONY_PER_CHILD * min(days, 2)}))
+
     if kid["working"]:
         if not kid["last_salary"]:
             kid["last_salary"] = now
@@ -12849,17 +13050,32 @@ def kid_tick(kid, now):
     return events
 
 
-async def kid_apply_events(bot, kid, events):
-    """Hodisalarni bajaradi: maosh to'laydi va ota-onaga xabar yuboradi."""
-    parents = [kid["parent1_id"], kid["parent2_id"]]
+KID_MONEY_EVENTS = ("salary", "alimony")
+
+
+def kid_apply_money(kid, events):
+    """Pul hodisalari (maosh, aliment) — xabar yuborilmasa ham albatta bajarilishi kerak."""
+    c = db()
     for event, data in events:
-        if event == "salary":
+        if event == "alimony":
+            # Farzand bilan yashamaydigan tomon hisobidan avtomatik (balans minusga tushishi mumkin).
+            with c:
+                _wallet_add(c, kid["alimony_payer"], -data["amount"])
+                _wallet_add(c, kid["custody_id"], data["amount"])
+        elif event == "salary":
             salary = data["salary"]
             share = salary // 2
-            c = db()
             with c:
-                _wallet_add(c, parents[0], salary - share)
-                _wallet_add(c, parents[1], share)
+                _wallet_add(c, kid["parent1_id"], salary - share)
+                _wallet_add(c, kid["parent2_id"], share)
+
+
+async def kid_apply_events(bot, kid, events):
+    """Pul hodisalarini bajaradi va ota-onaga xabar yuboradi."""
+    kid_apply_money(kid, events)
+    parents = [kid["parent1_id"], kid["parent2_id"]]
+    for event, data in events:
+        if event in KID_MONEY_EVENTS:
             continue
         for pid in parents:
             kwargs = {"name": escape(kid["child_name"]), "age": kid["age"]}
@@ -12902,10 +13118,11 @@ def kid_fresh(kid_id):
     kid = kid_row(kid_id)
     if not kid:
         return None
-    kid_tick(kid, int(time.time()))
+    events = kid_tick(kid, int(time.time()))
     c = db()
     with c:
         kid_save(c, kid)
+    kid_apply_money(kid, events)
     return kid
 
 
@@ -12951,6 +13168,11 @@ def kid_view(uid, kid):
         stage=kid_word(uid, "stages", stage),
     ), ""]
     rows = []
+    if kid["alimony_payer"] and not kid["working"]:
+        lines.append(kid_t(
+            uid, "custody", name=person_name(kid["custody_id"]), payer=person_name(kid["alimony_payer"]),
+            amount=ALIMONY_PER_CHILD,
+        ) + "\n")
     if kid["working"]:
         lines.append(kid_t(
             uid, "work", edu=kid_word(uid, "edu", kid["edu"]), salary=KID_SALARY.get(kid["edu"], 0),

@@ -1838,6 +1838,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if payload and await handle_family_start(update, context, payload):
             return
+        if payload and await settings_start_payload(update, context, payload):
+            return
         # /profil, /oila va do'kondagi URL tugmalar shu yerga olib keladi.
         section = {
             "bank": lambda: bank_banks_view(user.id, user.id),
@@ -5836,6 +5838,7 @@ async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not event or event.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
     member = event.new_chat_member
+    await announce_new_admin(context, event)
     try:
         if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
             member_left(event.chat.id, member.user.id)
@@ -9365,6 +9368,8 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     raw = msg.text.strip()
+    if context.user_data.get("gs_wait_welcome") and await settings_private_text(update, context):
+        return
     crash_state = context.user_data.get("panel_crash_state")
     if crash_state and user.id in CAREER_OWNER_IDS:
         if crash_state == "group_add":
@@ -13469,7 +13474,8 @@ async def cb_kid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Sozlamalar guruh bo'yicha `group_settings` jadvalida. Standart: faqat salomlashish yoqiq — qolganini
 # adminlar /settings orqali yoqadi. Bot guruhda admin bo'lishi kerak (o'chirish va bloklash huquqi bilan).
 
-GUARD_DEFAULTS = {"captcha": 0, "welcome": 1, "antilink": 0, "antiflood": 0, "warn_limit": 3, "warn_action": "mute"}
+GUARD_DEFAULTS = {"captcha": 0, "welcome": 1, "antilink": 0, "antiflood": 0, "warn_limit": 3, "warn_action": "mute",
+                  "welcome_text": ""}
 CAPTCHA_TTL = 120               # captcha uchun vaqt (soniya)
 FLOOD_COUNT, FLOOD_WINDOW = 7, 5   # 5 soniyada 7 ta xabar — flood
 FLOOD_MUTE = 300                # flood uchun jim qilish (soniya)
@@ -13668,6 +13674,8 @@ def init_guard():
                 warn_action TEXT NOT NULL DEFAULT 'mute'
             )
         """)
+        if "welcome_text" not in {r[1] for r in c.execute("PRAGMA table_info(group_settings)")}:
+            c.execute("ALTER TABLE group_settings ADD COLUMN welcome_text TEXT NOT NULL DEFAULT ''")
         c.execute("""
             CREATE TABLE IF NOT EXISTS group_warns (
                 chat_id INTEGER NOT NULL,
@@ -13680,7 +13688,7 @@ def init_guard():
 
 def gs_get(chat_id):
     row = db().execute(
-        "SELECT captcha, welcome, antilink, antiflood, warn_limit, warn_action FROM group_settings WHERE chat_id=?",
+        "SELECT captcha, welcome, antilink, antiflood, warn_limit, warn_action, welcome_text FROM group_settings WHERE chat_id=?",
         (chat_id,),
     ).fetchone()
     return dict(zip(GUARD_DEFAULTS, row)) if row else dict(GUARD_DEFAULTS)
@@ -13802,7 +13810,7 @@ async def guard_new_members(context, msg):
             except TelegramError:
                 # Huquq yo'q — captcha'siz salomlashamiz.
                 if settings["welcome"]:
-                    await context.bot.send_message(chat_id, mod_t(chat_id, "welcome", name=name))
+                    await context.bot.send_message(chat_id, welcome_for(chat_id, name, msg.chat.title))
                 continue
             options = random.sample(range(len(CAPTCHA_ITEMS)), 4)
             answer = random.choice(options)
@@ -13826,7 +13834,7 @@ async def guard_new_members(context, msg):
             entry["task"].add_done_callback(BG_TASKS.discard)
             CAPTCHA_PENDING[key] = entry
         elif settings["welcome"]:
-            await context.bot.send_message(chat_id, mod_t(chat_id, "welcome", name=name))
+            await context.bot.send_message(chat_id, welcome_for(chat_id, name, msg.chat.title))
 
 
 async def captcha_timeout(bot, key, entry):
@@ -13868,7 +13876,7 @@ async def cb_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         text = mod_t(chat_id, "cap_ok", name=entry["name"])
         if gs_get(chat_id)["welcome"]:
-            text += "\n\n" + mod_t(chat_id, "welcome", name=entry["name"])
+            text += "\n\n" + welcome_for(chat_id, entry["name"], q.message.chat.title)
         await edit(context.bot, chat_id, entry["msg_id"], text)
     else:
         try:
@@ -14040,23 +14048,263 @@ async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(text)
 
 
-# ── /settings ──
+# ── /settings: bo'limli menyu (guruhda yoki shaxsiy chatda) va 👮 admin boshqaruvi ──
+# /settings → "⚙️ Shu yerda ochish" (gs:<chat>:home) yoki "👤 Shaxsiy chatda ochish" (?start=gs_<|chat|>).
+# Admin paneli: ga:<chat>:<uid>[:r<i>|:demote], /promote va /demote. Telegram qoidasi: bot faqat o'zi
+# tayinlagan adminlarning huquqlarini o'zgartira oladi (can_be_edited).
 
-def settings_view(chat_id):
+ADMIN_RIGHTS = [
+    "can_change_info", "can_delete_messages", "can_restrict_members", "can_invite_users",
+    "can_pin_messages", "can_manage_video_chats", "can_promote_members",
+]
+PROMOTE_DEFAULTS = {
+    "can_change_info": False, "can_delete_messages": True, "can_restrict_members": True,
+    "can_invite_users": True, "can_pin_messages": True, "can_manage_video_chats": True,
+    "can_promote_members": False,
+}
+
+SETTINGS_TEXT = {
+    "uz": {
+        "where": "⚙️ <b>Guruh sozlamalari</b>\n\nQayerda ochamiz? 👇",
+        "b_here": "⚙️ Shu yerda ochish", "b_private": "👤 Shaxsiy chatda ochish",
+        "home": "⚙️ <b>«{group}» SOZLAMALARI</b>\n\nBo‘limni tanlang 👇",
+        "b_prot": "🛡 Himoya", "b_welc": "👋 Salomlashish", "b_warn": "⚠️ Ogohlantirishlar",
+        "b_adm": "👮 Adminlar", "b_close": "❌ Yopish", "b_back": "⬅️ Orqaga",
+        "prot": "🛡 <b>HIMOYA</b>\n\n🤖 Captcha — yangi a’zo emoji tanlab odamligini isbotlaydi\n🔗 Anti-reklama — link va kanal forwardlari o‘chiriladi\n🌊 Anti-flood — 5 soniyada 7 xabar yozgan 5 daqiqa jim bo‘ladi",
+        "welc": "👋 <b>SALOMLASHISH</b>\n\nHozirgi matn:\n{text}",
+        "welc_random": "🎲 Kulgili tasodifiy matnlar",
+        "b_wtext": "✏️ O‘z matnimni yozish", "b_wreset": "🎲 Kulgili matnlarga qaytish",
+        "wtext_prompt": "✏️ Yangi salomlashish matnini yuboring.\n\n<code>{name}</code> — yangi a’zo, <code>{group}</code> — guruh nomi.\nMasalan: <i>Salom {name}! {group} ga xush kelibsiz 🎉</i>",
+        "wtext_private": "✏️ Matnni shaxsiy chatda o‘zgartiring: /settings → 👤 Shaxsiy chatda ochish",
+        "wtext_bad": "❌ Matnda faqat {name} va {group} ishlatilishi mumkin. Qayta yuboring.",
+        "wtext_ok": "✅ Saqlandi! Namuna:\n\n{sample}",
+        "warn_menu": "⚠️ <b>OGOHLANTIRISHLAR</b>\n\n/warn — sariq kartochka. Limitga yetganda — qizil kartochka.",
+        "adm": "👮 <b>ADMINLAR</b>\n\nAdminni tanlang — huquqlarini ko‘rish va sozlash uchun.\n➕ Yangi admin: guruhda kimningdir xabariga reply qilib <b>/promote</b> yozing.",
+        "adm_panel": "👮 <b>{name}</b> — admin huquqlari\n\n{note}",
+        "adm_owner": "👑 Guruh egasi — huquqlari cheklanmagan.",
+        "adm_locked": "ℹ️ Bu adminni men tayinlamaganman — Telegram qoidasiga ko‘ra uning huquqlarini faqat uni tayinlagan odam o‘zgartira oladi.",
+        "adm_editable": "Tugmani bosib huquqni yoqing / o‘chiring 👇",
+        "adm_not": "ℹ️ Bu foydalanuvchi hozir admin emas.",
+        "b_demote": "⬇️ Adminlikdan olish", "b_admins": "⬅️ Adminlar",
+        "rights": {
+            "can_change_info": "ℹ️ Guruh ma’lumotlari", "can_delete_messages": "🗑 Xabarlarni o‘chirish",
+            "can_restrict_members": "🚫 Bloklash / jim qilish", "can_invite_users": "🔗 Odam qo‘shish",
+            "can_pin_messages": "📌 Xabar qadash", "can_manage_video_chats": "🎥 Videochat",
+            "can_promote_members": "👮 Admin tayinlash",
+        },
+        "promoted": "🎖 {name} endi admin! Tabriklaymiz 🎉\nHuquqlarini sozlash 👇",
+        "promoted_ext": "🎖 {name} yangi admin bo‘ldi! Huquqlarini ko‘rish / sozlash 👇",
+        "demoted": "🧢 {name} adminlikdan olindi — endi oddiy fuqaro.",
+        "b_rights": "⚙️ Huquqlarni sozlash",
+        "no_promote": "😓 Bajara olmadim. Menga «adminlarni tayinlash» huquqini bering (o‘zimda yo‘q huquqni boshqaga ham bera olmayman).",
+        "need_promoter": "⛔ Buning uchun guruh egasi yoki «admin tayinlash» huquqi bor admin bo‘lish kerak.",
+        "not_admin_of": "⛔ Siz bu guruhda admin emassiz.",
+        "closed": "✅ Sozlamalar yopildi.",
+        "use_in_group": "👥 Guruhda /settings yozing — keyin shu yerda ochish tugmasi chiqadi.",
+    },
+    "eng": {
+        "where": "⚙️ <b>Group settings</b>\n\nWhere should I open them? 👇",
+        "b_here": "⚙️ Open here", "b_private": "👤 Open in private chat",
+        "home": "⚙️ <b>«{group}» SETTINGS</b>\n\nChoose a section 👇",
+        "b_prot": "🛡 Protection", "b_welc": "👋 Welcome", "b_warn": "⚠️ Warnings",
+        "b_adm": "👮 Admins", "b_close": "❌ Close", "b_back": "⬅️ Back",
+        "prot": "🛡 <b>PROTECTION</b>\n\n🤖 Captcha — new members prove they're human\n🔗 Anti-ads — links and channel forwards are deleted\n🌊 Anti-flood — 7 messages in 5 s means 5 minutes of silence",
+        "welc": "👋 <b>WELCOME</b>\n\nCurrent text:\n{text}", "welc_random": "🎲 Random funny texts",
+        "b_wtext": "✏️ Write my own text", "b_wreset": "🎲 Back to funny texts",
+        "wtext_prompt": "✏️ Send the new welcome text.\n\n<code>{name}</code> — new member, <code>{group}</code> — group name.",
+        "wtext_private": "✏️ Change the text in private chat: /settings → 👤 Open in private chat",
+        "wtext_bad": "❌ Only {name} and {group} can be used. Send it again.",
+        "wtext_ok": "✅ Saved! Preview:\n\n{sample}",
+        "warn_menu": "⚠️ <b>WARNINGS</b>\n\n/warn — yellow card. At the limit — red card.",
+        "adm": "👮 <b>ADMINS</b>\n\nPick an admin to view and edit rights.\n➕ New admin: reply to someone in the group with <b>/promote</b>.",
+        "adm_panel": "👮 <b>{name}</b> — admin rights\n\n{note}",
+        "adm_owner": "👑 Group owner — unlimited rights.",
+        "adm_locked": "ℹ️ I didn't promote this admin — by Telegram rules only whoever promoted them can change their rights.",
+        "adm_editable": "Tap to turn a right on / off 👇", "adm_not": "ℹ️ This user is not an admin now.",
+        "b_demote": "⬇️ Remove admin", "b_admins": "⬅️ Admins",
+        "rights": {
+            "can_change_info": "ℹ️ Group info", "can_delete_messages": "🗑 Delete messages",
+            "can_restrict_members": "🚫 Ban / mute", "can_invite_users": "🔗 Add members",
+            "can_pin_messages": "📌 Pin messages", "can_manage_video_chats": "🎥 Video chats",
+            "can_promote_members": "👮 Add admins",
+        },
+        "promoted": "🎖 {name} is now an admin! Congrats 🎉\nSet up their rights 👇",
+        "promoted_ext": "🎖 {name} became an admin! View / set rights 👇",
+        "demoted": "🧢 {name} is no longer an admin.", "b_rights": "⚙️ Set rights",
+        "no_promote": "😓 I couldn't do it. Give me the «add admins» right (I can't grant rights I don't have).",
+        "need_promoter": "⛔ You must be the owner or an admin with the «add admins» right.",
+        "not_admin_of": "⛔ You are not an admin of this group.", "closed": "✅ Settings closed.",
+        "use_in_group": "👥 Type /settings in the group — then use the private-chat button.",
+    },
+    "ru": {
+        "where": "⚙️ <b>Настройки группы</b>\n\nГде открыть? 👇",
+        "b_here": "⚙️ Открыть здесь", "b_private": "👤 Открыть в личке",
+        "home": "⚙️ <b>НАСТРОЙКИ «{group}»</b>\n\nВыберите раздел 👇",
+        "b_prot": "🛡 Защита", "b_welc": "👋 Приветствие", "b_warn": "⚠️ Предупреждения",
+        "b_adm": "👮 Админы", "b_close": "❌ Закрыть", "b_back": "⬅️ Назад",
+        "prot": "🛡 <b>ЗАЩИТА</b>\n\n🤖 Капча — новичок доказывает, что он человек\n🔗 Антиреклама — ссылки и пересылки из каналов удаляются\n🌊 Антифлуд — 7 сообщений за 5 с = 5 минут тишины",
+        "welc": "👋 <b>ПРИВЕТСТВИЕ</b>\n\nТекущий текст:\n{text}", "welc_random": "🎲 Случайные смешные тексты",
+        "b_wtext": "✏️ Свой текст", "b_wreset": "🎲 Вернуть смешные тексты",
+        "wtext_prompt": "✏️ Отправьте новый текст приветствия.\n\n<code>{name}</code> — новичок, <code>{group}</code> — название группы.",
+        "wtext_private": "✏️ Текст меняется в личке: /settings → 👤 Открыть в личке",
+        "wtext_bad": "❌ Можно использовать только {name} и {group}. Отправьте ещё раз.",
+        "wtext_ok": "✅ Сохранено! Пример:\n\n{sample}",
+        "warn_menu": "⚠️ <b>ПРЕДУПРЕЖДЕНИЯ</b>\n\n/warn — жёлтая карточка. На лимите — красная.",
+        "adm": "👮 <b>АДМИНЫ</b>\n\nВыберите админа, чтобы посмотреть и изменить права.\n➕ Новый админ: ответьте на сообщение в группе командой <b>/promote</b>.",
+        "adm_panel": "👮 <b>{name}</b> — права админа\n\n{note}",
+        "adm_owner": "👑 Владелец группы — права не ограничены.",
+        "adm_locked": "ℹ️ Этого админа назначил не я — по правилам Telegram менять его права может только тот, кто назначил.",
+        "adm_editable": "Нажмите, чтобы включить / выключить право 👇", "adm_not": "ℹ️ Сейчас этот пользователь не админ.",
+        "b_demote": "⬇️ Снять админку", "b_admins": "⬅️ Админы",
+        "rights": {
+            "can_change_info": "ℹ️ Инфо группы", "can_delete_messages": "🗑 Удаление сообщений",
+            "can_restrict_members": "🚫 Бан / мут", "can_invite_users": "🔗 Приглашение",
+            "can_pin_messages": "📌 Закрепление", "can_manage_video_chats": "🎥 Видеочаты",
+            "can_promote_members": "👮 Назначение админов",
+        },
+        "promoted": "🎖 {name} теперь админ! Поздравляем 🎉\nНастройте права 👇",
+        "promoted_ext": "🎖 {name} стал(а) админом! Посмотреть / настроить права 👇",
+        "demoted": "🧢 {name} больше не админ.", "b_rights": "⚙️ Настроить права",
+        "no_promote": "😓 Не получилось. Дайте мне право «назначать админов» (права, которых нет у меня, выдать не могу).",
+        "need_promoter": "⛔ Нужно быть владельцем или админом с правом «назначать админов».",
+        "not_admin_of": "⛔ Вы не админ этой группы.", "closed": "✅ Настройки закрыты.",
+        "use_in_group": "👥 Напишите /settings в группе — там будет кнопка для лички.",
+    },
+    "kz": {
+        "where": "⚙️ <b>Топ баптаулары</b>\n\nҚайда ашамыз? 👇",
+        "b_here": "⚙️ Осы жерде ашу", "b_private": "👤 Жеке чатта ашу",
+        "home": "⚙️ <b>«{group}» БАПТАУЛАРЫ</b>\n\nБөлімді таңдаңыз 👇",
+        "b_prot": "🛡 Қорғау", "b_welc": "👋 Сәлемдесу", "b_warn": "⚠️ Ескертулер",
+        "b_adm": "👮 Әкімшілер", "b_close": "❌ Жабу", "b_back": "⬅️ Артқа",
+        "prot": "🛡 <b>ҚОРҒАУ</b>\n\n🤖 Капча — жаңа мүше адам екенін дәлелдейді\n🔗 Антижарнама — сілтемелер мен арна форвардтары өшіріледі\n🌊 Антифлуд — 5 с ішінде 7 хабар = 5 минут үнсіздік",
+        "welc": "👋 <b>СӘЛЕМДЕСУ</b>\n\nҚазіргі мәтін:\n{text}", "welc_random": "🎲 Кездейсоқ күлкілі мәтіндер",
+        "b_wtext": "✏️ Өз мәтінім", "b_wreset": "🎲 Күлкілі мәтіндерге қайту",
+        "wtext_prompt": "✏️ Жаңа сәлемдесу мәтінін жіберіңіз.\n\n<code>{name}</code> — жаңа мүше, <code>{group}</code> — топ атауы.",
+        "wtext_private": "✏️ Мәтінді жеке чатта өзгертіңіз: /settings → 👤 Жеке чатта ашу",
+        "wtext_bad": "❌ Тек {name} және {group} қолдануға болады. Қайта жіберіңіз.",
+        "wtext_ok": "✅ Сақталды! Үлгі:\n\n{sample}",
+        "warn_menu": "⚠️ <b>ЕСКЕРТУЛЕР</b>\n\n/warn — сары карточка. Шекке жеткенде — қызыл.",
+        "adm": "👮 <b>ӘКІМШІЛЕР</b>\n\nҚұқықтарын көру және баптау үшін әкімшіні таңдаңыз.\n➕ Жаңа әкімші: топта біреудің хабарына <b>/promote</b> деп жауап беріңіз.",
+        "adm_panel": "👮 <b>{name}</b> — әкімші құқықтары\n\n{note}",
+        "adm_owner": "👑 Топ иесі — құқықтары шектелмеген.",
+        "adm_locked": "ℹ️ Бұл әкімшіні мен тағайындаған жоқпын — Telegram ережесі бойынша оның құқықтарын тек тағайындаған адам өзгерте алады.",
+        "adm_editable": "Құқықты қосу / өшіру үшін басыңыз 👇", "adm_not": "ℹ️ Бұл қолданушы қазір әкімші емес.",
+        "b_demote": "⬇️ Әкімшіліктен алу", "b_admins": "⬅️ Әкімшілер",
+        "rights": {
+            "can_change_info": "ℹ️ Топ ақпараты", "can_delete_messages": "🗑 Хабар өшіру",
+            "can_restrict_members": "🚫 Бұғаттау / үнсіз ету", "can_invite_users": "🔗 Адам қосу",
+            "can_pin_messages": "📌 Бекіту", "can_manage_video_chats": "🎥 Бейнечат",
+            "can_promote_members": "👮 Әкімші тағайындау",
+        },
+        "promoted": "🎖 {name} енді әкімші! Құттықтаймыз 🎉\nҚұқықтарын баптау 👇",
+        "promoted_ext": "🎖 {name} жаңа әкімші болды! Құқықтарын көру / баптау 👇",
+        "demoted": "🧢 {name} әкімшіліктен алынды.", "b_rights": "⚙️ Құқықтарды баптау",
+        "no_promote": "😓 Орындай алмадым. Маған «әкімші тағайындау» құқығын беріңіз.",
+        "need_promoter": "⛔ Ол үшін топ иесі немесе «әкімші тағайындау» құқығы бар әкімші болу керек.",
+        "not_admin_of": "⛔ Сіз бұл топтың әкімшісі емессіз.", "closed": "✅ Баптаулар жабылды.",
+        "use_in_group": "👥 Топта /settings жазыңыз — сонда жеке чатқа өту батырмасы шығады.",
+    },
+}
+
+
+def st_t(chat_id, key, **kwargs):
+    text = SETTINGS_TEXT[mod_lang(chat_id)].get(key) or SETTINGS_TEXT["uz"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def welcome_for(chat_id, name, group):
+    custom = gs_get(chat_id)["welcome_text"]
+    if custom:
+        try:
+            return custom.format(name=name, group=escape(group or ""))
+        except (KeyError, IndexError, ValueError):
+            pass
+    return mod_t(chat_id, "welcome", name=name)
+
+
+async def chat_title(bot, chat_id):
+    try:
+        return (await bot.get_chat(chat_id)).title or str(chat_id)
+    except TelegramError:
+        return str(chat_id)
+
+
+def gs_btn(chat_id, label, key):
+    return InlineKeyboardButton(label, callback_data=f"gs:{chat_id}:{key}")
+
+
+def gs_private_url(context, chat_id):
+    return family_url(context, f"gs_{abs(chat_id)}")
+
+
+async def settings_page(bot, chat_id, page):
     s = gs_get(chat_id)
     on = lambda v: "✅" if v else "❌"
+    back = [gs_btn(chat_id, st_t(chat_id, "b_back"), "home")]
+    if page == "prot":
+        rows = [
+            [gs_btn(chat_id, f"{mod_t(chat_id, 's_captcha')} {on(s['captcha'])}", "captcha")],
+            [gs_btn(chat_id, f"{mod_t(chat_id, 's_antilink')} {on(s['antilink'])}", "antilink")],
+            [gs_btn(chat_id, f"{mod_t(chat_id, 's_antiflood')} {on(s['antiflood'])}", "antiflood")],
+            back,
+        ]
+        return st_t(chat_id, "prot"), InlineKeyboardMarkup(rows)
+    if page == "welc":
+        current = escape(s["welcome_text"]) if s["welcome_text"] else st_t(chat_id, "welc_random")
+        rows = [
+            [gs_btn(chat_id, f"{mod_t(chat_id, 's_welcome')} {on(s['welcome'])}", "welcome")],
+            [gs_btn(chat_id, st_t(chat_id, "b_wtext"), "wtext")],
+        ]
+        if s["welcome_text"]:
+            rows.append([gs_btn(chat_id, st_t(chat_id, "b_wreset"), "wreset")])
+        rows.append(back)
+        return st_t(chat_id, "welc", text=f"<i>{current}</i>"), InlineKeyboardMarkup(rows)
+    if page == "warn":
+        rows = [
+            [gs_btn(chat_id, mod_t(chat_id, "s_limit", n=s["warn_limit"]), "warn_limit")],
+            [gs_btn(chat_id, mod_t(chat_id, "s_action", a=mod_t(chat_id, "a_ban" if s["warn_action"] == "ban" else "a_mute")),
+                    "warn_action")],
+            back,
+        ]
+        return st_t(chat_id, "warn_menu"), InlineKeyboardMarkup(rows)
+    if page == "adm":
+        rows = []
+        try:
+            admins = await bot.get_chat_administrators(chat_id)
+        except TelegramError:
+            admins = []
+        for m in admins:
+            if m.user.is_bot:
+                continue
+            icon = "👑" if m.status == ChatMemberStatus.OWNER else "👮"
+            rows.append([InlineKeyboardButton(f"{icon} {m.user.first_name}", callback_data=f"ga:{chat_id}:{m.user.id}")])
+        rows.append(back)
+        return st_t(chat_id, "adm"), InlineKeyboardMarkup(rows)
+    # home
     rows = [
-        [InlineKeyboardButton(f"{mod_t(chat_id, 's_captcha')} {on(s['captcha'])}", callback_data=f"gs:{chat_id}:captcha")],
-        [InlineKeyboardButton(f"{mod_t(chat_id, 's_welcome')} {on(s['welcome'])}", callback_data=f"gs:{chat_id}:welcome")],
-        [InlineKeyboardButton(f"{mod_t(chat_id, 's_antilink')} {on(s['antilink'])}", callback_data=f"gs:{chat_id}:antilink")],
-        [InlineKeyboardButton(f"{mod_t(chat_id, 's_antiflood')} {on(s['antiflood'])}", callback_data=f"gs:{chat_id}:antiflood")],
-        [InlineKeyboardButton(mod_t(chat_id, "s_limit", n=s["warn_limit"]), callback_data=f"gs:{chat_id}:warn_limit")],
-        [InlineKeyboardButton(
-            mod_t(chat_id, "s_action", a=mod_t(chat_id, "a_ban" if s["warn_action"] == "ban" else "a_mute")),
-            callback_data=f"gs:{chat_id}:warn_action",
-        )],
+        [gs_btn(chat_id, st_t(chat_id, "b_prot"), "prot"), gs_btn(chat_id, st_t(chat_id, "b_welc"), "welc")],
+        [gs_btn(chat_id, st_t(chat_id, "b_warn"), "warn"), gs_btn(chat_id, st_t(chat_id, "b_adm"), "adm")],
+        [gs_btn(chat_id, st_t(chat_id, "b_close"), "close")],
     ]
-    return mod_t(chat_id, "settings"), InlineKeyboardMarkup(rows)
+    return st_t(chat_id, "home", group=escape(await chat_title(bot, chat_id))), InlineKeyboardMarkup(rows)
+
+
+async def user_is_chat_admin(bot, chat_id, user_id):
+    if user_id in CAREER_OWNER_IDS:
+        return True
+    return user_id in await admin_ids(bot, chat_id)
+
+
+async def can_manage_admins(bot, chat_id, user_id):
+    if user_id in CAREER_OWNER_IDS:
+        return True
+    try:
+        m = await bot.get_chat_member(chat_id, user_id)
+    except TelegramError:
+        return False
+    return m.status == ChatMemberStatus.OWNER or (
+        m.status == ChatMemberStatus.ADMINISTRATOR and getattr(m, "can_promote_members", False)
+    )
 
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -14065,36 +14313,240 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not chat:
         return
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await msg.reply_text(mod_t(chat.id, "group_only"))
+        await msg.reply_text(st_t(chat.id, "use_in_group"))
         return
     if not await is_moderator(context.bot, msg, update.effective_user):
         await msg.reply_text(mod_t(chat.id, "not_admin"))
         return
-    text, kb = settings_view(chat.id)
-    await msg.reply_text(text, reply_markup=kb)
+    kb = InlineKeyboardMarkup([
+        [gs_btn(chat.id, st_t(chat.id, "b_here"), "home")],
+        [InlineKeyboardButton(st_t(chat.id, "b_private"), url=gs_private_url(context, chat.id))],
+    ])
+    await msg.reply_text(st_t(chat.id, "where"), reply_markup=kb)
 
 
 async def cb_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     _, chat_text, key = q.data.split(":")
     chat_id = int(chat_text)
-    if q.message.chat.id != chat_id:
-        await q.answer()
-        return
     user = q.from_user
-    if user.id not in CAREER_OWNER_IDS and user.id not in await admin_ids(context.bot, chat_id):
-        await q.answer(mod_t(chat_id, "not_admin"), show_alert=True)
+    if not await user_is_chat_admin(context.bot, chat_id, user.id):
+        await q.answer(st_t(chat_id, "not_admin_of"), show_alert=True)
         return
+    here = q.message.chat
     s = gs_get(chat_id)
-    if key in ("captcha", "welcome", "antilink", "antiflood"):
+    page = "home"
+    if key in ("home", "prot", "welc", "warn", "adm"):
+        page = key
+    elif key in ("captcha", "antilink", "antiflood"):
         gs_set(chat_id, key, 0 if s[key] else 1)
+        page = "prot"
+    elif key == "welcome":
+        gs_set(chat_id, key, 0 if s[key] else 1)
+        page = "welc"
+    elif key == "wreset":
+        gs_set(chat_id, "welcome_text", "")
+        page = "welc"
+    elif key == "wtext":
+        if here.type != ChatType.PRIVATE:
+            await q.answer(st_t(chat_id, "wtext_private"), show_alert=True)
+            return
+        context.user_data["gs_wait_welcome"] = chat_id
+        await q.answer()
+        await edit(context.bot, here.id, q.message.message_id, st_t(chat_id, "wtext_prompt"),
+                   InlineKeyboardMarkup([[gs_btn(chat_id, st_t(chat_id, "b_back"), "welc")]]))
+        return
     elif key == "warn_limit":
         gs_set(chat_id, key, s[key] % 5 + 1 if s[key] < 5 else 2)
+        page = "warn"
     elif key == "warn_action":
         gs_set(chat_id, key, "ban" if s[key] == "mute" else "mute")
-    await q.answer(mod_t(chat_id, "s_saved"))
-    text, kb = settings_view(chat_id)
-    await edit(context.bot, chat_id, q.message.message_id, text, kb)
+        page = "warn"
+    elif key == "close":
+        await q.answer()
+        await edit(context.bot, here.id, q.message.message_id, st_t(chat_id, "closed"))
+        return
+    context.user_data.pop("gs_wait_welcome", None)
+    await q.answer()
+    text, kb = await settings_page(context.bot, chat_id, page)
+    await edit(context.bot, here.id, q.message.message_id, text, kb)
+
+
+async def settings_private_text(update, context):
+    """Shaxsiy chatda kutilayotgan salomlashish matnini qabul qiladi. True — xabar qayta ishlandi."""
+    chat_id = context.user_data.get("gs_wait_welcome")
+    if not chat_id:
+        return False
+    msg = update.effective_message
+    user = update.effective_user
+    if not await user_is_chat_admin(context.bot, chat_id, user.id):
+        context.user_data.pop("gs_wait_welcome", None)
+        await msg.reply_text(st_t(chat_id, "not_admin_of"))
+        return True
+    text = escape(msg.text.strip())[:1000]
+    try:
+        sample = text.format(name=user_mention(user.id, user.first_name), group="Empire")
+    except (KeyError, IndexError, ValueError):
+        await msg.reply_text(st_t(chat_id, "wtext_bad"))
+        return True
+    gs_set(chat_id, "welcome_text", text)
+    context.user_data.pop("gs_wait_welcome", None)
+    await msg.reply_text(
+        st_t(chat_id, "wtext_ok", sample=sample),
+        reply_markup=InlineKeyboardMarkup([[gs_btn(chat_id, st_t(chat_id, "b_back"), "welc")]]),
+    )
+    return True
+
+
+# ── 👮 Admin paneli ──
+
+async def admin_panel(bot, chat_id, user_id):
+    try:
+        m = await bot.get_chat_member(chat_id, user_id)
+    except TelegramError:
+        m = None
+    name = user_mention(user_id, m.user.first_name if m else user_id)
+    rows = []
+    if m and m.status == ChatMemberStatus.OWNER:
+        note = st_t(chat_id, "adm_owner")
+    elif not m or m.status != ChatMemberStatus.ADMINISTRATOR:
+        note = st_t(chat_id, "adm_not")
+    else:
+        editable = getattr(m, "can_be_edited", False)
+        note = st_t(chat_id, "adm_editable" if editable else "adm_locked")
+        labels = SETTINGS_TEXT[mod_lang(chat_id)]["rights"]
+        for i, right in enumerate(ADMIN_RIGHTS):
+            mark = "✅" if getattr(m, right, False) else "❌"
+            data = f"ga:{chat_id}:{user_id}:r{i}" if editable else "noop"
+            rows.append([InlineKeyboardButton(f"{mark} {labels[right]}", callback_data=data)])
+        if editable:
+            rows.append([InlineKeyboardButton(st_t(chat_id, "b_demote"), callback_data=f"ga:{chat_id}:{user_id}:demote")])
+    rows.append([gs_btn(chat_id, st_t(chat_id, "b_admins"), "adm")])
+    return st_t(chat_id, "adm_panel", name=name, note=note), InlineKeyboardMarkup(rows)
+
+
+def admin_panel_buttons(context, chat_id, user_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(st_t(chat_id, "b_rights"), callback_data=f"ga:{chat_id}:{user_id}")],
+        [InlineKeyboardButton(st_t(chat_id, "b_private"), url=family_url(context, f"ga_{abs(chat_id)}_{user_id}"))],
+    ])
+
+
+async def set_admin_rights(bot, chat_id, user_id, rights):
+    await bot.promote_chat_member(chat_id, user_id, can_manage_chat=any(rights.values()), **rights)
+    ADMIN_CACHE.pop(chat_id, None)
+
+
+async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split(":")
+    chat_id, user_id = int(parts[1]), int(parts[2])
+    action = parts[3] if len(parts) > 3 else ""
+    here = q.message.chat
+    if not await can_manage_admins(context.bot, chat_id, q.from_user.id):
+        await q.answer(st_t(chat_id, "need_promoter"), show_alert=True)
+        return
+    try:
+        if action.startswith("r") and action[1:].isdigit() and int(action[1:]) < len(ADMIN_RIGHTS):
+            m = await context.bot.get_chat_member(chat_id, user_id)
+            rights = {r: bool(getattr(m, r, False)) for r in ADMIN_RIGHTS}
+            right = ADMIN_RIGHTS[int(action[1:])]
+            rights[right] = not rights[right]
+            await set_admin_rights(context.bot, chat_id, user_id, rights)
+        elif action == "demote":
+            await set_admin_rights(context.bot, chat_id, user_id, {r: False for r in ADMIN_RIGHTS})
+            await q.answer()
+            name = user_mention(user_id, (await context.bot.get_chat_member(chat_id, user_id)).user.first_name)
+            await edit(context.bot, here.id, q.message.message_id, st_t(chat_id, "demoted", name=name),
+                       InlineKeyboardMarkup([[gs_btn(chat_id, st_t(chat_id, "b_admins"), "adm")]]))
+            return
+    except TelegramError as e:
+        logger.warning("Admin paneli: huquq o'zgarmadi: %s", e)
+        await q.answer(st_t(chat_id, "no_promote"), show_alert=True)
+        return
+    await q.answer()
+    text, kb = await admin_panel(context.bot, chat_id, user_id)
+    await edit(context.bot, here.id, q.message.message_id, text, kb)
+
+
+async def cmd_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat:
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text(mod_t(chat.id, "group_only"))
+        return
+    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    if not user or not await can_manage_admins(context.bot, chat.id, user.id):
+        await msg.reply_text(st_t(chat.id, "need_promoter"))
+        return
+    target, name, target_is_bot, args = await mod_target(update, context)
+    if not target:
+        await msg.reply_text(mod_t(chat.id, "need_target"))
+        return
+    if target == context.bot.id:
+        await msg.reply_text(mod_t(chat.id, "target_bot"))
+        return
+    try:
+        if command == "promote":
+            await set_admin_rights(context.bot, chat.id, target, dict(PROMOTE_DEFAULTS))
+            title = " ".join(args).strip()[:16]
+            if title:
+                try:
+                    await context.bot.set_chat_administrator_custom_title(chat.id, target, title)
+                except TelegramError:
+                    pass
+            await msg.reply_text(st_t(chat.id, "promoted", name=name),
+                                 reply_markup=admin_panel_buttons(context, chat.id, target))
+        else:
+            await set_admin_rights(context.bot, chat.id, target, {r: False for r in ADMIN_RIGHTS})
+            await msg.reply_text(st_t(chat.id, "demoted", name=name))
+    except TelegramError as e:
+        logger.warning("/%s bajarilmadi: %s", command, e)
+        await msg.reply_text(st_t(chat.id, "no_promote"))
+
+
+async def announce_new_admin(context, event):
+    """Kimdir Telegram orqali admin qilinsa — panelga o'tish tugmasini chiqaradi."""
+    old, new = event.old_chat_member, event.new_chat_member
+    ADMIN_CACHE.pop(event.chat.id, None)
+    if new.status != ChatMemberStatus.ADMINISTRATOR or old.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+        return
+    if new.user.is_bot or (event.from_user and event.from_user.id == context.bot.id):
+        return   # /promote orqali — xabar allaqachon chiqqan
+    chat_id = event.chat.id
+    try:
+        await context.bot.send_message(
+            chat_id, st_t(chat_id, "promoted_ext", name=user_mention(new.user.id, new.user.first_name)),
+            reply_markup=admin_panel_buttons(context, chat_id, new.user.id),
+        )
+    except TelegramError as e:
+        logger.warning("Yangi admin e'loni yuborilmadi: %s", e)
+
+
+async def settings_start_payload(update, context, payload):
+    """?start=gs_<|chat|> yoki ga_<|chat|>_<uid> — shaxsiy chatda ochish. True — qayta ishlandi."""
+    m = re.fullmatch(r"gs_(\d+)|ga_(\d+)_(\d+)", payload or "")
+    if not m:
+        return False
+    msg = update.effective_message
+    user = update.effective_user
+    if m.group(1):
+        chat_id = -int(m.group(1))
+        if not await user_is_chat_admin(context.bot, chat_id, user.id):
+            await msg.reply_text(st_t(chat_id, "not_admin_of"))
+            return True
+        text, kb = await settings_page(context.bot, chat_id, "home")
+    else:
+        chat_id, target = -int(m.group(2)), int(m.group(3))
+        if not await can_manage_admins(context.bot, chat_id, user.id):
+            await msg.reply_text(st_t(chat_id, "need_promoter"))
+            return True
+        text, kb = await admin_panel(context.bot, chat_id, target)
+    await msg.reply_text(text, reply_markup=kb)
+    return True
 
 
 
@@ -14141,6 +14593,7 @@ def main():
         (["farzand", "kids"], cmd_farzand),
         (["settings", "sozlamalar"], cmd_settings),
         (["warn", "unwarn", "warns", "mute", "unmute", "ban", "unban", "kick"], cmd_mod),
+        (["promote", "demote"], cmd_promote),
         (["shop"], cmd_shop),
         (["pul"], cmd_pul),
         (["hisob"], cmd_hisob),
@@ -14183,6 +14636,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_kid, pattern=r"^kid:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_captcha, pattern=r"^cap:\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_settings, pattern=r"^gs:-?\d+:\w+$"))
+    app.add_handler(CallbackQueryHandler(cb_admin, pattern=r"^ga:-?\d+:\d+(:\w+)?$"))
     app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash|memory):\d+:(uz|eng|ru|kz)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))

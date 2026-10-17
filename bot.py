@@ -1775,7 +1775,7 @@ async def cmd_oila(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append(family_text(user.id, "rank", ranking="\n".join(ranking) if ranking else "—"))
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(family_text(user.id, "child"), url=family_url(context, "child"))],
-        [InlineKeyboardButton(kid_t(user.id, "oila_btn"), callback_data=f"kid:{user.id}:open")],
+        [InlineKeyboardButton(kid_t(user.id, "oila_btn"), url=family_url(context, "kids"))],
     ])
     await msg.reply_text("\n".join(lines), reply_markup=kb)
 
@@ -1835,6 +1835,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await cmd_shop(update, context)
             return
         if payload and await handle_family_start(update, context, payload):
+            return
+        # /profil, /oila va do'kondagi URL tugmalar shu yerga olib keladi.
+        section = {
+            "bank": lambda: bank_banks_view(user.id, user.id),
+            "birja": lambda: birja_home_view(user.id, user.id),
+            "kids": lambda: kid_list_view(user.id),
+        }.get(payload)
+        if section:
+            text, kb = section()
+            await msg.reply_text(text, reply_markup=kb)
             return
         gender = db().execute(
             "SELECT gender FROM user_gender WHERE user_id=?", (user.id,)
@@ -3197,8 +3207,11 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ru": ("🏦 Банки", "📈 Биржа"), "kz": ("🏦 Банктер", "📈 Биржа"),
     }.get(profile_lang, ("🏦 Banklar", "📈 Birja"))
     profile_buttons.insert(1, [
-        InlineKeyboardButton(bank_label, callback_data=f"bk:{user.id}:open"),
-        InlineKeyboardButton(birja_label, callback_data=f"bx:{user.id}:open"),
+        InlineKeyboardButton(bank_label, url=family_url(context, "bank")),
+        InlineKeyboardButton(birja_label, url=family_url(context, "birja")),
+    ])
+    profile_buttons.insert(2, [
+        InlineKeyboardButton(kid_t(user.id, "oila_btn"), url=family_url(context, "kids")),
     ])
     profile_text = t(
         chat.id,
@@ -10303,7 +10316,7 @@ async def cmd_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
       [InlineKeyboardButton({"uz":"💞 Juftimga","eng":"💞 To my partner","ru":"💞 Моей паре","kz":"💞 Жұбыма"}.get(lang,"💞 Juftimga"), callback_data="shop:partner"),
        InlineKeyboardButton({"uz":"👤 Boshqaga","eng":"👤 Someone else","ru":"👤 Другому","kz":"👤 Басқаға"}.get(lang,"👤 Boshqaga"), callback_data="shop:other")],
-      [InlineKeyboardButton(kid_t(user.id, "shop_btn"), callback_data=f"kid:{user.id}:open")],
+      [InlineKeyboardButton(kid_t(user.id, "shop_btn"), url=family_url(context, "kids"))],
     ])
     await update.effective_message.reply_text(f"{labels.get(lang, labels['uz'])}\n\n{who.get(lang, who['uz'])}", reply_markup=kb)
 

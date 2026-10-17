@@ -4532,10 +4532,229 @@ async def _cb_memory_locked(update: Update, context: ContextTypes.DEFAULT_TYPE):
 HEAT = [(3, "heat_hot"), (10, "heat_warm"), (25, "heat_cool"), (10**9, "heat_cold")]
 
 
+# ───────────────────────────── 📢 "bot" — guruh a'zolarini chaqirish ─────────────────────────────
+# Bot egasi yoki bot paneli admini guruhda "bot" deb yozsa, bot guruh a'zolarini
+# 5 tadan belgilab chiqadi. "bot kelish" — har bir a'zo "@username kelish" ko'rinishida
+# chaqiriladi. "stop" — jarayonni to'xtatadi.
+# Telegram botga guruh a'zolarining to'liq ro'yxatini bermaydi, shuning uchun bot
+# guruhda yozgan / qo'shilgan a'zolarni group_members jadvalida o'zi yig'ib boradi.
+
+TAG_WORDS = {"bot", "бот"}
+TAG_STOP_WORDS = {"stop", "стоп", "bot stop", "бот стоп"}
+TAG_TEXT_MAX = 200      # "bot ..." dan keyingi matnning eng katta uzunligi
+TAG_BATCH = 5           # bitta xabardagi belgilar soni
+TAG_DELAY = 3.0         # xabarlar orasidagi pauza (guruh flood-limitidan saqlaydi)
+TAG_TASKS: dict[int, asyncio.Task] = {}
+
+TAG_TEXT = {
+    "uz": {
+        "head": "📢 <b>Diqqat!</b>",
+        "busy": "⏳ A'zolar hozir chaqirilyapti. To'xtatish: <b>stop</b>",
+        "empty": "🤷 Bot hali bu guruh a'zolarini bilmaydi. A'zolar guruhda yozganda ular ro'yxatga qo'shiladi.",
+        "done": "✅ <b>{n}</b> ta a'zo chaqirildi.",
+        "stopped": "🛑 Chaqirish to'xtatildi ({n} ta a'zo chaqirildi).",
+    },
+    "eng": {
+        "head": "📢 <b>Attention!</b>",
+        "busy": "⏳ Members are being tagged right now. To stop: <b>stop</b>",
+        "empty": "🤷 The bot doesn't know this group's members yet. Members are added when they write in the group.",
+        "done": "✅ <b>{n}</b> members tagged.",
+        "stopped": "🛑 Tagging stopped ({n} members tagged).",
+    },
+    "ru": {
+        "head": "📢 <b>Внимание!</b>",
+        "busy": "⏳ Участники уже упоминаются. Остановить: <b>стоп</b>",
+        "empty": "🤷 Бот пока не знает участников этой группы. Они добавляются, когда пишут в группе.",
+        "done": "✅ Упомянуто участников: <b>{n}</b>.",
+        "stopped": "🛑 Упоминание остановлено (упомянуто: {n}).",
+    },
+    "kz": {
+        "head": "📢 <b>Назар аударыңыз!</b>",
+        "busy": "⏳ Мүшелер қазір белгіленуде. Тоқтату: <b>стоп</b>",
+        "empty": "🤷 Бот бұл топтың мүшелерін әлі білмейді. Олар топта жазғанда тізімге қосылады.",
+        "done": "✅ <b>{n}</b> мүше белгіленді.",
+        "stopped": "🛑 Белгілеу тоқтатылды ({n} мүше белгіленді).",
+    },
+}
+
+
+def tag_t(chat_id, key, **kwargs):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    text = TAG_TEXT.get(lang, TAG_TEXT["uz"]).get(key) or TAG_TEXT["uz"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def init_group_members():
+    c = db()
+    with c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS group_members (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                last_seen TEXT NOT NULL,
+                PRIMARY KEY (chat_id, user_id)
+            )
+        """)
+        # Birinchi ishga tushishda guruhda o'ynagan a'zolarni ro'yxatga olamiz.
+        c.execute("""
+            INSERT OR IGNORE INTO group_members(chat_id, user_id, last_seen)
+            SELECT chat_id, user_id, ? FROM chat_stats WHERE chat_id < 0
+        """, (datetime.utcnow().isoformat(),))
+
+
+def member_seen(chat_id, user):
+    if not user or user.is_bot:
+        return
+    if _SEEN.get(user.id) != (user.username, user.first_name):
+        save_user(user)
+    c = db()
+    with c:
+        c.execute(
+            """
+            INSERT INTO group_members(chat_id, user_id, last_seen) VALUES (?, ?, ?)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET last_seen = excluded.last_seen
+            """,
+            (chat_id, user.id, datetime.utcnow().isoformat()),
+        )
+
+
+def member_left(chat_id, user_id):
+    c = db()
+    with c:
+        c.execute("DELETE FROM group_members WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+
+
+async def track_group_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Guruhdagi har bir xabardan a'zolar ro'yxatini yangilaydi (boshqa handlerlarga ta'sir qilmaydi)."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat or chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    try:
+        member_seen(chat.id, update.effective_user)
+        for new in msg.new_chat_members or ():
+            member_seen(chat.id, new)
+        if msg.left_chat_member:
+            member_left(chat.id, msg.left_chat_member.id)
+    except sqlite3.Error:
+        logger.exception("group_members yangilanmadi")
+
+
+async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bot admin bo'lgan guruhlarda kirish/chiqishlarni kuzatadi."""
+    event = update.chat_member
+    if not event or event.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    member = event.new_chat_member
+    try:
+        if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+            member_left(event.chat.id, member.user.id)
+        else:
+            member_seen(event.chat.id, member.user)
+    except sqlite3.Error:
+        logger.exception("group_members yangilanmadi")
+
+
+async def tag_members(bot, chat_id, note=""):
+    c = db()
+    rows = c.execute(
+        """
+        SELECT g.user_id, u.first_name, u.username
+        FROM group_members g LEFT JOIN users u ON u.user_id = g.user_id
+        WHERE g.chat_id = ?
+        ORDER BY g.last_seen DESC
+        """,
+        (chat_id,),
+    ).fetchall()
+    members = {
+        uid: escape(f"@{username}") if username else pretty_name(first, username)
+        for uid, first, username in rows
+    }
+
+    # Guruh adminlari har doim ma'lum — ularni ham qo'shamiz.
+    try:
+        for admin in await bot.get_chat_administrators(chat_id):
+            a = admin.user
+            if not a.is_bot and a.id not in members:
+                members[a.id] = escape(f"@{a.username}") if a.username else uname(a)
+    except TelegramError as e:
+        logger.warning("Adminlar ro'yxati olinmadi: %s", e)
+
+    if not members:
+        await bot.send_message(chat_id, tag_t(chat_id, "empty"))
+        return
+
+    tagged = 0
+    items = list(members.items())
+    try:
+        for i in range(0, len(items), TAG_BATCH):
+            batch = items[i:i + TAG_BATCH]
+            links = [f'<a href="tg://user?id={uid}">{name}</a>' for uid, name in batch]
+            if note:
+                # "bot kelish" → har bir qatorda: @username kelish
+                text = "\n".join(f"{link} {note}" for link in links)
+            else:
+                text = f"{tag_t(chat_id, 'head')}\n" + " ".join(links)
+            await _send_retry(lambda: bot.send_message(chat_id, text))
+            tagged += len(batch)
+            if i + TAG_BATCH < len(items):
+                await asyncio.sleep(TAG_DELAY)
+    except asyncio.CancelledError:
+        await bot.send_message(chat_id, tag_t(chat_id, "stopped", n=tagged))
+        raise
+    await bot.send_message(chat_id, tag_t(chat_id, "done", n=tagged))
+
+
+async def maybe_tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'bot [matn]' / 'stop' buyrug'i bo'lsa — bajaradi va True qaytaradi."""
+    msg = update.effective_message
+    user = update.effective_user
+    raw = msg.text.strip()
+    text = raw.lower()
+    first, _, rest = raw.partition(" ")
+    is_start = first.lower() in TAG_WORDS
+    if not is_start and text not in TAG_STOP_WORDS:
+        return False
+    if not is_panel_admin(user.id):
+        return False
+
+    chat_id = msg.chat_id
+    running = TAG_TASKS.get(chat_id)
+
+    if text in TAG_STOP_WORDS:
+        if not running or running.done():
+            return False   # oddiy "stop" so'zi — tag ketmayapti, boshqa handlerlarga o'tkazamiz
+        running.cancel()
+        return True
+
+    note = escape(" ".join(rest.split())[:TAG_TEXT_MAX])
+
+    if running and not running.done():
+        await msg.reply_text(tag_t(chat_id, "busy"))
+        return True
+
+    task = asyncio.create_task(tag_members(context.bot, chat_id, note))
+    TAG_TASKS[chat_id] = task
+    BG_TASKS.add(task)
+
+    def _done(t):
+        BG_TASKS.discard(t)
+        if TAG_TASKS.get(chat_id) is t:
+            del TAG_TASKS[chat_id]
+        if not t.cancelled() and t.exception():
+            logger.error("A'zolarni chaqirishda xato", exc_info=t.exception())
+
+    task.add_done_callback(_done)
+    return True
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     user = update.effective_user
     if not msg or not msg.text or not user or user.is_bot:
+        return
+
+    if await maybe_tag_all(update, context):
         return
 
     chat_id = msg.chat_id
@@ -10057,6 +10276,7 @@ def main():
 
     init_db()
     init_economy()
+    init_group_members()
     load_crash_config()
 
     app = (
@@ -10104,6 +10324,9 @@ def main():
             app.add_handler(CommandHandler(names, handler))
 
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
+    # Alohida guruh (-1): a'zolar ro'yxatini yig'adi, asosiy handlerlarni to'smaydi.
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_member), group=-1)
     app.add_handler(CallbackQueryHandler(cb_shop, pattern=r"^shop:"))
     app.add_handler(CallbackQueryHandler(cb_contest, pattern=r"^contest:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_hadya, pattern=r"^hadya:claim:\d+$"))

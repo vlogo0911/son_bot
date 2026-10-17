@@ -4533,13 +4533,15 @@ HEAT = [(3, "heat_hot"), (10, "heat_warm"), (25, "heat_cool"), (10**9, "heat_col
 
 
 # ───────────────────────────── 📢 "bot" — guruh a'zolarini chaqirish ─────────────────────────────
-# Bot egasi yoki bot paneli admini guruhda shunchaki "bot" deb yozsa, bot guruh
-# a'zolarini 5 tadan belgilab chiqadi. "bot stop" — jarayonni to'xtatadi.
+# Bot egasi yoki bot paneli admini guruhda "bot" deb yozsa, bot guruh a'zolarini
+# 5 tadan belgilab chiqadi. "bot kelish" — har bir a'zo "@username kelish" ko'rinishida
+# chaqiriladi. "stop" — jarayonni to'xtatadi.
 # Telegram botga guruh a'zolarining to'liq ro'yxatini bermaydi, shuning uchun bot
 # guruhda yozgan / qo'shilgan a'zolarni group_members jadvalida o'zi yig'ib boradi.
 
 TAG_WORDS = {"bot", "бот"}
-TAG_STOP_WORDS = {"bot stop", "бот стоп", "bot to'xta", "bot to‘xta"}
+TAG_STOP_WORDS = {"stop", "стоп", "bot stop", "бот стоп"}
+TAG_TEXT_MAX = 200      # "bot ..." dan keyingi matnning eng katta uzunligi
 TAG_BATCH = 5           # bitta xabardagi belgilar soni
 TAG_DELAY = 3.0         # xabarlar orasidagi pauza (guruh flood-limitidan saqlaydi)
 TAG_TASKS: dict[int, asyncio.Task] = {}
@@ -4547,28 +4549,28 @@ TAG_TASKS: dict[int, asyncio.Task] = {}
 TAG_TEXT = {
     "uz": {
         "head": "📢 <b>Diqqat!</b>",
-        "busy": "⏳ A'zolar hozir chaqirilyapti. To'xtatish: <b>bot stop</b>",
+        "busy": "⏳ A'zolar hozir chaqirilyapti. To'xtatish: <b>stop</b>",
         "empty": "🤷 Bot hali bu guruh a'zolarini bilmaydi. A'zolar guruhda yozganda ular ro'yxatga qo'shiladi.",
         "done": "✅ <b>{n}</b> ta a'zo chaqirildi.",
         "stopped": "🛑 Chaqirish to'xtatildi ({n} ta a'zo chaqirildi).",
     },
     "eng": {
         "head": "📢 <b>Attention!</b>",
-        "busy": "⏳ Members are being tagged right now. To stop: <b>bot stop</b>",
+        "busy": "⏳ Members are being tagged right now. To stop: <b>stop</b>",
         "empty": "🤷 The bot doesn't know this group's members yet. Members are added when they write in the group.",
         "done": "✅ <b>{n}</b> members tagged.",
         "stopped": "🛑 Tagging stopped ({n} members tagged).",
     },
     "ru": {
         "head": "📢 <b>Внимание!</b>",
-        "busy": "⏳ Участники уже упоминаются. Остановить: <b>бот стоп</b>",
+        "busy": "⏳ Участники уже упоминаются. Остановить: <b>стоп</b>",
         "empty": "🤷 Бот пока не знает участников этой группы. Они добавляются, когда пишут в группе.",
         "done": "✅ Упомянуто участников: <b>{n}</b>.",
         "stopped": "🛑 Упоминание остановлено (упомянуто: {n}).",
     },
     "kz": {
         "head": "📢 <b>Назар аударыңыз!</b>",
-        "busy": "⏳ Мүшелер қазір белгіленуде. Тоқтату: <b>бот стоп</b>",
+        "busy": "⏳ Мүшелер қазір белгіленуде. Тоқтату: <b>стоп</b>",
         "empty": "🤷 Бот бұл топтың мүшелерін әлі білмейді. Олар топта жазғанда тізімге қосылады.",
         "done": "✅ <b>{n}</b> мүше белгіленді.",
         "stopped": "🛑 Белгілеу тоқтатылды ({n} мүше белгіленді).",
@@ -4653,7 +4655,7 @@ async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("group_members yangilanmadi")
 
 
-async def tag_members(bot, chat_id):
+async def tag_members(bot, chat_id, note=""):
     c = db()
     rows = c.execute(
         """
@@ -4664,13 +4666,17 @@ async def tag_members(bot, chat_id):
         """,
         (chat_id,),
     ).fetchall()
-    members = {uid: pretty_name(first, username) for uid, first, username in rows}
+    members = {
+        uid: escape(f"@{username}") if username else pretty_name(first, username)
+        for uid, first, username in rows
+    }
 
     # Guruh adminlari har doim ma'lum — ularni ham qo'shamiz.
     try:
         for admin in await bot.get_chat_administrators(chat_id):
-            if not admin.user.is_bot and admin.user.id not in members:
-                members[admin.user.id] = uname(admin.user)
+            a = admin.user
+            if not a.is_bot and a.id not in members:
+                members[a.id] = escape(f"@{a.username}") if a.username else uname(a)
     except TelegramError as e:
         logger.warning("Adminlar ro'yxati olinmadi: %s", e)
 
@@ -4683,10 +4689,13 @@ async def tag_members(bot, chat_id):
     try:
         for i in range(0, len(items), TAG_BATCH):
             batch = items[i:i + TAG_BATCH]
-            mentions = " ".join(f'<a href="tg://user?id={uid}">{name}</a>' for uid, name in batch)
-            await _send_retry(lambda: bot.send_message(
-                chat_id, f"{tag_t(chat_id, 'head')}\n{mentions}"
-            ))
+            links = [f'<a href="tg://user?id={uid}">{name}</a>' for uid, name in batch]
+            if note:
+                # "bot kelish" → har bir qatorda: @username kelish
+                text = "\n".join(f"{link} {note}" for link in links)
+            else:
+                text = f"{tag_t(chat_id, 'head')}\n" + " ".join(links)
+            await _send_retry(lambda: bot.send_message(chat_id, text))
             tagged += len(batch)
             if i + TAG_BATCH < len(items):
                 await asyncio.sleep(TAG_DELAY)
@@ -4697,11 +4706,14 @@ async def tag_members(bot, chat_id):
 
 
 async def maybe_tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """'bot' / 'bot stop' buyrug'i bo'lsa — bajaradi va True qaytaradi."""
+    """'bot [matn]' / 'stop' buyrug'i bo'lsa — bajaradi va True qaytaradi."""
     msg = update.effective_message
     user = update.effective_user
-    text = msg.text.strip().lower()
-    if text not in TAG_WORDS and text not in TAG_STOP_WORDS:
+    raw = msg.text.strip()
+    text = raw.lower()
+    first, _, rest = raw.partition(" ")
+    is_start = first.lower() in TAG_WORDS
+    if not is_start and text not in TAG_STOP_WORDS:
         return False
     if not is_panel_admin(user.id):
         return False
@@ -4710,15 +4722,18 @@ async def maybe_tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     running = TAG_TASKS.get(chat_id)
 
     if text in TAG_STOP_WORDS:
-        if running and not running.done():
-            running.cancel()
+        if not running or running.done():
+            return False   # oddiy "stop" so'zi — tag ketmayapti, boshqa handlerlarga o'tkazamiz
+        running.cancel()
         return True
+
+    note = escape(" ".join(rest.split())[:TAG_TEXT_MAX])
 
     if running and not running.done():
         await msg.reply_text(tag_t(chat_id, "busy"))
         return True
 
-    task = asyncio.create_task(tag_members(context.bot, chat_id))
+    task = asyncio.create_task(tag_members(context.bot, chat_id, note))
     TAG_TASKS[chat_id] = task
     BG_TASKS.add(task)
 

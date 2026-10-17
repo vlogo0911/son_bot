@@ -23,6 +23,7 @@ from html import escape
 
 from telegram import (
     BotCommand,
+    ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQueryResultArticle,
@@ -34,6 +35,7 @@ from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
@@ -8545,17 +8547,17 @@ async def post_init(application: Application):
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
-            ("reyting", "🏆 Reyting"), ("aktiv", "📊 Eng faollar"), ("profil", "👤 Profil"), ("farzand", "👶 Farzandlarim"), ("scrash", "🛑 Crashni to‘xtatish"),
+            ("reyting", "🏆 Reyting"), ("aktiv", "📊 Eng faollar"), ("profil", "👤 Profil"), ("farzand", "👶 Farzandlarim"), ("settings", "⚙️ Guruh sozlamalari"), ("scrash", "🛑 Crashni to‘xtatish"),
             ("qoidalar", "📚 Qoidalar"), ("lang", "🌐 Til"), ("help", "❓ Yordam"),
         ],
         "en": [
             ("emps", "🎮 Choose a game"), ("stop", "🛑 Stop the game"),
-            ("reyting", "🏆 Leaderboard"), ("aktiv", "📊 Most active"), ("profil", "👤 Profile"), ("farzand", "👶 My children"), ("scrash", "🛑 Stop Crash"),
+            ("reyting", "🏆 Leaderboard"), ("aktiv", "📊 Most active"), ("profil", "👤 Profile"), ("farzand", "👶 My children"), ("settings", "⚙️ Group settings"), ("scrash", "🛑 Stop Crash"),
             ("qoidalar", "📚 Rules"), ("lang", "🌐 Language"), ("help", "❓ Help"),
         ],
         "ru": [
             ("emps", "🎮 Выбрать игру"), ("stop", "🛑 Остановить игру"),
-            ("reyting", "🏆 Рейтинг"), ("aktiv", "📊 Самые активные"), ("profil", "👤 Профиль"), ("farzand", "👶 Мои дети"), ("scrash", "🛑 Остановить Crash"),
+            ("reyting", "🏆 Рейтинг"), ("aktiv", "📊 Самые активные"), ("profil", "👤 Профиль"), ("farzand", "👶 Мои дети"), ("settings", "⚙️ Настройки группы"), ("scrash", "🛑 Остановить Crash"),
             ("qoidalar", "📚 Правила"), ("lang", "🌐 Язык"), ("help", "❓ Помощь"),
         ],
     }
@@ -13462,6 +13464,640 @@ async def cb_kid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 
+# ───────────────────────────── 🛡 GURUH HIMOYASI (Group Help uslubida, kulgili) ─────────────────────────────
+# Captcha (emoji tanlash), xush kelibsiz, anti-reklama, anti-flood, /warn /mute /ban /kick va /settings.
+# Sozlamalar guruh bo'yicha `group_settings` jadvalida. Standart: faqat salomlashish yoqiq — qolganini
+# adminlar /settings orqali yoqadi. Bot guruhda admin bo'lishi kerak (o'chirish va bloklash huquqi bilan).
+
+GUARD_DEFAULTS = {"captcha": 0, "welcome": 1, "antilink": 0, "antiflood": 0, "warn_limit": 3, "warn_action": "mute"}
+CAPTCHA_TTL = 120               # captcha uchun vaqt (soniya)
+FLOOD_COUNT, FLOOD_WINDOW = 7, 5   # 5 soniyada 7 ta xabar — flood
+FLOOD_MUTE = 300                # flood uchun jim qilish (soniya)
+WARN_MUTE = 86400               # ogohlantirish limiti → 1 kun jim
+NOTICE_TTL = 20                 # anti-reklama/flood xabarlari shuncha soniyadan keyin o'chadi
+ADMIN_CACHE_TTL = 300
+CAPTCHA_ITEMS = [
+    ("🍌", {"uz": "bananni", "eng": "the banana", "ru": "банан", "kz": "бананды"}),
+    ("🍉", {"uz": "tarvuzni", "eng": "the watermelon", "ru": "арбуз", "kz": "қарбызды"}),
+    ("🐸", {"uz": "qurbaqani", "eng": "the frog", "ru": "лягушку", "kz": "бақаны"}),
+    ("🚀", {"uz": "raketani", "eng": "the rocket", "ru": "ракету", "kz": "зымыранды"}),
+    ("🍕", {"uz": "pitsani", "eng": "the pizza", "ru": "пиццу", "kz": "пиццаны"}),
+    ("🐱", {"uz": "mushukni", "eng": "the cat", "ru": "кота", "kz": "мысықты"}),
+    ("⚽", {"uz": "to‘pni", "eng": "the ball", "ru": "мяч", "kz": "допты"}),
+    ("🎈", {"uz": "sharni", "eng": "the balloon", "ru": "шарик", "kz": "шарды"}),
+]
+_LINK_RE = re.compile(r"(https?://|www\.|t\.me/|telegram\.me/|\b[\w-]+\.(com|ru|uz|net|org|io|me|xyz|link|site|info)\b)", re.I)
+ADMIN_CACHE: dict[int, tuple[float, set]] = {}
+FLOOD_TRACK: dict[tuple, list] = {}
+CAPTCHA_PENDING: dict[tuple, dict] = {}
+
+MOD_TEXT = {
+    "uz": {
+        "welcome": [
+            "🎉 Diqqat, diqqat! Guruhga {name} tashrif buyurdi! Choy qo‘yinglar ☕",
+            "👋 {name}, xush kelibsiz! Bu yerda o‘yin, kulgi va ozgina tartib bor 😎",
+            "🚪 Eshik ochildi va… {name} kirib keldi! Qarsaklar 👏👏👏",
+            "🛸 Yangi mehmon qo‘ndi: {name}. Kosmik salom! 👽",
+            "🍉 {name} keldi — endi guruh yanada shirinroq bo‘ldi!",
+            "🎺 Tan-ta-ram! {name} sahnaga chiqdi! Kutib oling 🥳",
+        ],
+        "captcha": "🤖 {name}, avval isbotla — odammisan yoki robot?\n\n👇 <b>{emoji} {thing}</b> bos! ({sec} soniya)",
+        "cap_ok": "✅ Tabriklaymiz, {name} — 100% inson! 🧬 Endi bemalol yozishingiz mumkin.",
+        "cap_wrong": "🤖 Bip-bup! {name} robot ekani aniqlandi. Zavodga qaytarildi 🏭",
+        "cap_timeout": "⌛ {name} o‘ylab-o‘ylab uxlab qoldi 😴 — guruhdan chiqarildi.",
+        "cap_not_you": "✋ Bu tugma sen uchun emas — sen allaqachon odamsan 😄",
+        "link": [
+            "🧹 {name}, reklama supurib tashlandi! Bu yer bozor emas 😅",
+            "🚫 {name}, havola tashlash mumkin emas — internetni boshqa joyga olib boring 🌐",
+            "🕵️ {name}, havola ushlandi va yo‘q qilindi. Biz hammasini ko‘ramiz 👀",
+        ],
+        "flood": [
+            "🐢 {name}, sekinroq! Klaviaturang yonib ketyapti 🔥 — {dur} dam ol.",
+            "🌊 {name} xabarlar to‘foni boshladi! Qutqaruv xizmati {dur} jimlik e’lon qildi 🛟",
+        ],
+        "warn": "⚠️ {name} sariq kartochka oldi! ({n}/{limit})",
+        "warn_reason": "\n📝 Sabab: {reason}",
+        "warn_mute": "🟥 Qizil kartochka! {name} {limit}/{limit} — {dur}ga og‘ziga skotch yopishtirildi 🤐",
+        "warn_ban": "🟥 Qizil kartochka! {name} maydondan butunlay chiqarildi 🚀",
+        "unwarn": "🧽 {name} ning bitta ogohlantirishi o‘chirildi ({n}/{limit}).",
+        "warns": "📋 {name}: {n}/{limit} ogohlantirish.",
+        "mute": [
+            "🤐 {name} ning og‘ziga {dur}ga skotch yopishtirildi.",
+            "🔇 {name} {dur}ga ovozsiz rejimga o‘tkazildi. Dam ol, do‘stim 🧘",
+        ],
+        "unmute": "🗣 {name} yana gapira oladi! Skotch olib tashlandi 🎉",
+        "ban": [
+            "🚀 {name} kosmosga uchirildi! Qaytib kelmasa kerak 👋",
+            "🔨 Hakam hushtagi! {name} butunlay chetlatildi.",
+        ],
+        "unban": "🕊 {name} amnistiya oldi — qaytib kirishi mumkin.",
+        "kick": "🦶 {name} guruhdan tepib chiqarildi! (xohlasa qaytib kirishi mumkin)",
+        "need_target": "↩️ Kimningdir xabariga reply qilib yozing yoki ID / @username kiriting.",
+        "not_admin": "⛔ Bu buyruq faqat adminlar uchun. Yaxshi urinish edi 😏",
+        "target_admin": "😅 Adminga qarshi? Yo‘q, bunday qilmaymiz.",
+        "target_bot": "🤖 O‘zimni jazolamayman — men bu yerda kerakman!",
+        "no_rights": "😓 Menda bunga huquq yo‘q. Meni admin qilib, «a’zolarni bloklash» va «xabarlarni o‘chirish» huquqini bering.",
+        "group_only": "👥 Bu buyruq faqat guruhda ishlaydi.",
+        "settings": "⚙️ <b>GURUH SOZLAMALARI</b>\n\nTugmani bosib yoqing / o‘chiring 👇",
+        "s_captcha": "🤖 Captcha", "s_welcome": "👋 Salomlashish", "s_antilink": "🔗 Anti-reklama",
+        "s_antiflood": "🌊 Anti-flood", "s_limit": "⚠️ Ogohlantirish limiti: {n}",
+        "s_action": "🟥 Limitdan keyin: {a}", "a_mute": "🤐 1 kun jim", "a_ban": "🚀 Ban",
+        "s_saved": "✅ Saqlandi",
+        "units": {"m": "daqiqa", "h": "soat", "d": "kun"},
+    },
+    "eng": {
+        "welcome": ["🎉 Attention! {name} has entered the chat! Put the kettle on ☕",
+                    "🚪 The door opened and… {name} walked in! Applause 👏👏👏"],
+        "captcha": "🤖 {name}, prove it first — human or robot?\n\n👇 Tap <b>{emoji} {thing}</b>! ({sec} s)",
+        "cap_ok": "✅ Congrats, {name} — 100% human! 🧬 You can chat now.",
+        "cap_wrong": "🤖 Beep-boop! {name} turned out to be a robot. Sent back to the factory 🏭",
+        "cap_timeout": "⌛ {name} thought so long they fell asleep 😴 — removed from the group.",
+        "cap_not_you": "✋ This button isn't for you — you're already human 😄",
+        "link": ["🧹 {name}, the ad was swept away! This isn't a bazaar 😅"],
+        "flood": ["🐢 {name}, slow down! Your keyboard is on fire 🔥 — rest for {dur}."],
+        "warn": "⚠️ {name} got a yellow card! ({n}/{limit})", "warn_reason": "\n📝 Reason: {reason}",
+        "warn_mute": "🟥 Red card! {name} {limit}/{limit} — taped shut for {dur} 🤐",
+        "warn_ban": "🟥 Red card! {name} is sent off for good 🚀",
+        "unwarn": "🧽 One warning removed from {name} ({n}/{limit}).", "warns": "📋 {name}: {n}/{limit} warnings.",
+        "mute": ["🤐 {name} got their mouth taped for {dur}."],
+        "unmute": "🗣 {name} can talk again! Tape removed 🎉",
+        "ban": ["🚀 {name} was launched into space! Bye 👋"],
+        "unban": "🕊 {name} got amnesty — they may come back.",
+        "kick": "🦶 {name} was kicked out! (they can rejoin)",
+        "need_target": "↩️ Reply to someone's message or give an ID / @username.",
+        "not_admin": "⛔ Admins only. Nice try 😏", "target_admin": "😅 Against an admin? Nope.",
+        "target_bot": "🤖 I won't punish myself — I'm needed here!",
+        "no_rights": "😓 I don't have the rights. Make me admin with «ban users» and «delete messages».",
+        "group_only": "👥 This command works only in groups.",
+        "settings": "⚙️ <b>GROUP SETTINGS</b>\n\nTap to turn on / off 👇",
+        "s_captcha": "🤖 Captcha", "s_welcome": "👋 Welcome", "s_antilink": "🔗 Anti-ads",
+        "s_antiflood": "🌊 Anti-flood", "s_limit": "⚠️ Warn limit: {n}",
+        "s_action": "🟥 After limit: {a}", "a_mute": "🤐 1 day mute", "a_ban": "🚀 Ban", "s_saved": "✅ Saved",
+        "units": {"m": "min", "h": "h", "d": "d"},
+    },
+    "ru": {
+        "welcome": ["🎉 Внимание! В группу пришёл(ла) {name}! Ставьте чайник ☕",
+                    "🚪 Дверь открылась и… вошёл(ла) {name}! Аплодисменты 👏👏👏"],
+        "captcha": "🤖 {name}, сначала докажи — человек или робот?\n\n👇 Нажми <b>{emoji} {thing}</b>! ({sec} с)",
+        "cap_ok": "✅ Поздравляем, {name} — 100% человек! 🧬 Можно писать.",
+        "cap_wrong": "🤖 Бип-буп! {name} оказался роботом. Отправлен обратно на завод 🏭",
+        "cap_timeout": "⌛ {name} так долго думал(а), что уснул(а) 😴 — удалён(а) из группы.",
+        "cap_not_you": "✋ Эта кнопка не для тебя — ты уже человек 😄",
+        "link": ["🧹 {name}, реклама выметена! Здесь не базар 😅"],
+        "flood": ["🐢 {name}, помедленнее! Клавиатура горит 🔥 — отдохни {dur}."],
+        "warn": "⚠️ {name} получил(а) жёлтую карточку! ({n}/{limit})", "warn_reason": "\n📝 Причина: {reason}",
+        "warn_mute": "🟥 Красная карточка! {name} {limit}/{limit} — рот заклеен скотчем на {dur} 🤐",
+        "warn_ban": "🟥 Красная карточка! {name} удалён(а) с поля навсегда 🚀",
+        "unwarn": "🧽 С {name} снято одно предупреждение ({n}/{limit}).", "warns": "📋 {name}: {n}/{limit} предупреждений.",
+        "mute": ["🤐 {name} заклеили рот скотчем на {dur}."],
+        "unmute": "🗣 {name} снова может говорить! Скотч снят 🎉",
+        "ban": ["🚀 {name} отправлен(а) в космос! Пока 👋"],
+        "unban": "🕊 {name} амнистирован(а) — можно вернуться.",
+        "kick": "🦶 {name} выгнан(а) из группы! (может вернуться)",
+        "need_target": "↩️ Ответьте на сообщение человека или укажите ID / @username.",
+        "not_admin": "⛔ Только для админов. Хорошая попытка 😏", "target_admin": "😅 Против админа? Нет уж.",
+        "target_bot": "🤖 Себя наказывать не буду — я тут нужен!",
+        "no_rights": "😓 У меня нет прав. Сделайте меня админом с правами «блокировка» и «удаление сообщений».",
+        "group_only": "👥 Команда работает только в группах.",
+        "settings": "⚙️ <b>НАСТРОЙКИ ГРУППЫ</b>\n\nНажмите, чтобы включить / выключить 👇",
+        "s_captcha": "🤖 Капча", "s_welcome": "👋 Приветствие", "s_antilink": "🔗 Антиреклама",
+        "s_antiflood": "🌊 Антифлуд", "s_limit": "⚠️ Лимит предупреждений: {n}",
+        "s_action": "🟥 После лимита: {a}", "a_mute": "🤐 Мут на 1 день", "a_ban": "🚀 Бан", "s_saved": "✅ Сохранено",
+        "units": {"m": "мин", "h": "ч", "d": "дн"},
+    },
+    "kz": {
+        "welcome": ["🎉 Назар аударыңыз! Топқа {name} келді! Шай қойыңыздар ☕",
+                    "🚪 Есік ашылды да… {name} кірді! Қол шапалақ 👏👏👏"],
+        "captcha": "🤖 {name}, алдымен дәлелде — адамсың ба, робот па?\n\n👇 <b>{emoji} {thing}</b> бас! ({sec} с)",
+        "cap_ok": "✅ Құттықтаймыз, {name} — 100% адам! 🧬 Енді жаза аласыз.",
+        "cap_wrong": "🤖 Бип-буп! {name} робот болып шықты. Зауытқа қайтарылды 🏭",
+        "cap_timeout": "⌛ {name} ойлана-ойлана ұйықтап қалды 😴 — топтан шығарылды.",
+        "cap_not_you": "✋ Бұл батырма саған емес — сен онсыз да адамсың 😄",
+        "link": ["🧹 {name}, жарнама сыпырылып тасталды! Бұл базар емес 😅"],
+        "flood": ["🐢 {name}, ақырынырақ! Пернетақтаң өртеніп кетті 🔥 — {dur} демал."],
+        "warn": "⚠️ {name} сары карточка алды! ({n}/{limit})", "warn_reason": "\n📝 Себебі: {reason}",
+        "warn_mute": "🟥 Қызыл карточка! {name} {limit}/{limit} — {dur} аузына скотч жапсырылды 🤐",
+        "warn_ban": "🟥 Қызыл карточка! {name} алаңнан біржола шығарылды 🚀",
+        "unwarn": "🧽 {name} бір ескертуден босатылды ({n}/{limit}).", "warns": "📋 {name}: {n}/{limit} ескерту.",
+        "mute": ["🤐 {name} аузына {dur} скотч жапсырылды."],
+        "unmute": "🗣 {name} қайта сөйлей алады! Скотч алынды 🎉",
+        "ban": ["🚀 {name} ғарышқа ұшырылды! Сау бол 👋"],
+        "unban": "🕊 {name} рақымшылық алды — қайта кіре алады.",
+        "kick": "🦶 {name} топтан шығарылды! (қайта кіре алады)",
+        "need_target": "↩️ Біреудің хабарына жауап беріп жазыңыз немесе ID / @username көрсетіңіз.",
+        "not_admin": "⛔ Тек әкімшілер үшін. Жақсы әрекет 😏", "target_admin": "😅 Әкімшіге қарсы ма? Жоқ.",
+        "target_bot": "🤖 Өзімді жазаламаймын — мен мұнда керекпін!",
+        "no_rights": "😓 Менде құқық жоқ. Мені «бұғаттау» және «хабарды өшіру» құқығымен әкімші етіңіз.",
+        "group_only": "👥 Бұл команда тек топта жұмыс істейді.",
+        "settings": "⚙️ <b>ТОП БАПТАУЛАРЫ</b>\n\nҚосу / өшіру үшін басыңыз 👇",
+        "s_captcha": "🤖 Капча", "s_welcome": "👋 Сәлемдесу", "s_antilink": "🔗 Антижарнама",
+        "s_antiflood": "🌊 Антифлуд", "s_limit": "⚠️ Ескерту шегі: {n}",
+        "s_action": "🟥 Шектен кейін: {a}", "a_mute": "🤐 1 күн үнсіз", "a_ban": "🚀 Бан", "s_saved": "✅ Сақталды",
+        "units": {"m": "мин", "h": "сағ", "d": "күн"},
+    },
+}
+
+
+def mod_lang(chat_id):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    return lang if lang in MOD_TEXT else "uz"
+
+
+def mod_t(chat_id, key, **kwargs):
+    text = MOD_TEXT[mod_lang(chat_id)].get(key) or MOD_TEXT["uz"][key]
+    if isinstance(text, list):
+        text = random.choice(text)
+    return text.format(**kwargs) if kwargs else text
+
+
+def user_mention(user_id, name):
+    return f'<a href="tg://user?id={user_id}">{escape(str(name or user_id))}</a>'
+
+
+def init_guard():
+    c = db()
+    with c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS group_settings (
+                chat_id INTEGER PRIMARY KEY,
+                captcha INTEGER NOT NULL DEFAULT 0,
+                welcome INTEGER NOT NULL DEFAULT 1,
+                antilink INTEGER NOT NULL DEFAULT 0,
+                antiflood INTEGER NOT NULL DEFAULT 0,
+                warn_limit INTEGER NOT NULL DEFAULT 3,
+                warn_action TEXT NOT NULL DEFAULT 'mute'
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS group_warns (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (chat_id, user_id)
+            )
+        """)
+
+
+def gs_get(chat_id):
+    row = db().execute(
+        "SELECT captcha, welcome, antilink, antiflood, warn_limit, warn_action FROM group_settings WHERE chat_id=?",
+        (chat_id,),
+    ).fetchone()
+    return dict(zip(GUARD_DEFAULTS, row)) if row else dict(GUARD_DEFAULTS)
+
+
+def gs_set(chat_id, key, value):
+    if key not in GUARD_DEFAULTS:
+        return
+    c = db()
+    with c:
+        c.execute("INSERT OR IGNORE INTO group_settings(chat_id) VALUES (?)", (chat_id,))
+        c.execute(f"UPDATE group_settings SET {key}=? WHERE chat_id=?", (value, chat_id))
+
+
+async def admin_ids(bot, chat_id):
+    cached = ADMIN_CACHE.get(chat_id)
+    if cached and time.time() - cached[0] < ADMIN_CACHE_TTL:
+        return cached[1]
+    try:
+        ids = {m.user.id for m in await bot.get_chat_administrators(chat_id)}
+    except TelegramError:
+        ids = cached[1] if cached else set()
+    ADMIN_CACHE[chat_id] = (time.time(), ids)
+    return ids
+
+
+async def is_moderator(bot, msg, user):
+    """Bot egalari, guruh adminlari va anonim admin."""
+    if msg.sender_chat and msg.sender_chat.id == msg.chat_id:
+        return True
+    if not user or user.is_bot:
+        return False
+    return user.id in CAREER_OWNER_IDS or user.id in await admin_ids(bot, msg.chat_id)
+
+
+async def chat_default_permissions(bot, chat_id):
+    try:
+        chat = await bot.get_chat(chat_id)
+        if chat.permissions:
+            return chat.permissions
+    except TelegramError:
+        pass
+    return ChatPermissions(
+        can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True,
+        can_send_videos=True, can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True,
+        can_send_other_messages=True, can_add_web_page_previews=True, can_invite_users=True,
+    )
+
+
+async def mod_mute(bot, chat_id, user_id, seconds):
+    await bot.restrict_chat_member(
+        chat_id, user_id, ChatPermissions(can_send_messages=False),
+        until_date=int(time.time()) + seconds if seconds else None,
+    )
+
+
+async def mod_unmute(bot, chat_id, user_id):
+    await bot.restrict_chat_member(chat_id, user_id, await chat_default_permissions(bot, chat_id))
+
+
+async def mod_kick(bot, chat_id, user_id):
+    await bot.ban_chat_member(chat_id, user_id, until_date=int(time.time()) + 60)
+    await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+
+
+def fmt_dur(chat_id, seconds):
+    units = MOD_TEXT[mod_lang(chat_id)]["units"]
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400} {units['d']}"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600} {units['h']}"
+    return f"{max(1, seconds // 60)} {units['m']}"
+
+
+def parse_dur(text, default=3600):
+    m = re.fullmatch(r"(\d{1,4})\s*([mhd]?)", (text or "").strip().lower())
+    if not m:
+        return None
+    n = int(m.group(1))
+    mult = {"": 60, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+    return max(60, min(n * mult, 366 * 86400)) if n else default
+
+
+async def delete_later(bot, chat_id, message_id, delay):
+    async def _job():
+        await asyncio.sleep(delay)
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except TelegramError:
+            pass
+    task = asyncio.create_task(_job())
+    BG_TASKS.add(task)
+    task.add_done_callback(BG_TASKS.discard)
+
+
+def has_link(msg):
+    for ent in (msg.entities or ()) + (msg.caption_entities or ()):
+        if ent.type in ("url", "text_link"):
+            return True
+    text = msg.text or msg.caption or ""
+    if _LINK_RE.search(text):
+        return True
+    origin = getattr(msg, "forward_origin", None)
+    return bool(origin and getattr(origin, "type", "") in ("channel", "chat"))
+
+
+# ── Kirish: captcha va salomlashish ──
+
+async def guard_new_members(context, msg):
+    chat_id = msg.chat_id
+    settings = gs_get(chat_id)
+    for member in msg.new_chat_members:
+        if member.is_bot:
+            continue
+        name = user_mention(member.id, member.first_name)
+        if settings["captcha"]:
+            try:
+                await mod_mute(context.bot, chat_id, member.id, 0)
+            except TelegramError:
+                # Huquq yo'q — captcha'siz salomlashamiz.
+                if settings["welcome"]:
+                    await context.bot.send_message(chat_id, mod_t(chat_id, "welcome", name=name))
+                continue
+            options = random.sample(range(len(CAPTCHA_ITEMS)), 4)
+            answer = random.choice(options)
+            emoji, things = CAPTCHA_ITEMS[answer]
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton(CAPTCHA_ITEMS[i][0], callback_data=f"cap:{member.id}:{i}") for i in options
+            ]])
+            sent = await context.bot.send_message(
+                chat_id,
+                mod_t(chat_id, "captcha", name=name, emoji=emoji,
+                      thing=things.get(mod_lang(chat_id), things["uz"]), sec=CAPTCHA_TTL),
+                reply_markup=kb,
+            )
+            key = (chat_id, member.id)
+            old = CAPTCHA_PENDING.pop(key, None)
+            if old and old.get("task"):
+                old["task"].cancel()
+            entry = {"answer": answer, "msg_id": sent.message_id, "name": name}
+            entry["task"] = asyncio.create_task(captcha_timeout(context.bot, key, entry))
+            BG_TASKS.add(entry["task"])
+            entry["task"].add_done_callback(BG_TASKS.discard)
+            CAPTCHA_PENDING[key] = entry
+        elif settings["welcome"]:
+            await context.bot.send_message(chat_id, mod_t(chat_id, "welcome", name=name))
+
+
+async def captcha_timeout(bot, key, entry):
+    try:
+        await asyncio.sleep(CAPTCHA_TTL)
+    except asyncio.CancelledError:
+        return
+    if CAPTCHA_PENDING.get(key) is not entry:
+        return
+    CAPTCHA_PENDING.pop(key, None)
+    chat_id, user_id = key
+    try:
+        await mod_kick(bot, chat_id, user_id)
+    except TelegramError:
+        pass
+    await edit(bot, chat_id, entry["msg_id"], mod_t(chat_id, "cap_timeout", name=entry["name"]))
+    await delete_later(bot, chat_id, entry["msg_id"], NOTICE_TTL)
+
+
+async def cb_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    _, uid_text, choice = q.data.split(":")
+    chat_id = q.message.chat.id
+    user_id = int(uid_text)
+    if q.from_user.id != user_id:
+        await q.answer(mod_t(chat_id, "cap_not_you"), show_alert=True)
+        return
+    entry = CAPTCHA_PENDING.pop((chat_id, user_id), None)
+    if not entry:
+        await q.answer()
+        return
+    if entry.get("task"):
+        entry["task"].cancel()
+    await q.answer()
+    if int(choice) == entry["answer"]:
+        try:
+            await mod_unmute(context.bot, chat_id, user_id)
+        except TelegramError:
+            pass
+        text = mod_t(chat_id, "cap_ok", name=entry["name"])
+        if gs_get(chat_id)["welcome"]:
+            text += "\n\n" + mod_t(chat_id, "welcome", name=entry["name"])
+        await edit(context.bot, chat_id, entry["msg_id"], text)
+    else:
+        try:
+            await mod_kick(context.bot, chat_id, user_id)
+        except TelegramError:
+            pass
+        await edit(context.bot, chat_id, entry["msg_id"], mod_t(chat_id, "cap_wrong", name=entry["name"]))
+        await delete_later(context.bot, chat_id, entry["msg_id"], NOTICE_TTL)
+
+
+# ── Har bir guruh xabari: anti-flood va anti-reklama ──
+
+async def guard_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or msg.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    if msg.new_chat_members:
+        try:
+            await guard_new_members(context, msg)
+        except TelegramError as e:
+            logger.warning("Guruh himoyasi: yangi a'zo bilan ishlashda xato: %s", e)
+        return
+    user = msg.from_user
+    if not user or user.is_bot or msg.sender_chat:
+        return
+    settings = gs_get(msg.chat_id)
+    if not settings["antilink"] and not settings["antiflood"]:
+        return
+    if user.id in CAREER_OWNER_IDS or user.id in await admin_ids(context.bot, msg.chat_id):
+        return
+    chat_id = msg.chat_id
+    name = user_mention(user.id, user.first_name)
+
+    if settings["antiflood"]:
+        now = time.monotonic()
+        stamps = [t for t in FLOOD_TRACK.get((chat_id, user.id), []) if now - t < FLOOD_WINDOW]
+        stamps.append(now)
+        FLOOD_TRACK[(chat_id, user.id)] = stamps
+        if len(stamps) >= FLOOD_COUNT:
+            FLOOD_TRACK.pop((chat_id, user.id), None)
+            try:
+                await mod_mute(context.bot, chat_id, user.id, FLOOD_MUTE)
+                sent = await context.bot.send_message(
+                    chat_id, mod_t(chat_id, "flood", name=name, dur=fmt_dur(chat_id, FLOOD_MUTE))
+                )
+                await delete_later(context.bot, chat_id, sent.message_id, NOTICE_TTL * 3)
+            except TelegramError as e:
+                logger.warning("Anti-flood: jim qilib bo'lmadi: %s", e)
+            raise ApplicationHandlerStop
+
+    if settings["antilink"] and has_link(msg):
+        try:
+            await msg.delete()
+        except TelegramError as e:
+            logger.warning("Anti-reklama: o'chirib bo'lmadi: %s", e)
+            return
+        sent = await context.bot.send_message(chat_id, mod_t(chat_id, "link", name=name))
+        await delete_later(context.bot, chat_id, sent.message_id, NOTICE_TTL)
+        raise ApplicationHandlerStop
+
+
+# ── Moderatsiya buyruqlari ──
+
+async def mod_target(update, context):
+    """(user_id, ism, qolgan argumentlar) — reply yoki ID / @username orqali."""
+    msg = update.effective_message
+    args = list(context.args or [])
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        u = msg.reply_to_message.from_user
+        return u.id, user_mention(u.id, u.first_name), u.is_bot, args
+    if args:
+        raw = args.pop(0)
+        c = db()
+        if raw.startswith("@"):
+            row = c.execute(
+                "SELECT user_id, first_name FROM users WHERE lower(username)=lower(?)", (raw[1:],)
+            ).fetchone()
+        elif raw.lstrip("-").isdigit():
+            row = c.execute("SELECT user_id, first_name FROM users WHERE user_id=?", (int(raw),)).fetchone() \
+                or (int(raw), raw)
+        else:
+            row = None
+        if row:
+            return row[0], user_mention(row[0], row[1]), False, args
+    return None, None, False, args
+
+
+async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat:
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text(mod_t(chat.id, "group_only"))
+        return
+    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    if not await is_moderator(context.bot, msg, user):
+        await msg.reply_text(mod_t(chat.id, "not_admin"))
+        return
+    target, name, target_is_bot, args = await mod_target(update, context)
+    if not target:
+        await msg.reply_text(mod_t(chat.id, "need_target"))
+        return
+    if target == context.bot.id:
+        await msg.reply_text(mod_t(chat.id, "target_bot"))
+        return
+    if command not in ("warns", "unwarn", "unmute", "unban") and (
+        target in CAREER_OWNER_IDS or target in await admin_ids(context.bot, chat.id)
+    ):
+        await msg.reply_text(mod_t(chat.id, "target_admin"))
+        return
+
+    settings = gs_get(chat.id)
+    limit = settings["warn_limit"]
+    c = db()
+    try:
+        if command in ("warn", "unwarn", "warns"):
+            row = c.execute("SELECT count FROM group_warns WHERE chat_id=? AND user_id=?", (chat.id, target)).fetchone()
+            count = row[0] if row else 0
+            if command == "warns":
+                await msg.reply_text(mod_t(chat.id, "warns", name=name, n=count, limit=limit))
+                return
+            count = count + 1 if command == "warn" else max(0, count - 1)
+            if command == "warn" and count >= limit:
+                count = 0
+                if settings["warn_action"] == "ban":
+                    await context.bot.ban_chat_member(chat.id, target)
+                    text = mod_t(chat.id, "warn_ban", name=name)
+                else:
+                    await mod_mute(context.bot, chat.id, target, WARN_MUTE)
+                    text = mod_t(chat.id, "warn_mute", name=name, limit=limit, dur=fmt_dur(chat.id, WARN_MUTE))
+            elif command == "warn":
+                text = mod_t(chat.id, "warn", name=name, n=count, limit=limit)
+                reason = " ".join(args).strip()
+                if reason:
+                    text += mod_t(chat.id, "warn_reason", reason=escape(reason[:200]))
+            else:
+                text = mod_t(chat.id, "unwarn", name=name, n=count, limit=limit)
+            with c:
+                c.execute(
+                    """INSERT INTO group_warns(chat_id, user_id, count) VALUES (?, ?, ?)
+                       ON CONFLICT(chat_id, user_id) DO UPDATE SET count=excluded.count""",
+                    (chat.id, target, count),
+                )
+        elif command == "mute":
+            seconds = parse_dur(args[0]) if args else 3600
+            seconds = seconds or 3600
+            await mod_mute(context.bot, chat.id, target, seconds)
+            text = mod_t(chat.id, "mute", name=name, dur=fmt_dur(chat.id, seconds))
+        elif command == "unmute":
+            await mod_unmute(context.bot, chat.id, target)
+            text = mod_t(chat.id, "unmute", name=name)
+        elif command == "ban":
+            await context.bot.ban_chat_member(chat.id, target)
+            text = mod_t(chat.id, "ban", name=name)
+        elif command == "unban":
+            await context.bot.unban_chat_member(chat.id, target, only_if_banned=True)
+            text = mod_t(chat.id, "unban", name=name)
+        elif command == "kick":
+            await mod_kick(context.bot, chat.id, target)
+            text = mod_t(chat.id, "kick", name=name)
+        else:
+            return
+    except TelegramError as e:
+        logger.warning("Moderatsiya /%s bajarilmadi: %s", command, e)
+        await msg.reply_text(mod_t(chat.id, "no_rights"))
+        return
+    await msg.reply_text(text)
+
+
+# ── /settings ──
+
+def settings_view(chat_id):
+    s = gs_get(chat_id)
+    on = lambda v: "✅" if v else "❌"
+    rows = [
+        [InlineKeyboardButton(f"{mod_t(chat_id, 's_captcha')} {on(s['captcha'])}", callback_data=f"gs:{chat_id}:captcha")],
+        [InlineKeyboardButton(f"{mod_t(chat_id, 's_welcome')} {on(s['welcome'])}", callback_data=f"gs:{chat_id}:welcome")],
+        [InlineKeyboardButton(f"{mod_t(chat_id, 's_antilink')} {on(s['antilink'])}", callback_data=f"gs:{chat_id}:antilink")],
+        [InlineKeyboardButton(f"{mod_t(chat_id, 's_antiflood')} {on(s['antiflood'])}", callback_data=f"gs:{chat_id}:antiflood")],
+        [InlineKeyboardButton(mod_t(chat_id, "s_limit", n=s["warn_limit"]), callback_data=f"gs:{chat_id}:warn_limit")],
+        [InlineKeyboardButton(
+            mod_t(chat_id, "s_action", a=mod_t(chat_id, "a_ban" if s["warn_action"] == "ban" else "a_mute")),
+            callback_data=f"gs:{chat_id}:warn_action",
+        )],
+    ]
+    return mod_t(chat_id, "settings"), InlineKeyboardMarkup(rows)
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text(mod_t(chat.id, "group_only"))
+        return
+    if not await is_moderator(context.bot, msg, update.effective_user):
+        await msg.reply_text(mod_t(chat.id, "not_admin"))
+        return
+    text, kb = settings_view(chat.id)
+    await msg.reply_text(text, reply_markup=kb)
+
+
+async def cb_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    _, chat_text, key = q.data.split(":")
+    chat_id = int(chat_text)
+    if q.message.chat.id != chat_id:
+        await q.answer()
+        return
+    user = q.from_user
+    if user.id not in CAREER_OWNER_IDS and user.id not in await admin_ids(context.bot, chat_id):
+        await q.answer(mod_t(chat_id, "not_admin"), show_alert=True)
+        return
+    s = gs_get(chat_id)
+    if key in ("captcha", "welcome", "antilink", "antiflood"):
+        gs_set(chat_id, key, 0 if s[key] else 1)
+    elif key == "warn_limit":
+        gs_set(chat_id, key, s[key] % 5 + 1 if s[key] < 5 else 2)
+    elif key == "warn_action":
+        gs_set(chat_id, key, "ban" if s[key] == "mute" else "mute")
+    await q.answer(mod_t(chat_id, "s_saved"))
+    text, kb = settings_view(chat_id)
+    await edit(context.bot, chat_id, q.message.message_id, text, kb)
+
+
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
         print(
@@ -13477,6 +14113,7 @@ def main():
     init_bank()
     init_birja()
     init_kids()
+    init_guard()
     load_crash_config()
 
     app = (
@@ -13502,6 +14139,8 @@ def main():
         (["profil", "profile"], cmd_profil),
         (["oila", "family"], cmd_oila),
         (["farzand", "kids"], cmd_farzand),
+        (["settings", "sozlamalar"], cmd_settings),
+        (["warn", "unwarn", "warns", "mute", "unmute", "ban", "unban", "kick"], cmd_mod),
         (["shop"], cmd_shop),
         (["pul"], cmd_pul),
         (["hisob"], cmd_hisob),
@@ -13529,6 +14168,8 @@ def main():
     app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
     # Alohida guruh (-1): a'zolar ro'yxatini yig'adi, asosiy handlerlarni to'smaydi.
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_member), group=-1)
+    # Guruh himoyasi eng birinchi ishlaydi: reklama/flood bo'lsa ApplicationHandlerStop bilan to'xtatadi.
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.UpdateType.MESSAGE, guard_messages), group=-2)
     app.add_handler(CallbackQueryHandler(cb_shop, pattern=r"^shop:"))
     app.add_handler(CallbackQueryHandler(cb_contest, pattern=r"^contest:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_hadya, pattern=r"^hadya:claim:\d+$"))
@@ -13540,6 +14181,8 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_bank, pattern=r"^bk:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_birja, pattern=r"^bx:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_kid, pattern=r"^kid:\d+:"))
+    app.add_handler(CallbackQueryHandler(cb_captcha, pattern=r"^cap:\d+:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_settings, pattern=r"^gs:-?\d+:\w+$"))
     app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash|memory):\d+:(uz|eng|ru|kz)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))

@@ -1995,12 +1995,80 @@ def panel_keyboard(user_id=None):
     if "admin_management" in available:
         rows.append([InlineKeyboardButton("🛡 Adminlarni boshqarish", callback_data="panel:admins")])
     if is_owner:
+        rows.append([InlineKeyboardButton("💰 Pul statistikasi", callback_data="panel:money")])
         rows.append([InlineKeyboardButton("🎰 Crash sozlamalari", callback_data="panel:crash")])
         rows.append([InlineKeyboardButton("✨ Premium emoji", callback_data="panel:pemoji")])
 
     return InlineKeyboardMarkup(rows or [[
         InlineKeyboardButton("🔄 Panelni yangilash", callback_data="panel:home")
     ]])
+
+
+def fmt_money(n):
+    return f"{int(n):,}".replace(",", " ")
+
+
+def money_in_games():
+    """Hozir o'yinlarda turgan (yechilgan, lekin hali natijalanmagan) depozitlar."""
+    total = 0
+    for game in GAMES.values():
+        if game.get("type") == "crash" and game.get("charged") and not game.get("settled"):
+            total += sum(
+                p["bet"] for p in game["players"].values()
+                if p.get("paid") and p.get("cash") is None and not p.get("refunded")
+            )
+    for game in FROG_GAMES.values():
+        if game.get("paid") and not game.get("settled"):
+            total += game["bet"]
+    return total
+
+
+def panel_money_text(c):
+    owners = tuple(CAREER_OWNER_IDS)
+    marks = ",".join("?" * len(owners))
+    total, holders, users_with_wallet = c.execute(
+        "SELECT COALESCE(SUM(money), 0), COALESCE(SUM(money > 0), 0), COUNT(*) FROM user_wallet"
+    ).fetchone()
+    owners_total = c.execute(
+        f"SELECT COALESCE(SUM(money), 0) FROM user_wallet WHERE user_id IN ({marks})", owners
+    ).fetchone()[0]
+    others_total, others_holders, others_max = c.execute(
+        f"""SELECT COALESCE(SUM(money), 0), COALESCE(SUM(money > 0), 0), COALESCE(MAX(money), 0)
+            FROM user_wallet WHERE user_id NOT IN ({marks})""",
+        owners,
+    ).fetchone()
+    top = c.execute(
+        f"""SELECT w.user_id, w.money, u.first_name, u.username
+            FROM user_wallet w LEFT JOIN users u ON u.user_id = w.user_id
+            WHERE w.user_id NOT IN ({marks}) AND w.money > 0
+            ORDER BY w.money DESC LIMIT 10""",
+        owners,
+    ).fetchall()
+    in_games = money_in_games()
+    average = others_total // others_holders if others_holders else 0
+
+    lines = [
+        "💰 <b>PUL STATISTIKASI</b>",
+        "",
+        f"💵 Jami pul (hamma hamyonlarda): <b>{fmt_money(total)}$</b>",
+        f"👑 Bot egalarida: <b>{fmt_money(owners_total)}$</b>",
+        f"👤 Foydalanuvchilarda (egalarsiz): <b>{fmt_money(others_total)}$</b>",
+        f"🎰 Hozir o'yinlarda tikilgan: <b>{fmt_money(in_games)}$</b>",
+        "",
+        f"👥 Puli bor foydalanuvchilar: <b>{fmt_money(holders)}</b> / {fmt_money(users_with_wallet)} hamyon",
+        f"📊 O'rtacha (puli borlar, egalarsiz): <b>{fmt_money(average)}$</b>",
+        f"🔝 Eng katta balans (egalarsiz): <b>{fmt_money(others_max)}$</b>",
+    ]
+    if top:
+        lines += ["", "🏆 <b>Eng boy 10 foydalanuvchi:</b>"]
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (uid, money, first_name, username) in enumerate(top):
+            mark = medals[i] if i < len(medals) else f"{i + 1}."
+            lines.append(
+                f"{mark} {pretty_name(first_name, username)} — <b>{fmt_money(money)}$</b> "
+                f"(<code>{uid}</code>)"
+            )
+    return "\n".join(lines)
 
 
 def panel_group_ids(c):
@@ -2845,6 +2913,10 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📈 Jami o'yin ishtiroklari: <b>{total_games}</b>\n\n"
             "ℹ️ Ishtiroklar chat statistikasi asosida hisoblanadi."
         )
+
+    elif action == "money":
+        # panel_permission_for_callback: "money" PANEL_PERMISSIONS'da yo'q → faqat bot egalari.
+        text = panel_money_text(c)
 
     elif action == "games":
         counts = {}

@@ -6,6 +6,7 @@ Ishga tushirish:  BOT_TOKEN muhit o'zgaruvchisini o'rnating va `python bot.py`
 """
 
 import html
+import json
 import math
 import asyncio
 import logging
@@ -1371,6 +1372,8 @@ async def _expire(app, chat_id, game, seconds):
 
     if game["type"] == "number":
         text = t(chat_id, "number_timeout", number=game["number"])
+    elif game["type"] == "croc":
+        text = croc_t(chat_id, "timeout", word=escape(str(game.get("word") or ""), quote=False))
     else:
         text = t(chat_id, "timeout")
     await close_game_message(app.bot, chat_id, game, text)
@@ -1400,6 +1403,7 @@ def menu_kb(chat_id):
         [InlineKeyboardButton(t(chat_id, "btn_xo"), callback_data="g:xo")],
         [InlineKeyboardButton(memory_t(chat_id, "btn"), callback_data="g:memory")],
         [InlineKeyboardButton(cr_t(chat_id, "btn"), callback_data="g:crash")],
+        [InlineKeyboardButton(croc_t(chat_id, "btn"), callback_data="g:croc")],
     ])
 
 
@@ -1628,7 +1632,7 @@ async def handle_family_start(update, context, payload):
                 (name, rid),
             )
         partner_lang = family_lang(row[1])
-        request_text = family_text(row[1], "request", parent=f'<a href="tg://user?id={user.id}">{person_name(user.id)}</a>', gender=escape(child_gender_label(row[1], row[3])), name=escape(name))
+        request_text = family_text(row[1], "request", parent=person_name(user.id), gender=escape(child_gender_label(row[1], row[3])), name=escape(name))
         if user.id in CAREER_OWNER_IDS or row[1] in CAREER_OWNER_IDS:
             request_text = request_text.replace("Rozilikdan so‘ng farzand 48 soat ichida yetkaziladi.", "Owner juftliklari uchun rozilikdan so‘ng farzand kutishsiz yetkaziladi.")
             request_text = request_text.replace("After consent, the child will arrive within 48 hours.", "For owner couples, the child arrives without a 48-hour wait after consent.")
@@ -2871,7 +2875,11 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     end_game(chat.id, game)
-    await close_game_message(context.bot, chat.id, game, t(chat.id, "stopped"))
+    if game.get("type") == "croc":
+        stop_text = croc_t(chat.id, "stopped", word=escape(str(game.get("word") or ""), quote=False))
+    else:
+        stop_text = t(chat.id, "stopped")
+    await close_game_message(context.bot, chat.id, game, stop_text)
 
 
 async def cmd_reyting(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3964,6 +3972,20 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         arm(app, chat_id, game, CRASH_LOBBY_TTL)
 
+    elif kind == "croc":
+        game = new_game(
+            chat_id, "croc", user.id,
+            state="play", msg_id=msg.message_id,
+            host_id=user.id, host_name=name,
+            round=1, finished=False, word=None, used=set(),
+        )
+        game["word"] = croc_pick_word(chat_id, game)
+        await edit(
+            context.bot, chat_id, msg.message_id,
+            croc_round_text(chat_id, game), croc_kb(chat_id),
+        )
+        arm(app, chat_id, game, CROC_TTL)
+
 
 
 # ───────────────────────────── 🧠 Juftini top ─────────────────────────────
@@ -4440,7 +4462,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = msg.chat_id
     game = GAMES.get(chat_id)
-    if not game or game["type"] != "number":
+    if not game:
+        return
+
+    if game["type"] == "croc":
+        await croc_on_text(update, context, game)
+        return
+
+    if game["type"] != "number":
         return
 
     text = msg.text.strip()
@@ -5907,6 +5936,1026 @@ async def cb_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ───────────────────────────── Boshqa callback'lar ─────────────────────────────
 
 
+# ───────────────────────────── 🐊 Krokodil ─────────────────────────────
+# Boshlovchi maxfiy so'zni "👁 So'zni ko'rish" tugmasi orqali ko'radi va uni
+# aytmasdan tushuntiradi. Guruhdagi boshqalar so'zni chatga yozib topadi.
+# So'zni birinchi topgan o'yinchi ball oladi va keyingi boshlovchi bo'ladi.
+# So'zlar guruh tiliga qarab olinadi (/lang): uz / eng / ru / kz.
+
+CROC_WIN_PTS = 10          # to'g'ri javob uchun ball
+CROC_TTL = 900             # faolsizlik vaqti (soniya): shundan keyin o'yin bekor bo'ladi
+CROC_WORDS_FILE = os.path.join(VOLUME_PATH or BASE_DIR, "krokodil_words.json")
+
+# Bot tillari -> so'zlar bazasi tillari
+CROC_WORD_LANG = {"uz": "uz", "eng": "en", "ru": "ru", "kz": "kk"}
+
+# Haqiqiy lug'atlar: bot ishga tushganda fonda yuklanadi va CROC_WORDS_FILE'ga keshlanadi.
+CROC_WORD_URLS = {
+    "uz": "https://raw.githubusercontent.com/kaharjan/uzb-dict-words/master/words_list.txt",
+    "ru": "https://raw.githubusercontent.com/JackShannon/1000-most-common-words/master/1000-most-common-russian-words.txt",
+    "en": "https://raw.githubusercontent.com/first20hours/google-10000-english/master/google-10000-english-usa-no-swears.txt",
+    "kk": "https://raw.githubusercontent.com/SMenigat/thousand-most-common-words/master/words/kk.json",
+}
+CROC_TARGET_COUNTS = {"uz": 150, "ru": 150, "en": 150, "kk": 150}
+
+# Lug'at yuklanmaguncha (yoki internet bo'lmasa) o'yin shu so'zlar bilan ishlaydi.
+CROC_FALLBACK_WORDS = {'uz': ['olma',
+        'kitob',
+        'mashina',
+        'telefon',
+        'kompyuter',
+        'maktab',
+        'daraxt',
+        'shahar',
+        'samolyot',
+        'quyosh',
+        'yulduz',
+        'mushuk',
+        'qalam',
+        'stol',
+        'kalit',
+        'oyna',
+        'daryo',
+        "tog'",
+        'bulut',
+        'gul',
+        'uy',
+        'non',
+        'soat',
+        'televizor',
+        'futbol',
+        'velosiped',
+        'koptok',
+        'sumka',
+        'eshik',
+        'avtobus',
+        'poyezd',
+        'choynak',
+        'qoshiq',
+        'stakan',
+        'divan',
+        'kursi',
+        'karavot',
+        'meva',
+        'banan',
+        'anor',
+        'uzum',
+        'shaftoli',
+        'nok',
+        'gilos',
+        'tarvuz',
+        'qovun',
+        'sabzi',
+        'kartoshka',
+        'piyoz',
+        'pomidor',
+        'bodring',
+        'osh',
+        'somsa',
+        'manti',
+        "sho'rva",
+        "lag'mon",
+        'palov',
+        'sut',
+        'pishloq',
+        'asal',
+        'shakar',
+        'tuz',
+        'qahva',
+        'choy',
+        'sher',
+        'fil',
+        'jirafa',
+        'maymun',
+        'quyon',
+        'it',
+        'sigir',
+        'ot',
+        'echki',
+        'tovuq',
+        'burgut',
+        'kapalak',
+        'ari',
+        'ilon',
+        'toshbaqa',
+        'qor',
+        'shamol',
+        'chaqmoq',
+        'osmon',
+        'yer',
+        'dunyo',
+        'orol',
+        'dengiz',
+        'bozor',
+        'shifoxona',
+        'qayiq',
+        'qaychi',
+        'qop',
+        'quti',
+        'qovoq',
+        'quduq',
+        'qasr',
+        'qalqon',
+        "qaldirg'och",
+        "qo'ng'iroq",
+        "o'rdak",
+        "o'rmon",
+        "ko'prik",
+        "ko'cha",
+        "bog'",
+        "g'isht",
+        'chiroq',
+        'gilam',
+        "ko'zoynak",
+        'pichoq',
+        'bolta',
+        'arra',
+        'vertolyot',
+        'kema',
+        'mototsikl',
+        'traktor',
+        'kamera',
+        'gitara',
+        "nog'ora",
+        "do'ppi",
+        'chopon',
+        'daftar',
+        'ruchka',
+        'zaryadlagich',
+        'muzlatgich',
+        'kir',
+        'yuvish',
+        'likopcha',
+        'piyola',
+        'chelak',
+        'supurgi',
+        'sochiq',
+        "ko'rpa",
+        'yostiq',
+        'gilamcha',
+        'tokcha',
+        'javon',
+        'sandiq',
+        'qulf',
+        'kalitdon',
+        'taroq',
+        'sovun',
+        'shampun',
+        'tish',
+        "cho'tkasi",
+        'pasta',
+        'atir',
+        "ko'ylak",
+        'shim',
+        'etik',
+        'tufli'],
+ 'ru': ['дом',
+        'книга',
+        'машина',
+        'телефон',
+        'компьютер',
+        'школа',
+        'дерево',
+        'город',
+        'самолет',
+        'солнце',
+        'звезда',
+        'кошка',
+        'ручка',
+        'стол',
+        'ключ',
+        'окно',
+        'река',
+        'гора',
+        'облако',
+        'цветок',
+        'хлеб',
+        'часы',
+        'автобус',
+        'поезд',
+        'вода',
+        'море',
+        'собака',
+        'семья',
+        'друг',
+        'слон',
+        'жираф',
+        'обезьяна',
+        'заяц',
+        'корова',
+        'лошадь',
+        'курица',
+        'орел',
+        'бабочка',
+        'пчела',
+        'змея',
+        'черепаха',
+        'снег',
+        'ветер',
+        'молния',
+        'остров',
+        'рынок',
+        'больница',
+        'лодка',
+        'ножницы',
+        'мост',
+        'улица',
+        'лес',
+        'гитара',
+        'барабан',
+        'велосипед',
+        'мяч',
+        'зонт',
+        'лампа',
+        'ковер',
+        'очки',
+        'камера',
+        'тетрадь',
+        'карандаш',
+        'дверь',
+        'стул',
+        'кровать',
+        'диван',
+        'подушка',
+        'одеяло',
+        'полотенце',
+        'зеркало',
+        'шкаф',
+        'полка',
+        'сундук',
+        'замок',
+        'расческа',
+        'мыло',
+        'шампунь',
+        'зубная',
+        'паста',
+        'платье',
+        'брюки',
+        'ботинок',
+        'носок',
+        'шапка',
+        'перчатка',
+        'шарф',
+        'ремень',
+        'кольцо',
+        'браслет',
+        'ожерелье',
+        'кошелек',
+        'билет',
+        'карта',
+        'глобус',
+        'компас',
+        'бинокль',
+        'телескоп',
+        'микроскоп',
+        'принтер',
+        'клавиатура',
+        'мышь',
+        'экран',
+        'наушники',
+        'микрофон',
+        'колонка',
+        'батарея',
+        'фонарь',
+        'свеча',
+        'спичка',
+        'термометр',
+        'весы',
+        'молоток',
+        'гвоздь',
+        'отвертка',
+        'лопата',
+        'тяпка',
+        'колесо',
+        'руль',
+        'тормоз',
+        'мотор',
+        'бензин',
+        'гонка',
+        'стадион',
+        'поле',
+        'ворота',
+        'судья',
+        'тренер',
+        'футболист',
+        'баскетбол',
+        'волейбол',
+        'теннис',
+        'шахматы',
+        'домино',
+        'кубик',
+        'подарок',
+        'праздник',
+        'свадьба',
+        'гость',
+        'ребенок',
+        'мать',
+        'отец',
+        'брат',
+        'сестра',
+        'бабушка',
+        'дедушка',
+        'сосед',
+        'учитель',
+        'ученик',
+        'врач'],
+ 'en': ['apple',
+        'book',
+        'car',
+        'phone',
+        'computer',
+        'school',
+        'tree',
+        'city',
+        'airplane',
+        'sun',
+        'star',
+        'cat',
+        'pen',
+        'table',
+        'key',
+        'window',
+        'river',
+        'mountain',
+        'cloud',
+        'flower',
+        'house',
+        'bread',
+        'clock',
+        'bus',
+        'train',
+        'water',
+        'sea',
+        'dog',
+        'family',
+        'friend',
+        'elephant',
+        'giraffe',
+        'monkey',
+        'rabbit',
+        'horse',
+        'eagle',
+        'butterfly',
+        'snake',
+        'turtle',
+        'snow',
+        'wind',
+        'lightning',
+        'island',
+        'market',
+        'hospital',
+        'boat',
+        'scissors',
+        'bridge',
+        'street',
+        'forest',
+        'guitar',
+        'drum',
+        'bicycle',
+        'ball',
+        'umbrella',
+        'lamp',
+        'carpet',
+        'glasses',
+        'camera',
+        'notebook',
+        'pencil',
+        'door',
+        'chair',
+        'bed',
+        'sofa',
+        'pillow',
+        'blanket',
+        'towel',
+        'mirror',
+        'wardrobe',
+        'shelf',
+        'chest',
+        'lock',
+        'comb',
+        'soap',
+        'shampoo',
+        'toothpaste',
+        'dress',
+        'trousers',
+        'shoe',
+        'sock',
+        'hat',
+        'glove',
+        'scarf',
+        'belt',
+        'ring',
+        'bracelet',
+        'necklace',
+        'wallet',
+        'ticket',
+        'map',
+        'globe',
+        'compass',
+        'binoculars',
+        'telescope',
+        'microscope',
+        'printer',
+        'keyboard',
+        'mouse',
+        'screen',
+        'headphones',
+        'microphone',
+        'speaker',
+        'battery',
+        'flashlight',
+        'candle',
+        'match',
+        'thermometer',
+        'scales',
+        'hammer',
+        'nail',
+        'screwdriver',
+        'shovel',
+        'hoe',
+        'wheel',
+        'steering',
+        'brake',
+        'engine',
+        'petrol',
+        'race',
+        'stadium',
+        'field',
+        'goal',
+        'referee',
+        'coach',
+        'footballer',
+        'basketball',
+        'volleyball',
+        'tennis',
+        'chess',
+        'domino',
+        'card',
+        'dice',
+        'gift',
+        'holiday',
+        'wedding',
+        'guest',
+        'child',
+        'mother',
+        'father',
+        'brother',
+        'sister',
+        'grandmother',
+        'grandfather',
+        'neighbor',
+        'teacher',
+        'student',
+        'doctor',
+        'nurse',
+        'cook'],
+ 'kk': ['алма',
+        'кітап',
+        'машина',
+        'телефон',
+        'компьютер',
+        'мектеп',
+        'ағаш',
+        'қала',
+        'ұшақ',
+        'күн',
+        'жұлдыз',
+        'мысық',
+        'қалам',
+        'үстел',
+        'кілт',
+        'терезе',
+        'өзен',
+        'тау',
+        'бұлт',
+        'гүл',
+        'үй',
+        'нан',
+        'сағат',
+        'автобус',
+        'пойыз',
+        'су',
+        'теңіз',
+        'ит',
+        'отбасы',
+        'дос',
+        'піл',
+        'керік',
+        'маймыл',
+        'қоян',
+        'жылқы',
+        'бүркіт',
+        'көбелек',
+        'жылан',
+        'тасбақа',
+        'қар',
+        'жел',
+        'найзағай',
+        'арал',
+        'базар',
+        'аурухана',
+        'қайық',
+        'қайшы',
+        'көпір',
+        'көше',
+        'орман',
+        'гитара',
+        'барабан',
+        'велосипед',
+        'доп',
+        'қолшатыр',
+        'шам',
+        'кілем',
+        'көзілдірік',
+        'камера',
+        'дәптер',
+        'қарындаш',
+        'есік',
+        'орындық',
+        'төсек',
+        'диван',
+        'жастық',
+        'көрпе',
+        'сүлгі',
+        'айна',
+        'шкаф',
+        'сөре',
+        'сандық',
+        'құлып',
+        'тарақ',
+        'сабын',
+        'сусабын',
+        'тіс',
+        'пастасы',
+        'көйлек',
+        'шалбар',
+        'аяқкиім',
+        'шұлық',
+        'бөрік',
+        'қолғап',
+        'шарф',
+        'белдік',
+        'сақина',
+        'білезік',
+        'алқа',
+        'әмиян',
+        'билет',
+        'карта',
+        'глобус',
+        'тұсбағар',
+        'дүрбі',
+        'телескоп',
+        'микроскоп',
+        'принтер',
+        'пернетақта',
+        'тышқан',
+        'экран',
+        'құлаққап',
+        'микрофон',
+        'дауысзорайтқыш',
+        'батарея',
+        'шамшырақ',
+        'майшам',
+        'сіріңке',
+        'термометр',
+        'таразы',
+        'балға',
+        'шеге',
+        'бұрауыш',
+        'күрек',
+        'кетпен',
+        'доңғалақ',
+        'рөл',
+        'тежегіш',
+        'қозғалтқыш',
+        'жанармай',
+        'жарыс',
+        'стадион',
+        'алаң',
+        'қақпа',
+        'төреші',
+        'жаттықтырушы',
+        'футболшы',
+        'баскетбол',
+        'волейбол',
+        'теннис',
+        'шахмат',
+        'домино',
+        'текше',
+        'сыйлық',
+        'мереке',
+        'той',
+        'қонақ',
+        'бала',
+        'ана',
+        'әке',
+        'аға',
+        'әпке',
+        'іні',
+        'сіңлі',
+        'әже',
+        'ата',
+        'көрші',
+        'мұғалім',
+        'оқушы',
+        'дәрігер']}
+
+_CROC_WORDS: dict[str, list[str]] = {}   # yuklangan lug'atlar (til -> so'zlar)
+_CROC_FALLBACK_CLEAN: dict[str, list[str]] = {}
+
+
+def croc_norm(text):
+    """Javob va so'zni solishtirish uchun bir xil ko'rinishga keltiradi."""
+    text = (text or "").strip().casefold()
+    for ch in ("’", "ʻ", "ʼ", "‘", "`", "´"):
+        text = text.replace(ch, "'")
+    text = text.replace("ё", "е")
+    return " ".join(text.split())
+
+
+def croc_answer_matches(answer, word, lang):
+    """Javobni aynan tanlangan til lug'atidagi so'z bilan solishtiradi."""
+    a = croc_norm(answer)
+    w = croc_norm(word)
+    if lang == "uz":
+        # O'zbek apostroflari (o‘, g‘, ʼ) yozilmagan bo'lsa ham javob qabul qilinadi.
+        a = a.replace("'", "")
+        w = w.replace("'", "")
+    return a == w
+
+
+def croc_clean_word(word, lang):
+    if not isinstance(word, str):
+        return None
+    word = croc_norm(word)
+    if len(word) < 2 or len(word) > 35 or " " in word:
+        return None
+
+    # Har bir til faqat o'z yozuv tizimidan foydalanadi.
+    if lang == "en":
+        ok = re.fullmatch(r"[a-z]+(?:'[a-z]+)?", word)
+    elif lang == "ru":
+        ok = re.fullmatch(r"[а-я-]+", word)
+    elif lang == "kk":
+        ok = re.fullmatch(r"[а-яәіңғқһөұү-]+", word)
+    else:
+        # O'zbek: lotin yozuvi (kirill so'zlar kirmaydi).
+        ok = re.fullmatch(r"[a-z']+", word)
+    return word if ok else None
+
+
+def croc_parse_source(text, lang):
+    raw = []
+    if lang == "kk" and text.lstrip().startswith("{"):
+        try:
+            obj = json.loads(text)
+            for item in obj.get("words", []):
+                if isinstance(item, dict):
+                    raw.append(item.get("targetWord", ""))
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        raw.extend(text.splitlines())
+
+    cleaned, seen = [], set()
+    for item in raw:
+        w = croc_clean_word(item, lang)
+        if w and w not in seen:
+            seen.add(w)
+            cleaned.append(w)
+    return cleaned
+
+
+def croc_download_words(lang):
+    from urllib.request import Request, urlopen
+
+    try:
+        req = Request(CROC_WORD_URLS[lang], headers={"User-Agent": "EmpireKrakadil/1.0"})
+        with urlopen(req, timeout=20) as response:
+            data = response.read().decode("utf-8", errors="ignore")
+        return croc_parse_source(data, lang)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Krokodil: %s lug'ati yuklanmadi: %r", lang, e)
+        return []
+
+
+def croc_fallback(lang):
+    if lang not in _CROC_FALLBACK_CLEAN:
+        words = [croc_clean_word(w, lang) for w in CROC_FALLBACK_WORDS.get(lang, [])]
+        _CROC_FALLBACK_CLEAN[lang] = list(dict.fromkeys(w for w in words if w))
+    return _CROC_FALLBACK_CLEAN[lang]
+
+
+def croc_build_words():
+    """Keshdagi lug'atni o'qiydi, yetmasa internetdan to'ldiradi (fonda ishlaydi)."""
+    saved = {}
+    try:
+        if os.path.exists(CROC_WORDS_FILE):
+            with open(CROC_WORDS_FILE, encoding="utf-8") as f:
+                saved = json.load(f)
+    except Exception:  # noqa: BLE001
+        saved = {}
+
+    final = {}
+    for lang, target in CROC_TARGET_COUNTS.items():
+        words = []
+        if isinstance(saved.get(lang), list):
+            words = [croc_clean_word(w, lang) for w in saved[lang]]
+            words = list(dict.fromkeys(w for w in words if w))
+
+        if len(words) < target:
+            words = list(dict.fromkeys(words + croc_download_words(lang)))
+
+        for w in croc_fallback(lang):
+            if w not in words:
+                words.append(w)
+
+        final[lang] = words[:target]
+
+    try:
+        tmp = CROC_WORDS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(final, f, ensure_ascii=False)
+        os.replace(tmp, CROC_WORDS_FILE)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Krokodil: lug'atni saqlab bo'lmadi: %r", e)
+
+    return final
+
+
+async def croc_prepare_words():
+    try:
+        words = await asyncio.to_thread(croc_build_words)
+        _CROC_WORDS.update(words)
+        logger.info(
+            "Krokodil lug'atlari tayyor: %s",
+            ", ".join(f"{k}={len(v)}" for k, v in words.items()),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Krokodil lug'atlarini tayyorlab bo'lmadi")
+
+
+def croc_lang_code(chat_id):
+    return CROC_WORD_LANG.get(LANG_CACHE.get(chat_id, DEFAULT_LANG), "uz")
+
+
+def croc_pick_word(chat_id, game):
+    """Guruh tilidagi tasodifiy so'z (iloji boricha takrorlanmaydi)."""
+    lang = croc_lang_code(chat_id)
+    words = _CROC_WORDS.get(lang) or croc_fallback(lang)
+    used = game.setdefault("used", set())
+    fresh = [w for w in words if w not in used]
+    if not fresh:
+        used.clear()
+        fresh = [w for w in words if w != game.get("word")] or words
+    word = random.choice(fresh)
+    used.add(word)
+    return word
+
+
+CROC_TEXT = {
+    "uz": {
+        "btn": "🐊 Krokodil",
+        "round": (
+            "🐊 <b>KROKODIL</b>\n\n"
+            "👑 Boshlovchi: <b>{host}</b>\n"
+            "🔁 Raund: <b>{round}</b>\n\n"
+            "🔎 <b>So‘zni toping!</b>\n"
+            "Boshlovchi so‘zni aytmasdan tushuntiradi, qolganlar javobni chatga yozadi.\n"
+            "🏆 To‘g‘ri javob: +{points} ball va keyingi boshlovchi bo‘lish huquqi\n"
+            "🛑 To‘xtatish: /stop"
+        ),
+        "show": "👁 So‘zni ko‘rish",
+        "not_host": "❌ Bu tugma faqat boshlovchi uchun.",
+        "win": (
+            "🎉 <b>TO‘G‘RI JAVOB!</b>\n\n"
+            "💬 So‘z: <b>{word}</b>\n"
+            "👑 {name}\n"
+            "🏆 +{points} ball\n\n"
+            "👑 Endi u keyingi boshlovchi!"
+        ),
+        "timeout": "⌛ Vaqt tugadi — o‘yin bekor qilindi.\n🐊 So‘z: <b>{word}</b> edi.\n▶️ Yana o‘ynash: /emps",
+        "stopped": "🛑 O‘yin to‘xtatildi.\n🐊 So‘z: <b>{word}</b> edi.",
+        "send_error": "⚠️ Yangi raundni yuborib bo‘lmadi. O‘yin to‘xtatildi.\n▶️ Yana o‘ynash: /emps",
+    },
+    "eng": {
+        "btn": "🐊 Crocodile",
+        "round": (
+            "🐊 <b>CROCODILE</b>\n\n"
+            "👑 Host: <b>{host}</b>\n"
+            "🔁 Round: <b>{round}</b>\n\n"
+            "🔎 <b>Guess the word!</b>\n"
+            "The host explains the word without saying it, everyone else types their guess in the chat.\n"
+            "🏆 Correct answer: +{points} points and becomes the next host\n"
+            "🛑 Stop: /stop"
+        ),
+        "show": "👁 Show the word",
+        "not_host": "❌ This button is only for the host.",
+        "win": (
+            "🎉 <b>CORRECT ANSWER!</b>\n\n"
+            "💬 Word: <b>{word}</b>\n"
+            "👑 {name}\n"
+            "🏆 +{points} points\n\n"
+            "👑 They are the next host!"
+        ),
+        "timeout": "⌛ Time is up — the game was cancelled.\n🐊 The word was <b>{word}</b>.\n▶️ Play again: /emps",
+        "stopped": "🛑 The game was stopped.\n🐊 The word was <b>{word}</b>.",
+        "send_error": "⚠️ Could not send the next round. The game was stopped.\n▶️ Play again: /emps",
+    },
+    "ru": {
+        "btn": "🐊 Крокодил",
+        "round": (
+            "🐊 <b>КРОКОДИЛ</b>\n\n"
+            "👑 Ведущий: <b>{host}</b>\n"
+            "🔁 Раунд: <b>{round}</b>\n\n"
+            "🔎 <b>Угадайте слово!</b>\n"
+            "Ведущий объясняет слово, не называя его, остальные пишут ответ в чат.\n"
+            "🏆 Правильный ответ: +{points} очков и роль следующего ведущего\n"
+            "🛑 Остановить: /stop"
+        ),
+        "show": "👁 Показать слово",
+        "not_host": "❌ Эта кнопка только для ведущего.",
+        "win": (
+            "🎉 <b>ПРАВИЛЬНЫЙ ОТВЕТ!</b>\n\n"
+            "💬 Слово: <b>{word}</b>\n"
+            "👑 {name}\n"
+            "🏆 +{points} очков\n\n"
+            "👑 Теперь он следующий ведущий!"
+        ),
+        "timeout": "⌛ Время вышло — игра отменена.\n🐊 Слово было: <b>{word}</b>.\n▶️ Сыграть ещё: /emps",
+        "stopped": "🛑 Игра остановлена.\n🐊 Слово было: <b>{word}</b>.",
+        "send_error": "⚠️ Не удалось отправить новый раунд. Игра остановлена.\n▶️ Сыграть ещё: /emps",
+    },
+    "kz": {
+        "btn": "🐊 Қолтырау",
+        "round": (
+            "🐊 <b>ҚОЛТЫРАУ</b>\n\n"
+            "👑 Жүргізуші: <b>{host}</b>\n"
+            "🔁 Раунд: <b>{round}</b>\n\n"
+            "🔎 <b>Сөзді табыңыз!</b>\n"
+            "Жүргізуші сөзді атамай түсіндіреді, қалғандары жауабын чатқа жазады.\n"
+            "🏆 Дұрыс жауап: +{points} ұпай және келесі жүргізуші болу\n"
+            "🛑 Тоқтату: /stop"
+        ),
+        "show": "👁 Сөзді көру",
+        "not_host": "❌ Бұл түйме тек жүргізушіге арналған.",
+        "win": (
+            "🎉 <b>ДҰРЫС ЖАУАП!</b>\n\n"
+            "💬 Сөз: <b>{word}</b>\n"
+            "👑 {name}\n"
+            "🏆 +{points} ұпай\n\n"
+            "👑 Енді ол келесі жүргізуші!"
+        ),
+        "timeout": "⌛ Уақыт бітті — ойын тоқтатылды.\n🐊 Сөз: <b>{word}</b> еді.\n▶️ Тағы ойнау: /emps",
+        "stopped": "🛑 Ойын тоқтатылды.\n🐊 Сөз: <b>{word}</b> еді.",
+        "send_error": "⚠️ Жаңа раундты жіберу мүмкін болмады. Ойын тоқтатылды.\n▶️ Тағы ойнау: /emps",
+    },
+}
+
+# Menyu tugmasi ("btn_croc") va qoidalar bo'limi uchun umumiy lug'atga ulaymiz.
+_CROC_RULES = {
+    "uz": (
+        "🐊 <b>Krokodil</b>\n"
+        "Boshlovchi maxfiy so‘zni tugma orqali ko‘radi va aytmasdan tushuntiradi. "
+        "So‘zni birinchi topgan +10 ball oladi va keyingi boshlovchi bo‘ladi.\n\n"
+    ),
+    "eng": (
+        "🐊 <b>Crocodile</b>\n"
+        "The host sees a secret word via the button and explains it without saying it. "
+        "The first to guess gets +10 points and becomes the next host.\n\n"
+    ),
+    "ru": (
+        "🐊 <b>Крокодил</b>\n"
+        "Ведущий видит тайное слово по кнопке и объясняет его, не называя. "
+        "Первый угадавший получает +10 очков и становится следующим ведущим.\n\n"
+    ),
+    "kz": (
+        "🐊 <b>Қолтырау</b>\n"
+        "Жүргізуші құпия сөзді түйме арқылы көріп, атамай түсіндіреді. "
+        "Бірінші тапқан +10 ұпай алады және келесі жүргізуші болады.\n\n"
+    ),
+}
+_CROC_RULES_ANCHOR = {
+    "uz": "⌛ Faol bo‘lmasa",
+    "eng": "⌛ Inactive games",
+    "ru": "⌛ Неактивные игры",
+    "kz": "⌛ Белсенді болмаса",
+}
+for _code, _texts in CROC_TEXT.items():
+    LANGS[_code]["btn_croc"] = _texts["btn"]
+    _rules = LANGS[_code].get("rules", "")
+    if _CROC_RULES[_code] not in _rules and _CROC_RULES_ANCHOR[_code] in _rules:
+        LANGS[_code]["rules"] = _rules.replace(
+            _CROC_RULES_ANCHOR[_code], _CROC_RULES[_code] + _CROC_RULES_ANCHOR[_code], 1
+        )
+
+
+def croc_t(chat_id, key, **kwargs):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    data = CROC_TEXT.get(lang, CROC_TEXT["uz"])
+    text = data.get(key) or CROC_TEXT["uz"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def croc_kb(chat_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(croc_t(chat_id, "show"), callback_data="croc:show")
+    ]])
+
+
+def croc_round_text(chat_id, game):
+    return croc_t(
+        chat_id, "round",
+        host=game["host_name"], round=game["round"], points=CROC_WIN_PTS,
+    )
+
+
+async def croc_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, game):
+    """Guruhdagi matnni krokodil javobi sifatida tekshiradi."""
+    msg = update.effective_message
+    user = update.effective_user
+    chat_id = msg.chat_id
+
+    if game.get("finished") or not game.get("word"):
+        return
+
+    # Boshlovchi o'zi so'zni yozsa yutmaydi.
+    if user.id == game.get("host_id"):
+        return
+
+    lang = croc_lang_code(chat_id)
+    if not croc_answer_matches(msg.text, game["word"], lang):
+        return
+
+    # Keyingi xabar bilan poyga bo'lmasligi uchun avval yakunlaymiz.
+    game["finished"] = True
+    save_user(user)
+
+    word = game["word"]
+    name = uname(user)
+    old_msg_id = game.get("msg_id")
+
+    record(chat_id, user.id, "win", CROC_WIN_PTS)
+
+    # G'olib keyingi boshlovchi bo'ladi.
+    game["host_id"] = user.id
+    game["host_name"] = name
+    game["owner"] = user.id          # /stop uchun
+    game["round"] = game.get("round", 1) + 1
+    game["word"] = croc_pick_word(chat_id, game)
+    game["finished"] = False
+
+    await msg.reply_text(
+        croc_t(chat_id, "win", word=escape(word, quote=False), name=name, points=CROC_WIN_PTS)
+    )
+
+    # Eski raund xabaridagi "So'zni ko'rish" tugmasini olib tashlaymiz.
+    if old_msg_id:
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=old_msg_id, reply_markup=None
+            )
+        except TelegramError:
+            pass
+
+    try:
+        sent = await context.bot.send_message(
+            chat_id, croc_round_text(chat_id, game), reply_markup=croc_kb(chat_id)
+        )
+    except TelegramError as e:
+        logger.warning("Krokodil: yangi raundni yuborib bo'lmadi: %s", e)
+        end_game(chat_id, game)
+        try:
+            await context.bot.send_message(chat_id, croc_t(chat_id, "send_error"))
+        except TelegramError:
+            pass
+        return
+
+    game["msg_id"] = sent.message_id
+    arm(context.application, chat_id, game, CROC_TTL)
+
+
+async def cb_croc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """👁 So'zni ko'rish — faqat joriy boshlovchi uchun."""
+    q = update.callback_query
+    if not q or not q.message:
+        return
+
+    chat_id = q.message.chat.id
+    game = GAMES.get(chat_id)
+    if not game or game.get("type") != "croc":
+        await q.answer(t(chat_id, "gone"), show_alert=True)
+        return
+
+    if q.from_user.id != game.get("host_id"):
+        await q.answer(croc_t(chat_id, "not_host"), show_alert=True)
+        return
+
+    await q.answer(f"🔐 {game['word'].upper()}", show_alert=True)
+    # Boshlovchi faol — faolsizlik taymerini yangilaymiz.
+    arm(context.application, chat_id, game, CROC_TTL)
+
+
 async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
 
@@ -5920,6 +6969,7 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     application.create_task(family_delivery_worker(application), name="family-delivery-worker")
+    application.create_task(croc_prepare_words(), name="croc-words")
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -7019,7 +8069,7 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         request_text = family_text(
             partner_id, "request",
-            parent=f'<a href="tg://user?id={user.id}">{person_name(user.id)}</a>',
+            parent=person_name(user.id),
             gender=escape(child_gender_label(partner_id, gender)),
             name=escape(name),
         )
@@ -8832,7 +9882,8 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_hadya, pattern=r"^hadya:claim:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^panel:"))
     app.add_handler(CallbackQueryHandler(cb_memory, pattern=r"^m:"))
-    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|menu)$"))
+    app.add_handler(CallbackQueryHandler(cb_croc, pattern=r"^croc:show$"))
+    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|croc|menu)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))
     app.add_handler(

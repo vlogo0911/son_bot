@@ -48,3 +48,7 @@
   (o'z matni `welcome_text`, {name} {group}) / Ogohlantirishlar / Adminlar. 👮 Admin paneli (`cb_admin`, `ga:<chat>:<uid>`,
   `?start=ga_<|chat|>_<uid>`): huquqlarni ✅/❌, adminlikdan olish; `/promote [unvon]`, `/demote`; Telegram'da admin qilinsa
   `announce_new_admin` panel tugmasini chiqaradi. Bot faqat o'zi tayinlagan adminlarni o'zgartira oladi.
+- 🛡 2-bosqich: 🚫 taqiqlangan so'zlar (`group_badwords`, `/addword /delword /words`, settings → So'zlar), 🔒 cheklovlar
+  (`locks` bitmaskasi: stiker/GIF/ovozli/dumaloq video/forward), 🌙 tungi rejim (`night_*` ustunlari, `night_worker` har 60 s,
+  Toshkent vaqti; `set_chat_permissions` bilan yopadi, oldingi ruxsatlar `night_saved` da), 📣 `/report` va "@admin" (adminlarga
+  shaxsiy xabar + 🗑/🔇/🚀 tugmalar `cb_report`), 📋 log kanal (`/setlog @kanal|off`, `mod_log`).

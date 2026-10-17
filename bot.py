@@ -1468,6 +1468,7 @@ def casino_t(chat_id, key):
 def casino_kb(chat_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(cr_t(chat_id, "btn"), callback_data="g:crash")],
+        [InlineKeyboardButton(frog_t(chat_id, "btn"), callback_data="g:frog")],
         [InlineKeyboardButton(casino_t(chat_id, "back"), callback_data="g:back")],
     ])
 
@@ -3938,6 +3939,13 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer(t(chat_id, "use_group"), show_alert=True)
         return
 
+    # Qurbaqa GAMES'ni band qilmaydi — guruhda boshqa o'yin ketayotgan bo'lsa ham ochiladi.
+    if kind == "frog":
+        await q.answer()
+        await edit(context.bot, chat_id, msg.message_id,
+                   frog_t(chat_id, "lobby", min=FROG_MIN_BET), frog_lobby_kb(chat_id))
+        return
+
     game = GAMES.get(chat_id)
     if game:
         await q.answer(
@@ -4015,18 +4023,9 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state="setup", msg_id=msg.message_id,
             names={user.id: name},
         )
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🐾 Hayvonlar", callback_data="m:cat:animals"),
-                InlineKeyboardButton("🍕 Taomlar", callback_data="m:cat:food"),
-            ],
-            [
-                InlineKeyboardButton("😀 Yuzlar", callback_data="m:cat:faces"),
-            ],
-        ])
         await edit(
             context.bot, chat_id, msg.message_id,
-            memory_t(chat_id, "choose"), kb
+            memory_t(chat_id, "choose"), memory_category_kb()
         )
         arm(app, chat_id, game, MEMORY_SETUP_TTL)
 
@@ -4170,6 +4169,30 @@ def memory_lobby_kb(chat_id):
     ]])
 
 
+def memory_category_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🐾 Hayvonlar", callback_data="m:cat:animals"),
+            InlineKeyboardButton("🍕 Taomlar", callback_data="m:cat:food"),
+        ],
+        [
+            InlineKeyboardButton("😀 Yuzlar", callback_data="m:cat:faces"),
+        ],
+    ])
+
+
+def memory_begin(game):
+    game["state"] = "play"
+    game["board"] = memory_make_board(game["size"], game.get("category", "animals"))
+    game["revealed"] = set()
+    game["locked"] = set()
+    game["scores"] = {uid: 0 for uid in game["names"]}
+    game["turn"] = list(game["names"])[0]
+    game["first"] = None
+    game["second"] = None
+    game["busy"] = False
+
+
 def memory_lobby_text(chat_id, game):
     names = "\n".join(
         f"🙋 {name}" for name in game["names"].values()
@@ -4284,10 +4307,10 @@ async def memory_finish(context, chat_id, game):
 
 async def cb_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    if not q or not q.message:
+    if not q:
         return
 
-    chat_id = q.message.chat.id
+    chat_id = game_key(q)
     game = GAMES.get(chat_id)
 
     if not game or game.get("type") != "memory":
@@ -4301,7 +4324,7 @@ async def cb_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _cb_memory_locked(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    chat_id = q.message.chat.id
+    chat_id = game_key(q)
     user = q.from_user
     data = q.data
 
@@ -4358,6 +4381,16 @@ async def _cb_memory_locked(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await q.answer()
 
+        # Inline o'yinda ikkinchi o'yinchi oldinroq qo'shilgan bo'lishi mumkin.
+        if len(game["names"]) >= 2:
+            memory_begin(game)
+            await edit(
+                context.bot, chat_id, game["msg_id"],
+                memory_text(chat_id, game), memory_keyboard(game),
+            )
+            arm(context.application, chat_id, game, MEMORY_GAME_TTL)
+            return
+
         await edit(
             context.bot,
             chat_id,
@@ -4396,15 +4429,7 @@ async def _cb_memory_locked(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        game["state"] = "play"
-        game["board"] = memory_make_board(game["size"], game.get("category", "animals"))
-        game["revealed"] = set()
-        game["locked"] = set()
-        game["scores"] = {uid: 0 for uid in game["names"]}
-        game["turn"] = list(game["names"])[0]
-        game["first"] = None
-        game["second"] = None
-        game["busy"] = False
+        memory_begin(game)
 
         await edit(
             context.bot,
@@ -4527,9 +4552,553 @@ async def _cb_memory_locked(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+# ───────────────────────────── 🐸 Qurbaqa (Casino) ─────────────────────────────
+# Maydon: FROG_ROWS qator × FROG_COLS nilufar bargi. Har qatorda rejimga qarab
+# 1 / 2 / 3 ta xavfli barg bor — ular har o'yinda tasodifiy joylashadi.
+# Qurbaqa faqat o'zidan bitta oldingi qatordagi istalgan bargga sakraydi.
+# Koeffitsiyent: RTP × (4 / xavfsiz barglar soni) ^ qadamlar — har qanday
+# to'xtash strategiyasida o'rtacha qaytim RTP ga teng.
+# O'yin GAMES'dan alohida saqlanadi (bitta chatda bir nechta odam o'ynay oladi).
+
+FROG_ROWS = 5
+FROG_COLS = 4
+FROG_RTP = 0.97
+FROG_MIN_BET = 50
+FROG_STEP = 50
+FROG_SETUP_TTL = 180        # qo'shilish / rejim / depozit bosqichi (soniya)
+FROG_PLAY_TTL = 300         # o'yin davomida faolsizlik → avtomatik pul olish
+FROG_MODES = {"easy": 1, "medium": 2, "hard": 3}   # qatordagi xavfli barglar soni
+FROG_MODE_ICON = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
+FROG_CELL = {"next": "🪷", "future": "🌿", "frog": "🐸", "path": "✅", "past": "〰️",
+             "trap": "🌊", "hit": "💥", "safe": "🪷"}
+FROG_GAMES: dict[str, dict] = {}
+
+FROG_TEXT = {
+    "uz": {
+        "btn": "🐸 Qurbaqa",
+        "desc": "Qurbaqani nilufar barglaridan o‘tkazing",
+        "lobby": (
+            "🐸 <b>QURBAQA</b>\n\n"
+            "Qurbaqani nilufar barglari ustidan o‘tkazing! Har qatorda ba’zi barglar ostida xavf bor — "
+            "ular har o‘yinda boshqa joyda.\n"
+            "Har sakrashda koeffitsiyent oshadi, istalgan payt pulni olishingiz mumkin.\n\n"
+            "💵 Minimal depozit: <b>{min}$</b>\n\n👇 O‘yinga qo‘shiling"
+        ),
+        "join": "🙋 O‘yinga qo‘shilish",
+        "mode": (
+            "🐸 <b>QURBAQA</b>\n👤 {name}\n\nRejimni tanlang:\n"
+            "🟢 Oson — qatorda 1 ta xavf · oxirgi qator x{easy}\n"
+            "🟡 O‘rta — qatorda 2 ta xavf · oxirgi qator x{medium}\n"
+            "🔴 Qiyin — qatorda 3 ta xavf · oxirgi qator x{hard}"
+        ),
+        "easy": "🟢 Oson", "medium": "🟡 O‘rta", "hard": "🔴 Qiyin",
+        "bet": "🐸 <b>QURBAQA</b> · {mode}\n👤 {name}\n\n💵 Depozit: <b>{bet}$</b>\n💰 Balans: {bal}$\n\nDepozitni tanlang va o‘yinni boshlang 👇",
+        "start": "✅ Boshlash",
+        "play": (
+            "🐸 <b>QURBAQA</b> · {mode}\n👤 {name} · 💵 {bet}$\n\n"
+            "⏭ Keyingi qadam: <b>x{next}</b> → {next_win}$\n"
+            "💰 Hozir olsangiz: <b>x{cur}</b> → {cur_win}$\n\n"
+            "👇 Oldingi qatordagi istalgan bargni tanlang"
+        ),
+        "shore": "🏝 Qurbaqa qirg‘oqda — birinchi qatorga sakrang",
+        "cash": "💰 Pulni olish · {win}$",
+        "lose": "🐸 <b>QURBAQA</b> · {mode}\n👤 {name}\n\n💥 Qurbaqa suvga tushdi!\n💔 Yutqazdi: <b>−{bet}$</b>",
+        "win": "🐸 <b>QURBAQA</b> · {mode}\n👤 {name}\n\n🏆 x{mult} da pulni oldi!\n💵 Tikdi: {bet}$ → olindi <b>{payout}$</b> (foyda <b>+{profit}$</b>)",
+        "finish": "🎉 Qurbaqa narigi qirg‘oqqa yetdi!",
+        "timeout_cash": "⌛ Faolsizlik — pul avtomatik olindi.",
+        "timeout_refund": "⌛ Faolsizlik — o‘yin bekor qilindi, depozit qaytarildi.",
+        "timeout": "⌛ Vaqt tugadi — o‘yin bekor qilindi.",
+        "not_yours": "⛔ Bu o‘yin sizniki emas. O‘zingiz yangi o‘yin oching.",
+        "no_funds": "💸 Balansingiz yetarli emas (kamida {min}$ kerak).",
+        "no_more": "💸 Balansingiz {bal}$ — bundan ko‘p tikib bo‘lmaydi.",
+        "jump_first": "🐸 Avval kamida bitta sakrang.",
+        "wrong_row": "🐸 Faqat oldingi qatordagi barglarga sakrash mumkin.",
+        "closed": "⌛ Bu o‘yin tugagan.",
+        "error": "⚠️ Xatolik yuz berdi, qayta urinib ko‘ring.",
+    },
+    "eng": {
+        "btn": "🐸 Frog",
+        "desc": "Hop the frog across the lily pads",
+        "lobby": (
+            "🐸 <b>FROG</b>\n\n"
+            "Hop the frog across the lily pads! Some pads in every row hide a danger — "
+            "they move every game.\n"
+            "Each hop raises the multiplier, and you can cash out at any time.\n\n"
+            "💵 Minimum deposit: <b>{min}$</b>\n\n👇 Join the game"
+        ),
+        "join": "🙋 Join the game",
+        "mode": (
+            "🐸 <b>FROG</b>\n👤 {name}\n\nChoose a mode:\n"
+            "🟢 Easy — 1 danger per row · last row x{easy}\n"
+            "🟡 Medium — 2 dangers per row · last row x{medium}\n"
+            "🔴 Hard — 3 dangers per row · last row x{hard}"
+        ),
+        "easy": "🟢 Easy", "medium": "🟡 Medium", "hard": "🔴 Hard",
+        "bet": "🐸 <b>FROG</b> · {mode}\n👤 {name}\n\n💵 Deposit: <b>{bet}$</b>\n💰 Balance: {bal}$\n\nChoose a deposit and start 👇",
+        "start": "✅ Start",
+        "play": (
+            "🐸 <b>FROG</b> · {mode}\n👤 {name} · 💵 {bet}$\n\n"
+            "⏭ Next hop: <b>x{next}</b> → {next_win}$\n"
+            "💰 Cash out now: <b>x{cur}</b> → {cur_win}$\n\n"
+            "👇 Pick any pad in the next row"
+        ),
+        "shore": "🏝 The frog is on the shore — hop to the first row",
+        "cash": "💰 Cash out · {win}$",
+        "lose": "🐸 <b>FROG</b> · {mode}\n👤 {name}\n\n💥 The frog fell into the water!\n💔 Lost: <b>−{bet}$</b>",
+        "win": "🐸 <b>FROG</b> · {mode}\n👤 {name}\n\n🏆 Cashed out at x{mult}!\n💵 Bet: {bet}$ → received <b>{payout}$</b> (profit <b>+{profit}$</b>)",
+        "finish": "🎉 The frog reached the far shore!",
+        "timeout_cash": "⌛ Inactive — cashed out automatically.",
+        "timeout_refund": "⌛ Inactive — game cancelled, deposit refunded.",
+        "timeout": "⌛ Time is up — the game was cancelled.",
+        "not_yours": "⛔ This is not your game. Open a new one yourself.",
+        "no_funds": "💸 Not enough balance (at least {min}$ needed).",
+        "no_more": "💸 Your balance is {bal}$ — you can't bet more.",
+        "jump_first": "🐸 Make at least one hop first.",
+        "wrong_row": "🐸 You can only hop to a pad in the next row.",
+        "closed": "⌛ This game has ended.",
+        "error": "⚠️ Something went wrong, please try again.",
+    },
+    "ru": {
+        "btn": "🐸 Лягушка",
+        "desc": "Проведите лягушку по листьям кувшинок",
+        "lobby": (
+            "🐸 <b>ЛЯГУШКА</b>\n\n"
+            "Проведите лягушку по листьям кувшинок! В каждом ряду под некоторыми листьями опасность — "
+            "в каждой игре она в другом месте.\n"
+            "Каждый прыжок повышает коэффициент, забрать выигрыш можно в любой момент.\n\n"
+            "💵 Минимальный депозит: <b>{min}$</b>\n\n👇 Присоединяйтесь"
+        ),
+        "join": "🙋 Присоединиться",
+        "mode": (
+            "🐸 <b>ЛЯГУШКА</b>\n👤 {name}\n\nВыберите режим:\n"
+            "🟢 Лёгкий — 1 опасность в ряду · последний ряд x{easy}\n"
+            "🟡 Средний — 2 опасности в ряду · последний ряд x{medium}\n"
+            "🔴 Сложный — 3 опасности в ряду · последний ряд x{hard}"
+        ),
+        "easy": "🟢 Лёгкий", "medium": "🟡 Средний", "hard": "🔴 Сложный",
+        "bet": "🐸 <b>ЛЯГУШКА</b> · {mode}\n👤 {name}\n\n💵 Депозит: <b>{bet}$</b>\n💰 Баланс: {bal}$\n\nВыберите депозит и начните 👇",
+        "start": "✅ Начать",
+        "play": (
+            "🐸 <b>ЛЯГУШКА</b> · {mode}\n👤 {name} · 💵 {bet}$\n\n"
+            "⏭ Следующий прыжок: <b>x{next}</b> → {next_win}$\n"
+            "💰 Забрать сейчас: <b>x{cur}</b> → {cur_win}$\n\n"
+            "👇 Выберите любой лист в следующем ряду"
+        ),
+        "shore": "🏝 Лягушка на берегу — прыгайте в первый ряд",
+        "cash": "💰 Забрать · {win}$",
+        "lose": "🐸 <b>ЛЯГУШКА</b> · {mode}\n👤 {name}\n\n💥 Лягушка упала в воду!\n💔 Проигрыш: <b>−{bet}$</b>",
+        "win": "🐸 <b>ЛЯГУШКА</b> · {mode}\n👤 {name}\n\n🏆 Забрал на x{mult}!\n💵 Ставка: {bet}$ → получено <b>{payout}$</b> (прибыль <b>+{profit}$</b>)",
+        "finish": "🎉 Лягушка добралась до другого берега!",
+        "timeout_cash": "⌛ Нет активности — выигрыш забран автоматически.",
+        "timeout_refund": "⌛ Нет активности — игра отменена, депозит возвращён.",
+        "timeout": "⌛ Время вышло — игра отменена.",
+        "not_yours": "⛔ Это не ваша игра. Откройте свою.",
+        "no_funds": "💸 Недостаточно средств (нужно минимум {min}$).",
+        "no_more": "💸 Ваш баланс {bal}$ — больше поставить нельзя.",
+        "jump_first": "🐸 Сначала сделайте хотя бы один прыжок.",
+        "wrong_row": "🐸 Прыгать можно только на лист в следующем ряду.",
+        "closed": "⌛ Эта игра закончена.",
+        "error": "⚠️ Произошла ошибка, попробуйте ещё раз.",
+    },
+    "kz": {
+        "btn": "🐸 Бақа",
+        "desc": "Бақаны тұңғиық жапырақтарынан өткізіңіз",
+        "lobby": (
+            "🐸 <b>БАҚА</b>\n\n"
+            "Бақаны тұңғиық жапырақтары арқылы өткізіңіз! Әр қатарда кейбір жапырақтың астында қауіп бар — "
+            "әр ойында басқа жерде.\n"
+            "Әр секірген сайын коэффициент өседі, ұтысты кез келген уақытта алуға болады.\n\n"
+            "💵 Ең аз депозит: <b>{min}$</b>\n\n👇 Ойынға қосылыңыз"
+        ),
+        "join": "🙋 Ойынға қосылу",
+        "mode": (
+            "🐸 <b>БАҚА</b>\n👤 {name}\n\nРежимді таңдаңыз:\n"
+            "🟢 Оңай — қатарда 1 қауіп · соңғы қатар x{easy}\n"
+            "🟡 Орташа — қатарда 2 қауіп · соңғы қатар x{medium}\n"
+            "🔴 Қиын — қатарда 3 қауіп · соңғы қатар x{hard}"
+        ),
+        "easy": "🟢 Оңай", "medium": "🟡 Орташа", "hard": "🔴 Қиын",
+        "bet": "🐸 <b>БАҚА</b> · {mode}\n👤 {name}\n\n💵 Депозит: <b>{bet}$</b>\n💰 Баланс: {bal}$\n\nДепозитті таңдап, ойынды бастаңыз 👇",
+        "start": "✅ Бастау",
+        "play": (
+            "🐸 <b>БАҚА</b> · {mode}\n👤 {name} · 💵 {bet}$\n\n"
+            "⏭ Келесі секіру: <b>x{next}</b> → {next_win}$\n"
+            "💰 Қазір алсаңыз: <b>x{cur}</b> → {cur_win}$\n\n"
+            "👇 Келесі қатардағы кез келген жапырақты таңдаңыз"
+        ),
+        "shore": "🏝 Бақа жағада — бірінші қатарға секіріңіз",
+        "cash": "💰 Ұтысты алу · {win}$",
+        "lose": "🐸 <b>БАҚА</b> · {mode}\n👤 {name}\n\n💥 Бақа суға түсті!\n💔 Ұтылды: <b>−{bet}$</b>",
+        "win": "🐸 <b>БАҚА</b> · {mode}\n👤 {name}\n\n🏆 x{mult} кезінде ұтысты алды!\n💵 Салды: {bet}$ → алынды <b>{payout}$</b> (пайда <b>+{profit}$</b>)",
+        "finish": "🎉 Бақа арғы жағаға жетті!",
+        "timeout_cash": "⌛ Белсенділік жоқ — ұтыс автоматты түрде алынды.",
+        "timeout_refund": "⌛ Белсенділік жоқ — ойын тоқтатылды, депозит қайтарылды.",
+        "timeout": "⌛ Уақыт бітті — ойын тоқтатылды.",
+        "not_yours": "⛔ Бұл сіздің ойыныңыз емес. Өзіңіз жаңасын ашыңыз.",
+        "no_funds": "💸 Балансыңыз жеткіліксіз (кемінде {min}$ керек).",
+        "no_more": "💸 Балансыңыз {bal}$ — бұдан көп салуға болмайды.",
+        "jump_first": "🐸 Алдымен кемінде бір рет секіріңіз.",
+        "wrong_row": "🐸 Тек келесі қатардағы жапыраққа секіруге болады.",
+        "closed": "⌛ Бұл ойын аяқталды.",
+        "error": "⚠️ Қате шықты, қайталап көріңіз.",
+    },
+}
+
+
+def frog_t(chat, key, **kwargs):
+    lang = LANG_CACHE.get(chat, DEFAULT_LANG)
+    text = FROG_TEXT.get(lang, FROG_TEXT["uz"]).get(key) or FROG_TEXT["uz"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def frog_mult(mode, steps):
+    if steps <= 0:
+        return 1.0
+    safe = FROG_COLS - FROG_MODES[mode]
+    return math.floor(FROG_RTP * (FROG_COLS / safe) ** steps * 100) / 100
+
+
+def frog_key(q):
+    """Har bir o'yin xabari — alohida o'yin (inline yoki chat:xabar)."""
+    if q.inline_message_id:
+        return INLINE_PREFIX + q.inline_message_id
+    return f"{q.message.chat.id}:{q.message.message_id}"
+
+
+def frog_lobby_kb(chat):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(frog_t(chat, "join"), callback_data="fr:join")
+    ]])
+
+
+def frog_mode_text(chat, game):
+    return frog_t(
+        chat, "mode", name=game["name"],
+        **{m: f"{frog_mult(m, FROG_ROWS):g}" for m in FROG_MODES},
+    )
+
+
+def frog_mode_kb(chat):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(frog_t(chat, m), callback_data=f"fr:mode:{m}") for m in FROG_MODES
+    ]])
+
+
+def frog_bet_text(chat, game):
+    return frog_t(
+        chat, "bet", mode=frog_t(chat, game["mode"]), name=game["name"],
+        bet=game["bet"], bal=wallet_balance(game["player"]),
+    )
+
+
+def frog_bet_kb(chat):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"➖{FROG_STEP}", callback_data="fr:bet:minus"),
+            InlineKeyboardButton(f"➕{FROG_STEP}", callback_data="fr:bet:plus"),
+            InlineKeyboardButton("✖️2", callback_data="fr:bet:x2"),
+            InlineKeyboardButton(f"🔽{FROG_MIN_BET}", callback_data="fr:bet:min"),
+        ],
+        [InlineKeyboardButton(frog_t(chat, "start"), callback_data="fr:go")],
+    ])
+
+
+def frog_payout(game):
+    return game["bet"] * int(round(frog_mult(game["mode"], len(game["path"])) * 100)) // 100
+
+
+def frog_play_text(chat, game):
+    steps = len(game["path"])
+    nxt = frog_mult(game["mode"], steps + 1)
+    cur = frog_mult(game["mode"], steps)
+    text = frog_t(
+        chat, "play", mode=frog_t(chat, game["mode"]), name=game["name"], bet=game["bet"],
+        next=f"{nxt:.2f}", next_win=game["bet"] * int(round(nxt * 100)) // 100,
+        cur=f"{cur:.2f}", cur_win=frog_payout(game),
+    )
+    if not steps:
+        text += "\n\n" + frog_t(chat, "shore")
+    return text
+
+
+def frog_board_kb(chat, game, reveal=False, hit=None):
+    """Yuqorida — oxirgi qator, pastda — birinchi qator (qurbaqa pastdan yuqoriga sakraydi)."""
+    steps = len(game["path"])
+    rows = []
+    for r in reversed(range(FROG_ROWS)):
+        row = []
+        for c in range(FROG_COLS):
+            data = "noop"
+            if hit == (r, c):
+                label = FROG_CELL["hit"]
+            elif r < steps and game["path"][r] == c:
+                label = FROG_CELL["frog"] if r == steps - 1 and hit is None else FROG_CELL["path"]
+            elif reveal and c in game["traps"][r]:
+                label = FROG_CELL["trap"]
+            elif reveal:
+                label = FROG_CELL["safe"]
+            elif r < steps:
+                label = FROG_CELL["past"]
+            elif r == steps:
+                label = FROG_CELL["next"]
+                data = f"fr:c:{r}:{c}"
+            else:
+                label = FROG_CELL["future"]
+            row.append(InlineKeyboardButton(label, callback_data=data))
+        rows.append(row)
+    if reveal:
+        rows.append(again_row(chat))
+    else:
+        rows.append([InlineKeyboardButton(
+            frog_t(chat, "cash", win=frog_payout(game)), callback_data="fr:cash"
+        )])
+    return InlineKeyboardMarkup(rows)
+
+
+async def frog_edit(bot, game, text, kb):
+    await edit(bot, game["chat"], game["msg_id"], text, kb)
+
+
+def frog_arm(app, key, game, seconds):
+    old = game.get("timer")
+    if old and not old.done():
+        old.cancel()
+    task = asyncio.create_task(_frog_expire(app, key, game, seconds))
+    BG_TASKS.add(task)
+    task.add_done_callback(BG_TASKS.discard)
+    game["timer"] = task
+
+
+def frog_close(key, game):
+    if FROG_GAMES.get(key) is game:
+        del FROG_GAMES[key]
+    game["state"] = "end"
+    timer = game.get("timer")
+    if timer and not timer.done() and timer is not asyncio.current_task():
+        timer.cancel()
+
+
+def frog_settle(game):
+    """Yakunlanmagan o'yinni pul bilan yopadi: sakragan bo'lsa — yutuq, aks holda depozit qaytadi.
+    Qaytaradi: to'langan summa (0 — to'lov yo'q)."""
+    if not game.get("paid") or game.get("settled"):
+        return 0
+    game["settled"] = True
+    amount = frog_payout(game) if game["path"] else game["bet"]
+    wallet_change(game["player"], amount)
+    return amount
+
+
+async def _frog_expire(app, key, game, seconds):
+    try:
+        await asyncio.sleep(seconds)
+    except asyncio.CancelledError:
+        return
+    async with game["lock"]:
+        if FROG_GAMES.get(key) is not game:
+            return
+        chat = game["chat"]
+        if game["state"] == "play":
+            try:
+                frog_settle(game)
+            except sqlite3.Error:
+                logger.exception("Qurbaqa: avtomatik to'lov yozilmadi (user %s)", game["player"])
+            frog_close(key, game)
+            if game["path"]:
+                record(chat, game["player"], "win")
+                text = frog_result_text(chat, game) + "\n\n" + frog_t(chat, "timeout_cash")
+                await frog_log(app.bot, chat, game, f"+{frog_payout(game) - game['bet']}$ (avto)")
+            else:
+                text = frog_t(chat, "timeout_refund")
+            await frog_edit(app.bot, game, text, frog_board_kb(chat, game, reveal=True))
+            return
+        frog_close(key, game)
+        await frog_edit(app.bot, game, frog_t(chat, "timeout"), None)
+
+
+def frog_result_text(chat, game):
+    payout = frog_payout(game) if game["path"] else game["bet"]
+    return frog_t(
+        chat, "win", mode=frog_t(chat, game["mode"]), name=game["name"],
+        mult=f"{frog_mult(game['mode'], len(game['path'])):.2f}", bet=game["bet"],
+        payout=payout, profit=payout - game["bet"],
+    )
+
+
+async def frog_log(bot, chat, game, result):
+    await log_money_event(
+        bot,
+        "🐸 <b>QURBAQA</b>\n"
+        f"Chat: <code>{escape(str(chat))}</code>\n"
+        f"{person_name(game['player'])} · {game['mode']} · {game['bet']}$ · "
+        f"{len(game['path'])}/{FROG_ROWS} qadam\n{result}",
+    )
+
+
+async def cb_frog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    key = frog_key(q)
+    parts = q.data.split(":")
+    chat = game_key(q)
+    if is_inline_key(chat) and chat not in LANG_CACHE and len(parts) > 2 and parts[1] == "join":
+        set_inline_lang(chat, parts[2])
+
+    game = FROG_GAMES.get(key)
+    if not game:
+        if parts[1] != "join":
+            await q.answer(frog_t(chat, "closed"), show_alert=True)
+            return
+        game = {"chat": chat, "msg_id": None if q.inline_message_id else q.message.message_id,
+                "player": None, "state": "join", "lock": asyncio.Lock(), "timer": None,
+                "path": [], "paid": False, "settled": False}
+        FROG_GAMES[key] = game
+    async with game["lock"]:
+        if FROG_GAMES.get(key) is not game:
+            await q.answer(frog_t(chat, "closed"), show_alert=True)
+            return
+        try:
+            await _frog_action(q, context, key, game, parts)
+        except sqlite3.Error:
+            logger.exception("Qurbaqa: bazada xato")
+            await q.answer(frog_t(chat, "error"), show_alert=True)
+
+
+async def _frog_action(q, context, key, game, parts):
+    chat = game["chat"]
+    user = q.from_user
+    action = parts[1]
+    app = context.application
+
+    if action == "join":
+        if game["player"] == user.id:
+            await q.answer()
+            return
+        if game["player"] is not None:
+            await q.answer(frog_t(chat, "not_yours"), show_alert=True)
+            return
+        if wallet_balance(user.id) < FROG_MIN_BET:
+            await q.answer(frog_t(chat, "no_funds", min=FROG_MIN_BET), show_alert=True)
+            frog_close(key, game)   # lobby xabari qoladi — keyingi bosgan odam uchun yangidan ochiladi
+            return
+        save_user(user)
+        game.update(player=user.id, name=uname(user), state="mode", bet=FROG_MIN_BET)
+        await q.answer()
+        await frog_edit(context.bot, game, frog_mode_text(chat, game), frog_mode_kb(chat))
+        frog_arm(app, key, game, FROG_SETUP_TTL)
+        return
+
+    if user.id != game["player"]:
+        await q.answer(frog_t(chat, "not_yours"), show_alert=True)
+        return
+
+    if action == "mode":
+        if game["state"] != "mode" or parts[2] not in FROG_MODES:
+            await q.answer()
+            return
+        game.update(mode=parts[2], state="bet")
+        await q.answer()
+        await frog_edit(context.bot, game, frog_bet_text(chat, game), frog_bet_kb(chat))
+        frog_arm(app, key, game, FROG_SETUP_TTL)
+        return
+
+    if action == "bet":
+        if game["state"] != "bet":
+            await q.answer()
+            return
+        balance = wallet_balance(user.id)
+        bet = {"minus": game["bet"] - FROG_STEP, "plus": game["bet"] + FROG_STEP,
+               "x2": game["bet"] * 2, "min": FROG_MIN_BET}.get(parts[2], game["bet"])
+        bet = max(FROG_MIN_BET, bet)
+        if bet > balance:
+            await q.answer(frog_t(chat, "no_more", bal=balance), show_alert=True)
+            return
+        game["bet"] = bet
+        await q.answer()
+        await frog_edit(context.bot, game, frog_bet_text(chat, game), frog_bet_kb(chat))
+        frog_arm(app, key, game, FROG_SETUP_TTL)
+        return
+
+    if action == "go":
+        if game["state"] != "bet":
+            await q.answer()
+            return
+        c = db()
+        with c:
+            cur = c.execute(
+                "UPDATE user_wallet SET money=money-? WHERE user_id=? AND money>=?",
+                (game["bet"], user.id, game["bet"]),
+            )
+        if cur.rowcount != 1:
+            await q.answer(frog_t(chat, "no_funds", min=game["bet"]), show_alert=True)
+            return
+        bad = FROG_MODES[game["mode"]]
+        game.update(
+            paid=True, state="play",
+            traps=[set(_CRASH_RNG.sample(range(FROG_COLS), bad)) for _ in range(FROG_ROWS)],
+        )
+        await q.answer()
+        await frog_edit(context.bot, game, frog_play_text(chat, game), frog_board_kb(chat, game))
+        frog_arm(app, key, game, FROG_PLAY_TTL)
+        return
+
+    if action == "c":
+        if game["state"] != "play":
+            await q.answer(frog_t(chat, "closed"), show_alert=True)
+            return
+        r, col = int(parts[2]), int(parts[3])
+        if r != len(game["path"]) or not 0 <= col < FROG_COLS:
+            await q.answer(frog_t(chat, "wrong_row"), show_alert=True)
+            return
+        await q.answer()
+
+        if col in game["traps"][r]:
+            game["settled"] = True
+            frog_close(key, game)
+            record(chat, user.id, "loss")
+            await frog_edit(
+                context.bot, game,
+                frog_t(chat, "lose", mode=frog_t(chat, game["mode"]), name=game["name"], bet=game["bet"]),
+                frog_board_kb(chat, game, reveal=True, hit=(r, col)),
+            )
+            await frog_log(context.bot, chat, game, f"−{game['bet']}$")
+            return
+
+        game["path"].append(col)
+        if len(game["path"]) < FROG_ROWS:
+            await frog_edit(context.bot, game, frog_play_text(chat, game), frog_board_kb(chat, game))
+            frog_arm(app, key, game, FROG_PLAY_TTL)
+            return
+        # Oxirgi qatordan o'tdi — yutuq avtomatik olinadi.
+        await _frog_cashout(context, key, game, frog_t(chat, "finish"))
+        return
+
+    if action == "cash":
+        if game["state"] != "play":
+            await q.answer(frog_t(chat, "closed"), show_alert=True)
+            return
+        if not game["path"]:
+            await q.answer(frog_t(chat, "jump_first"), show_alert=True)
+            return
+        await q.answer()
+        await _frog_cashout(context, key, game)
+        return
+
+    await q.answer()
+
+
+async def _frog_cashout(context, key, game, note=""):
+    chat = game["chat"]
+    payout = frog_settle(game)
+    frog_close(key, game)
+    record(chat, game["player"], "win")
+    text = frog_result_text(chat, game) + (f"\n\n{note}" if note else "")
+    await frog_edit(context.bot, game, text, frog_board_kb(chat, game, reveal=True))
+    await frog_log(context.bot, chat, game, f"+{payout - game['bet']}$ (x{frog_mult(game['mode'], len(game['path'])):.2f})")
+
+
 # ───────────────────────────── 🎯 Son topish ─────────────────────────────
 
-HEAT = [(3, "heat_hot"), (10, "heat_warm"), (25, "heat_cool"), (10**9, "heat_cold")]
+HEAT =[(3, "heat_hot"), (10, "heat_warm"), (25, "heat_cool"), (10**9, "heat_cold")]
 
 
 # ───────────────────────────── 📢 "bot" — guruh a'zolarini chaqirish ─────────────────────────────
@@ -7601,6 +8170,11 @@ async def post_init(application: Application):
 
 
 async def post_shutdown(application: Application):
+    for game in list(FROG_GAMES.values()):
+        try:
+            frog_settle(game)   # sakragan bo'lsa — yutuq, aks holda depozit qaytadi
+        except Exception:  # noqa: BLE001
+            logger.exception("Qurbaqa: to'xtash paytida depozitni qaytarib bo'lmadi")
     for game in list(GAMES.values()):
         # Restart/deploy paytida Crash depozitlari yo'qolib qolmasin
         if game.get("type") == "crash":
@@ -8911,10 +9485,14 @@ async def secret_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # bo'lganda) yaratiladi va oddiy XO / RSP / Crash callback'lari bilan davom etadi.
 
 INLINE_GAME_DESC = {
-    "uz": {"xo": "Do‘stingiz bilan XO o‘ynang", "rsp": "Ikki kishilik tosh-qaychi-qog‘oz", "crash": "Pul tikib roketni kuzating"},
-    "eng": {"xo": "Play XO with a friend", "rsp": "Rock-paper-scissors for two", "crash": "Bet and watch the rocket"},
-    "ru": {"xo": "Сыграйте в XO с другом", "rsp": "Камень-ножницы-бумага на двоих", "crash": "Сделайте ставку и следите за ракетой"},
-    "kz": {"xo": "Досыңызбен XO ойнаңыз", "rsp": "Екі адамға тас-қайшы-қағаз", "crash": "Ақша салып, зымыранды бақылаңыз"},
+    "uz": {"xo": "Do‘stingiz bilan XO o‘ynang", "rsp": "Ikki kishilik tosh-qaychi-qog‘oz", "crash": "Pul tikib roketni kuzating",
+           "memory": "Ikki kishilik juftlik topish o‘yini"},
+    "eng": {"xo": "Play XO with a friend", "rsp": "Rock-paper-scissors for two", "crash": "Bet and watch the rocket",
+            "memory": "Memory pairs game for two"},
+    "ru": {"xo": "Сыграйте в XO с другом", "rsp": "Камень-ножницы-бумага на двоих", "crash": "Сделайте ставку и следите за ракетой",
+           "memory": "Игра «найди пару» на двоих"},
+    "kz": {"xo": "Досыңызбен XO ойнаңыз", "rsp": "Екі адамға тас-қайшы-қағаз", "crash": "Ақша салып, зымыранды бақылаңыз",
+           "memory": "Екі адамға арналған жұп табу ойыны"},
 }
 
 
@@ -8930,16 +9508,19 @@ def inline_game_results(user):
     crash_texts = CRASH_TEXT.get(lang, CRASH_TEXT["uz"])
     desc = INLINE_GAME_DESC.get(lang, INLINE_GAME_DESC["uz"])
 
-    def article(kind, title, text, join_label):
+    def article(kind, title, text, join_label, data=None, description=None):
         return InlineQueryResultArticle(
             id=f"game-{kind}",
             title=title,
-            description=desc[kind],
+            description=description or desc[kind],
             input_message_content=InputTextMessageContent(text, parse_mode=ParseMode.HTML),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                join_label, callback_data=f"ix:{kind}:{user.id}:{lang}",
+                join_label, callback_data=data or f"ix:{kind}:{user.id}:{lang}",
             )]]),
         )
+
+    memory_texts = MEMORY_TEXT.get(lang, MEMORY_TEXT["uz"])
+    frog_texts = FROG_TEXT.get(lang, FROG_TEXT["uz"])
 
     results = [
         article("xo", texts["btn_xo"], texts["xo_lobby"].format(owner=name), texts["btn_join"]),
@@ -8947,6 +9528,17 @@ def inline_game_results(user):
             "rsp", texts["btn_rsp"],
             texts["rsp_lobby"].format(current=1, count=2, players=f"🙋 {name}\n⬜ …"),
             texts["btn_join"],
+        ),
+        article(
+            "memory", memory_texts["btn"],
+            memory_texts["lobby"].format(players=1, names=f"🙋 {name}"),
+            memory_texts["join"],
+        ),
+        # Qurbaqa — bir kishilik: birinchi "Qo'shilish" ni bosgan odam o'ynaydi.
+        article(
+            "frog", frog_texts["btn"],
+            frog_texts["lobby"].format(min=FROG_MIN_BET),
+            frog_texts["join"], data=f"fr:join:{lang}", description=frog_texts["desc"],
         ),
     ]
     if CRASH_ENABLED and not CRASH_GROUP_RESTRICT:
@@ -8998,6 +9590,18 @@ async def cb_inline_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         arm(app, key, game, CRASH_LOBBY_TTL)
         await crash_action(q, context, "join")
+        return
+
+    if kind == "memory":
+        # O'yinni yuborgan odam maydonni tanlaydi; boshqa odam bosgan bo'lsa, u darhol ikkinchi o'yinchi.
+        save_user(user)
+        names = {owner_id: pretty_name(*inline_owner_row(owner_id))}
+        if user.id != owner_id:
+            names[user.id] = uname(user)
+        game = new_game(key, "memory", owner_id, state="setup", names=names)
+        await q.answer()
+        await edit(context.bot, key, None, memory_t(key, "choose"), memory_category_kb())
+        arm(app, key, game, MEMORY_SETUP_TTL)
         return
 
     if user.id == owner_id:
@@ -10623,8 +11227,9 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^panel:"))
     app.add_handler(CallbackQueryHandler(cb_memory, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(cb_croc, pattern=r"^croc:show$"))
-    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|croc|casino|back|menu)$"))
-    app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash):\d+:(uz|eng|ru|kz)$"))
+    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|croc|casino|frog|back|menu)$"))
+    app.add_handler(CallbackQueryHandler(cb_frog, pattern=r"^fr:"))
+    app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash|memory):\d+:(uz|eng|ru|kz)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))
     app.add_handler(

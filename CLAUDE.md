@@ -19,3 +19,5 @@
   Bot egasi xabarga reply qilib "ruxsat" / "xayr" yozsa — tag huquqi beriladi / olinadi (`tag_permissions`, guruh bo'yicha).
 - `/aktiv` (faqat guruh adminlari va bot egalari): guruhdagi eng faol 15 a'zo (xabarlar soni + eng ko'p yozgan so'zi). Hisob `count_activity` orqali
   `member_activity` / `member_words` jadvallarida, funksiya qo'shilgan paytdan boshlab yig'iladi.
+- Owner panel → 💰 Pul statistikasi (`panel:money`, `panel_money_text`): faqat bot egalari; jami pul, egalarda /
+  foydalanuvchilarda, o'yinlarda tikilgan (`money_in_games`), o'rtacha, eng boy 10.

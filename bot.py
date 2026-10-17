@@ -8547,6 +8547,7 @@ async def post_init(application: Application):
     application.create_task(bank_worker(application), name="bank-worker")
     application.create_task(birja_worker(application), name="birja-worker")
     application.create_task(kid_worker(application), name="kid-worker")
+    application.create_task(night_worker(application), name="night-worker")
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -9368,7 +9369,8 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     raw = msg.text.strip()
-    if context.user_data.get("gs_wait_welcome") and await settings_private_text(update, context):
+    if (context.user_data.get("gs_wait_welcome") or context.user_data.get("gs_wait_words")) \
+            and await settings_private_text(update, context):
         return
     crash_state = context.user_data.get("panel_crash_state")
     if crash_state and user.id in CAREER_OWNER_IDS:
@@ -13475,7 +13477,8 @@ async def cb_kid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # adminlar /settings orqali yoqadi. Bot guruhda admin bo'lishi kerak (o'chirish va bloklash huquqi bilan).
 
 GUARD_DEFAULTS = {"captcha": 0, "welcome": 1, "antilink": 0, "antiflood": 0, "warn_limit": 3, "warn_action": "mute",
-                  "welcome_text": ""}
+                  "welcome_text": "", "night": 0, "night_start": 0, "night_end": 7, "night_active": 0,
+                  "night_saved": "", "log_chat": 0, "locks": 0}
 CAPTCHA_TTL = 120               # captcha uchun vaqt (soniya)
 FLOOD_COUNT, FLOOD_WINDOW = 7, 5   # 5 soniyada 7 ta xabar — flood
 FLOOD_MUTE = 300                # flood uchun jim qilish (soniya)
@@ -13688,7 +13691,7 @@ def init_guard():
 
 def gs_get(chat_id):
     row = db().execute(
-        "SELECT captcha, welcome, antilink, antiflood, warn_limit, warn_action, welcome_text FROM group_settings WHERE chat_id=?",
+        f"SELECT {', '.join(GUARD_DEFAULTS)} FROM group_settings WHERE chat_id=?",
         (chat_id,),
     ).fetchone()
     return dict(zip(GUARD_DEFAULTS, row)) if row else dict(GUARD_DEFAULTS)
@@ -13851,6 +13854,7 @@ async def captcha_timeout(bot, key, entry):
     except TelegramError:
         pass
     await edit(bot, chat_id, entry["msg_id"], mod_t(chat_id, "cap_timeout", name=entry["name"]))
+    await mod_log(bot, chat_id, f"⌛ Captcha vaqti tugadi — {entry['name']} chiqarildi")
     await delete_later(bot, chat_id, entry["msg_id"], NOTICE_TTL)
 
 
@@ -13884,6 +13888,7 @@ async def cb_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             pass
         await edit(context.bot, chat_id, entry["msg_id"], mod_t(chat_id, "cap_wrong", name=entry["name"]))
+        await mod_log(context.bot, chat_id, f"🤖 Captcha xato — {entry['name']} chiqarildi")
         await delete_later(context.bot, chat_id, entry["msg_id"], NOTICE_TTL)
 
 
@@ -13902,13 +13907,25 @@ async def guard_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = msg.from_user
     if not user or user.is_bot or msg.sender_chat:
         return
+    if (msg.text or "").strip().lower() in ("@admin", "@admins") and msg.reply_to_message:
+        await do_report(context, msg, user)
+        raise ApplicationHandlerStop
     settings = gs_get(msg.chat_id)
-    if not settings["antilink"] and not settings["antiflood"]:
+    if not (settings["antilink"] or settings["antiflood"] or settings["night_active"]
+            or settings["locks"] or badwords(msg.chat_id)):
         return
     if user.id in CAREER_OWNER_IDS or user.id in await admin_ids(context.bot, msg.chat_id):
         return
     chat_id = msg.chat_id
     name = user_mention(user.id, user.first_name)
+
+    if settings["night_active"]:
+        # Guruhni yopib bo'lmagan bo'lsa ham tunda oddiy a'zolar xabari o'chiriladi.
+        try:
+            await msg.delete()
+        except TelegramError:
+            pass
+        raise ApplicationHandlerStop
 
     if settings["antiflood"]:
         now = time.monotonic()
@@ -13923,6 +13940,7 @@ async def guard_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id, mod_t(chat_id, "flood", name=name, dur=fmt_dur(chat_id, FLOOD_MUTE))
                 )
                 await delete_later(context.bot, chat_id, sent.message_id, NOTICE_TTL * 3)
+                await mod_log(context.bot, chat_id, f"🌊 Flood — {name} {fmt_dur(chat_id, FLOOD_MUTE)} jim")
             except TelegramError as e:
                 logger.warning("Anti-flood: jim qilib bo'lmadi: %s", e)
             raise ApplicationHandlerStop
@@ -13935,6 +13953,28 @@ async def guard_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         sent = await context.bot.send_message(chat_id, mod_t(chat_id, "link", name=name))
         await delete_later(context.bot, chat_id, sent.message_id, NOTICE_TTL)
+        await mod_log(context.bot, chat_id, f"🔗 Reklama o‘chirildi — {name}")
+        raise ApplicationHandlerStop
+
+    kind = lock_kind(msg)
+    if kind and settings["locks"] & (1 << LOCK_TYPES.index(kind)):
+        try:
+            await msg.delete()
+        except TelegramError:
+            return
+        sent = await context.bot.send_message(chat_id, g2_word(chat_id, "locked", kind).format(name=name))
+        await delete_later(context.bot, chat_id, sent.message_id, NOTICE_TTL // 2)
+        raise ApplicationHandlerStop
+
+    word = find_badword(chat_id, msg.text or msg.caption)
+    if word:
+        try:
+            await msg.delete()
+        except TelegramError:
+            return
+        sent = await context.bot.send_message(chat_id, g2_t(chat_id, "badword", name=name))
+        await delete_later(context.bot, chat_id, sent.message_id, NOTICE_TTL)
+        await mod_log(context.bot, chat_id, f"🧼 Taqiqlangan so‘z «{escape(word)}» — {name}")
         raise ApplicationHandlerStop
 
 
@@ -14046,6 +14086,9 @@ async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(mod_t(chat.id, "no_rights"))
         return
     await msg.reply_text(text)
+    if command != "warns":
+        await mod_log(context.bot, chat.id, f"⚖️ /{command} — {name} ← {user_mention(user.id, user.first_name) if user else 'admin'}"
+                      + (f"\n📝 {escape(' '.join(args)[:200])}" if args else ""))
 
 
 # ── /settings: bo'limli menyu (guruhda yoki shaxsiy chatda) va 👮 admin boshqaruvi ──
@@ -14280,10 +14323,46 @@ async def settings_page(bot, chat_id, page):
             rows.append([InlineKeyboardButton(f"{icon} {m.user.first_name}", callback_data=f"ga:{chat_id}:{m.user.id}")])
         rows.append(back)
         return st_t(chat_id, "adm"), InlineKeyboardMarkup(rows)
+    if page == "words":
+        words = badwords(chat_id)
+        listing = ", ".join(f"<code>{escape(w)}</code>" for w in words[:60]) if words else g2_t(chat_id, "words_none")
+        if len(words) > 60:
+            listing += f" … +{len(words) - 60}"
+        rows = [[gs_btn(chat_id, g2_t(chat_id, "b_wadd"), "wadd")]]
+        if words:
+            rows.append([gs_btn(chat_id, g2_t(chat_id, "b_wclear"), "wclear")])
+        rows.append(back)
+        return g2_t(chat_id, "words", list=listing), InlineKeyboardMarkup(rows)
+    if page == "locks":
+        rows = [
+            [gs_btn(chat_id, f"{g2_word(chat_id, 'lock_names', kind)} {'❌' if s['locks'] & (1 << i) else '✅'}", f"lk{i}")]
+            for i, kind in enumerate(LOCK_TYPES)
+        ]
+        rows.append(back)
+        return g2_t(chat_id, "locks"), InlineKeyboardMarkup(rows)
+    if page == "night":
+        state = g2_t(chat_id, "night_on" if s["night"] else "night_off")
+        if s["night_active"]:
+            state += g2_t(chat_id, "night_now")
+        rows = [
+            [gs_btn(chat_id, g2_t(chat_id, "b_night_toggle", on=on(s["night"])), "nt")],
+            [gs_btn(chat_id, g2_t(chat_id, "b_ns", h=f"{s['night_start']:02d}"), "ns"),
+             gs_btn(chat_id, g2_t(chat_id, "b_ne", h=f"{s['night_end']:02d}"), "ne")],
+            back,
+        ]
+        return (g2_t(chat_id, "night", state=state, start=f"{s['night_start']:02d}", end=f"{s['night_end']:02d}"),
+                InlineKeyboardMarkup(rows))
+    if page == "log":
+        current = g2_t(chat_id, "log_none")
+        if s["log_chat"]:
+            current = f"✅ {escape(await chat_title(bot, s['log_chat']))} (<code>{s['log_chat']}</code>)"
+        return g2_t(chat_id, "log", current=current), InlineKeyboardMarkup([back])
     # home
     rows = [
         [gs_btn(chat_id, st_t(chat_id, "b_prot"), "prot"), gs_btn(chat_id, st_t(chat_id, "b_welc"), "welc")],
         [gs_btn(chat_id, st_t(chat_id, "b_warn"), "warn"), gs_btn(chat_id, st_t(chat_id, "b_adm"), "adm")],
+        [gs_btn(chat_id, g2_t(chat_id, "b_words"), "words"), gs_btn(chat_id, g2_t(chat_id, "b_locks"), "locks")],
+        [gs_btn(chat_id, g2_t(chat_id, "b_night"), "night"), gs_btn(chat_id, g2_t(chat_id, "b_log"), "log")],
         [gs_btn(chat_id, st_t(chat_id, "b_close"), "close")],
     ]
     return st_t(chat_id, "home", group=escape(await chat_title(bot, chat_id))), InlineKeyboardMarkup(rows)
@@ -14336,8 +14415,36 @@ async def cb_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     here = q.message.chat
     s = gs_get(chat_id)
     page = "home"
-    if key in ("home", "prot", "welc", "warn", "adm"):
+    if key in ("home", "prot", "welc", "warn", "adm", "words", "locks", "night", "log"):
         page = key
+    elif key.startswith("lk") and key[2:].isdigit() and int(key[2:]) < len(LOCK_TYPES):
+        gs_set(chat_id, "locks", s["locks"] ^ (1 << int(key[2:])))
+        page = "locks"
+    elif key == "nt":
+        gs_set(chat_id, "night", 0 if s["night"] else 1)
+        if s["night"] and s["night_active"]:
+            await night_open(context.bot, chat_id)   # o'chirilganda guruh darhol ochiladi
+        page = "night"
+    elif key in ("ns", "ne"):
+        col = "night_start" if key == "ns" else "night_end"
+        gs_set(chat_id, col, (s[col] + 1) % 24)
+        page = "night"
+    elif key == "wclear":
+        c = db()
+        with c:
+            c.execute("DELETE FROM group_badwords WHERE chat_id=?", (chat_id,))
+        BADWORDS_CACHE.pop(chat_id, None)
+        page = "words"
+    elif key == "wadd":
+        if here.type != ChatType.PRIVATE:
+            await q.answer(g2_t(chat_id, "wadd_private"), show_alert=True)
+            return
+        context.user_data.pop("gs_wait_welcome", None)
+        context.user_data["gs_wait_words"] = chat_id
+        await q.answer()
+        await edit(context.bot, here.id, q.message.message_id, g2_t(chat_id, "wadd_prompt"),
+                   InlineKeyboardMarkup([[gs_btn(chat_id, st_t(chat_id, "b_back"), "words")]]))
+        return
     elif key in ("captcha", "antilink", "antiflood"):
         gs_set(chat_id, key, 0 if s[key] else 1)
         page = "prot"
@@ -14351,6 +14458,7 @@ async def cb_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if here.type != ChatType.PRIVATE:
             await q.answer(st_t(chat_id, "wtext_private"), show_alert=True)
             return
+        context.user_data.pop("gs_wait_words", None)
         context.user_data["gs_wait_welcome"] = chat_id
         await q.answer()
         await edit(context.bot, here.id, q.message.message_id, st_t(chat_id, "wtext_prompt"),
@@ -14367,18 +14475,31 @@ async def cb_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await edit(context.bot, here.id, q.message.message_id, st_t(chat_id, "closed"))
         return
     context.user_data.pop("gs_wait_welcome", None)
+    context.user_data.pop("gs_wait_words", None)
     await q.answer()
     text, kb = await settings_page(context.bot, chat_id, page)
     await edit(context.bot, here.id, q.message.message_id, text, kb)
 
 
 async def settings_private_text(update, context):
-    """Shaxsiy chatda kutilayotgan salomlashish matnini qabul qiladi. True — xabar qayta ishlandi."""
+    """Shaxsiy chatda kutilayotgan salomlashish matni / taqiqlangan so'zlarni qabul qiladi. True — qayta ishlandi."""
+    msg = update.effective_message
+    user = update.effective_user
+    words_chat = context.user_data.get("gs_wait_words")
+    if words_chat:
+        context.user_data.pop("gs_wait_words", None)
+        if not await user_is_chat_admin(context.bot, words_chat, user.id):
+            await msg.reply_text(st_t(words_chat, "not_admin_of"))
+            return True
+        added = badwords_add(words_chat, msg.text.split(","))
+        await msg.reply_text(
+            g2_t(words_chat, "wadd_ok", words=", ".join(f"<code>{escape(w)}</code>" for w in added) or "—"),
+            reply_markup=InlineKeyboardMarkup([[gs_btn(words_chat, st_t(words_chat, "b_back"), "words")]]),
+        )
+        return True
     chat_id = context.user_data.get("gs_wait_welcome")
     if not chat_id:
         return False
-    msg = update.effective_message
-    user = update.effective_user
     if not await user_is_chat_admin(context.bot, chat_id, user.id):
         context.user_data.pop("gs_wait_welcome", None)
         await msg.reply_text(st_t(chat_id, "not_admin_of"))
@@ -14500,9 +14621,11 @@ async def cmd_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             await msg.reply_text(st_t(chat.id, "promoted", name=name),
                                  reply_markup=admin_panel_buttons(context, chat.id, target))
+            await mod_log(context.bot, chat.id, f"🎖 Admin qilindi — {name} ← {user_mention(user.id, user.first_name)}")
         else:
             await set_admin_rights(context.bot, chat.id, target, {r: False for r in ADMIN_RIGHTS})
             await msg.reply_text(st_t(chat.id, "demoted", name=name))
+            await mod_log(context.bot, chat.id, f"🧢 Adminlikdan olindi — {name} ← {user_mention(user.id, user.first_name)}")
     except TelegramError as e:
         logger.warning("/%s bajarilmadi: %s", command, e)
         await msg.reply_text(st_t(chat.id, "no_promote"))
@@ -14550,6 +14673,468 @@ async def settings_start_payload(update, context, payload):
 
 
 
+# ───────────────────────────── 🛡 2-bosqich: so'zlar, tungi rejim, /report, log, cheklovlar ─────────────────────────────
+
+LOCK_TYPES = ["sticker", "animation", "voice", "video_note", "forward"]   # locks bitmaskasi tartibi
+NIGHT_TICK = 60
+REPORT_COOLDOWN = 60
+BADWORDS_CACHE: dict[int, list] = {}
+REPORT_LAST: dict[tuple, float] = {}
+
+G2_TEXT = {
+    "uz": {
+        "b_words": "🚫 So‘zlar", "b_locks": "🔒 Cheklovlar", "b_night": "🌙 Tungi rejim", "b_log": "📋 Log kanal",
+        "words": "🚫 <b>TAQIQLANGAN SO‘ZLAR</b>\n\n{list}\n\nGuruhda: <code>/addword so‘z</code>, <code>/delword so‘z</code>, <code>/words</code>",
+        "words_none": "Hali hech narsa yo‘q — guruh juda madaniyatli 😇",
+        "b_wadd": "➕ So‘z qo‘shish", "b_wclear": "🗑 Hammasini o‘chirish",
+        "wadd_prompt": "➕ Taqiqlanadigan so‘zlarni yuboring (vergul bilan ajrating).\nMasalan: <i>reklama, kazino, spam</i>",
+        "wadd_private": "➕ So‘zlarni shaxsiy chatda qo‘shing yoki guruhda /addword so‘z yozing.",
+        "wadd_ok": "✅ Qo‘shildi: {words}",
+        "word_added": "🚫 «{word}» qora ro‘yxatga tushdi. Endi uni yozganlarning og‘zi sovun bilan yuviladi 🧼",
+        "word_removed": "✅ «{word}» qora ro‘yxatdan chiqarildi — endi bemalol 😌",
+        "word_missing": "🤷 «{word}» ro‘yxatda yo‘q.", "word_need": "✍️ So‘zni yozing: /addword so‘z",
+        "badword": ["🧼 {name}, og‘zingni sovun bilan yuvdik! Bu so‘z taqiqlangan 🙊",
+                    "🙊 {name}, voy-voy-voy! Bunday so‘zlar bizda ishlatilmaydi 🚫"],
+        "locks": "🔒 <b>CHEKLOVLAR</b>\n\n❌ — shu turdagi xabarlar oddiy a’zolardan o‘chiriladi.",
+        "lock_names": {"sticker": "🎭 Stikerlar", "animation": "🎞 GIF", "voice": "🎤 Ovozli xabar",
+                       "video_note": "⭕ Dumaloq video", "forward": "↪️ Forward"},
+        "locked": {"sticker": "🎭 {name}, stikerlar bugun ta’tilda 🏖",
+                   "animation": "🎞 {name}, GIF’lar dam olyapti 😴",
+                   "voice": "🎤 {name}, ovozli xabar taqiqlangan — yozib yuboring ✍️",
+                   "video_note": "⭕ {name}, dumaloq videolar dumalab ketdi 🛞",
+                   "forward": "↪️ {name}, forward qilish mumkin emas — o‘z so‘zlaringiz bilan yozing 😉"},
+        "night": "🌙 <b>TUNGI REJIM</b>\n\nHolat: {state}\n🕐 Toshkent vaqti bilan: <b>{start}:00 — {end}:00</b>\nBu vaqtda oddiy a’zolar yoza olmaydi.",
+        "night_on": "✅ yoqilgan", "night_off": "❌ o‘chirilgan", "night_now": " · 😴 hozir uxlayapti",
+        "b_night_toggle": "🌙 Tungi rejim {on}", "b_ns": "🌙 Boshlanish: {h}:00", "b_ne": "☀️ Tugash: {h}:00",
+        "night_close": "🌙 <b>Tungi rejim!</b> Guruh uxlayapti 😴\nErtalab soat {end}:00 da uyg‘onamiz. Xayrli tun! 🌜",
+        "night_open": "☀️ <b>Xayrli tong!</b> Guruh uyg‘ondi — choy ichib, suhbatni boshlaymiz ☕",
+        "log": "📋 <b>LOG KANAL</b>\n\nHozir: {current}\n\nUlash: botni kanalga admin qiling va guruhda <code>/setlog @kanal</code> (yoki kanal ID si) yozing.\nO‘chirish: <code>/setlog off</code>",
+        "log_none": "ulanmagan", "log_set": "✅ Log kanal ulandi: {chat}", "log_off": "✅ Log kanal o‘chirildi.",
+        "log_fail": "❌ Kanalga yoza olmadim. Botni kanalga admin qilib, qayta urinib ko‘ring.",
+        "log_need": "✍️ Masalan: /setlog @mening_kanalim",
+        "log_test": "📋 Bu kanal endi «{group}» guruhi uchun log kanal 👍",
+        "report_need": "↩️ Shikoyat qilish uchun xabarga reply qilib /report yozing.",
+        "report_sent": "🚨 Shikoyat qabul qilindi! {n} ta admin chaqirildi 👮‍♂️",
+        "report_none": "🚨 Shikoyat qabul qilindi, lekin adminlarning hech biri botga /start bosmagan 😅",
+        "report_wait": "⏳ Biroz kuting — adminlar hali kofe ichishyapti ☕",
+        "report_self_admin": "😄 Adminni adminga shikoyat qilish? Qiziq…",
+        "report_pm": "🚨 <b>SHIKOYAT</b> · {group}\n\n👤 Kim: {reporter}\n🎯 Kimga: {target}\n💬 {text}{link}",
+        "b_r_del": "🗑 O‘chirish", "b_r_mute": "🔇 1 soat jim", "b_r_ban": "🚀 Ban",
+        "r_done": "✅ Bajarildi: {act}", "r_fail": "😓 Bajarib bo‘lmadi (xabar o‘chgan yoki huquq yo‘q).",
+    },
+    "eng": {
+        "b_words": "🚫 Words", "b_locks": "🔒 Locks", "b_night": "🌙 Night mode", "b_log": "📋 Log channel",
+        "words": "🚫 <b>BANNED WORDS</b>\n\n{list}\n\nIn the group: <code>/addword word</code>, <code>/delword word</code>, <code>/words</code>",
+        "words_none": "Nothing yet — such a polite group 😇",
+        "b_wadd": "➕ Add words", "b_wclear": "🗑 Clear all",
+        "wadd_prompt": "➕ Send the words to ban, separated by commas.",
+        "wadd_private": "➕ Add words in private chat or use /addword word in the group.",
+        "wadd_ok": "✅ Added: {words}",
+        "word_added": "🚫 «{word}» is blacklisted. Mouths will be washed with soap 🧼",
+        "word_removed": "✅ «{word}» removed from the blacklist 😌",
+        "word_missing": "🤷 «{word}» is not on the list.", "word_need": "✍️ Write the word: /addword word",
+        "badword": ["🧼 {name}, mouth washed with soap! That word is banned 🙊"],
+        "locks": "🔒 <b>LOCKS</b>\n\n❌ — such messages from regular members are deleted.",
+        "lock_names": {"sticker": "🎭 Stickers", "animation": "🎞 GIFs", "voice": "🎤 Voice",
+                       "video_note": "⭕ Video notes", "forward": "↪️ Forwards"},
+        "locked": {"sticker": "🎭 {name}, stickers are on vacation 🏖", "animation": "🎞 {name}, GIFs are resting 😴",
+                   "voice": "🎤 {name}, voice messages are off — type it ✍️", "video_note": "⭕ {name}, round videos rolled away 🛞",
+                   "forward": "↪️ {name}, no forwards — use your own words 😉"},
+        "night": "🌙 <b>NIGHT MODE</b>\n\nStatus: {state}\n🕐 Tashkent time: <b>{start}:00 — {end}:00</b>\nRegular members can't write during this time.",
+        "night_on": "✅ on", "night_off": "❌ off", "night_now": " · 😴 sleeping now",
+        "b_night_toggle": "🌙 Night mode {on}", "b_ns": "🌙 Start: {h}:00", "b_ne": "☀️ End: {h}:00",
+        "night_close": "🌙 <b>Night mode!</b> The group is sleeping 😴\nWe wake up at {end}:00. Good night! 🌜",
+        "night_open": "☀️ <b>Good morning!</b> The group is awake — tea and chat ☕",
+        "log": "📋 <b>LOG CHANNEL</b>\n\nNow: {current}\n\nConnect: make the bot a channel admin and send <code>/setlog @channel</code> in the group.\nDisable: <code>/setlog off</code>",
+        "log_none": "not connected", "log_set": "✅ Log channel connected: {chat}", "log_off": "✅ Log channel disabled.",
+        "log_fail": "❌ I can't post there. Make the bot a channel admin and try again.",
+        "log_need": "✍️ Example: /setlog @my_channel", "log_test": "📋 This channel now logs «{group}» 👍",
+        "report_need": "↩️ Reply to a message with /report.",
+        "report_sent": "🚨 Report received! {n} admins called 👮‍♂️",
+        "report_none": "🚨 Report received, but no admin has started the bot 😅",
+        "report_wait": "⏳ Hold on — admins are still drinking coffee ☕", "report_self_admin": "😄 Reporting an admin to admins? Interesting…",
+        "report_pm": "🚨 <b>REPORT</b> · {group}\n\n👤 From: {reporter}\n🎯 About: {target}\n💬 {text}{link}",
+        "b_r_del": "🗑 Delete", "b_r_mute": "🔇 Mute 1h", "b_r_ban": "🚀 Ban",
+        "r_done": "✅ Done: {act}", "r_fail": "😓 Couldn't do it (message gone or no rights).",
+    },
+    "ru": {
+        "b_words": "🚫 Слова", "b_locks": "🔒 Ограничения", "b_night": "🌙 Ночной режим", "b_log": "📋 Лог-канал",
+        "words": "🚫 <b>ЗАПРЕЩЁННЫЕ СЛОВА</b>\n\n{list}\n\nВ группе: <code>/addword слово</code>, <code>/delword слово</code>, <code>/words</code>",
+        "words_none": "Пока пусто — очень культурная группа 😇",
+        "b_wadd": "➕ Добавить слова", "b_wclear": "🗑 Очистить всё",
+        "wadd_prompt": "➕ Отправьте слова через запятую.",
+        "wadd_private": "➕ Добавляйте слова в личке или командой /addword слово в группе.",
+        "wadd_ok": "✅ Добавлено: {words}",
+        "word_added": "🚫 «{word}» в чёрном списке. Рот будем мыть с мылом 🧼",
+        "word_removed": "✅ «{word}» убрано из чёрного списка 😌",
+        "word_missing": "🤷 «{word}» нет в списке.", "word_need": "✍️ Напишите слово: /addword слово",
+        "badword": ["🧼 {name}, рот помыт с мылом! Это слово запрещено 🙊"],
+        "locks": "🔒 <b>ОГРАНИЧЕНИЯ</b>\n\n❌ — такие сообщения от обычных участников удаляются.",
+        "lock_names": {"sticker": "🎭 Стикеры", "animation": "🎞 GIF", "voice": "🎤 Голосовые",
+                       "video_note": "⭕ Кружочки", "forward": "↪️ Пересылки"},
+        "locked": {"sticker": "🎭 {name}, стикеры в отпуске 🏖", "animation": "🎞 {name}, гифки отдыхают 😴",
+                   "voice": "🎤 {name}, голосовые запрещены — напишите текстом ✍️", "video_note": "⭕ {name}, кружочки укатились 🛞",
+                   "forward": "↪️ {name}, пересылать нельзя — своими словами 😉"},
+        "night": "🌙 <b>НОЧНОЙ РЕЖИМ</b>\n\nСтатус: {state}\n🕐 По Ташкенту: <b>{start}:00 — {end}:00</b>\nВ это время обычные участники не могут писать.",
+        "night_on": "✅ включён", "night_off": "❌ выключен", "night_now": " · 😴 сейчас спит",
+        "b_night_toggle": "🌙 Ночной режим {on}", "b_ns": "🌙 Начало: {h}:00", "b_ne": "☀️ Конец: {h}:00",
+        "night_close": "🌙 <b>Ночной режим!</b> Группа спит 😴\nПросыпаемся в {end}:00. Спокойной ночи! 🌜",
+        "night_open": "☀️ <b>Доброе утро!</b> Группа проснулась — чай и болтовня ☕",
+        "log": "📋 <b>ЛОГ-КАНАЛ</b>\n\nСейчас: {current}\n\nПодключить: сделайте бота админом канала и напишите в группе <code>/setlog @канал</code>.\nОтключить: <code>/setlog off</code>",
+        "log_none": "не подключён", "log_set": "✅ Лог-канал подключён: {chat}", "log_off": "✅ Лог-канал отключён.",
+        "log_fail": "❌ Не могу писать в канал. Сделайте бота админом канала.",
+        "log_need": "✍️ Пример: /setlog @my_channel", "log_test": "📋 Этот канал теперь лог группы «{group}» 👍",
+        "report_need": "↩️ Ответьте на сообщение командой /report.",
+        "report_sent": "🚨 Жалоба принята! Вызвано админов: {n} 👮‍♂️",
+        "report_none": "🚨 Жалоба принята, но ни один админ не запускал бота 😅",
+        "report_wait": "⏳ Подождите — админы ещё пьют кофе ☕", "report_self_admin": "😄 Жаловаться админам на админа? Интересно…",
+        "report_pm": "🚨 <b>ЖАЛОБА</b> · {group}\n\n👤 От: {reporter}\n🎯 На: {target}\n💬 {text}{link}",
+        "b_r_del": "🗑 Удалить", "b_r_mute": "🔇 Мут 1ч", "b_r_ban": "🚀 Бан",
+        "r_done": "✅ Выполнено: {act}", "r_fail": "😓 Не получилось (сообщение удалено или нет прав).",
+    },
+    "kz": {
+        "b_words": "🚫 Сөздер", "b_locks": "🔒 Шектеулер", "b_night": "🌙 Түнгі режим", "b_log": "📋 Лог арна",
+        "words": "🚫 <b>ТЫЙЫМ САЛЫНҒАН СӨЗДЕР</b>\n\n{list}\n\nТопта: <code>/addword сөз</code>, <code>/delword сөз</code>, <code>/words</code>",
+        "words_none": "Әзірге бос — өте мәдениетті топ 😇",
+        "b_wadd": "➕ Сөз қосу", "b_wclear": "🗑 Барлығын өшіру",
+        "wadd_prompt": "➕ Сөздерді үтір арқылы жіберіңіз.",
+        "wadd_private": "➕ Сөздерді жеке чатта қосыңыз немесе топта /addword сөз жазыңыз.",
+        "wadd_ok": "✅ Қосылды: {words}",
+        "word_added": "🚫 «{word}» қара тізімге түсті 🧼", "word_removed": "✅ «{word}» қара тізімнен шықты 😌",
+        "word_missing": "🤷 «{word}» тізімде жоқ.", "word_need": "✍️ Сөзді жазыңыз: /addword сөз",
+        "badword": ["🧼 {name}, аузың сабынмен жуылды! Бұл сөзге тыйым салынған 🙊"],
+        "locks": "🔒 <b>ШЕКТЕУЛЕР</b>\n\n❌ — мұндай хабарлар қарапайым мүшелерден өшіріледі.",
+        "lock_names": {"sticker": "🎭 Стикерлер", "animation": "🎞 GIF", "voice": "🎤 Дауыстық",
+                       "video_note": "⭕ Дөңгелек видео", "forward": "↪️ Форвард"},
+        "locked": {"sticker": "🎭 {name}, стикерлер демалыста 🏖", "animation": "🎞 {name}, GIF-тер демалып жатыр 😴",
+                   "voice": "🎤 {name}, дауыстық хабарға тыйым — жазып жіберіңіз ✍️", "video_note": "⭕ {name}, дөңгелек видеолар домалап кетті 🛞",
+                   "forward": "↪️ {name}, форвардқа болмайды — өз сөзіңізбен 😉"},
+        "night": "🌙 <b>ТҮНГІ РЕЖИМ</b>\n\nКүйі: {state}\n🕐 Ташкент уақыты: <b>{start}:00 — {end}:00</b>\nБұл уақытта қарапайым мүшелер жаза алмайды.",
+        "night_on": "✅ қосулы", "night_off": "❌ өшірулі", "night_now": " · 😴 қазір ұйықтап жатыр",
+        "b_night_toggle": "🌙 Түнгі режим {on}", "b_ns": "🌙 Басталуы: {h}:00", "b_ne": "☀️ Аяқталуы: {h}:00",
+        "night_close": "🌙 <b>Түнгі режим!</b> Топ ұйықтап жатыр 😴\nСағат {end}:00-де оянамыз. Қайырлы түн! 🌜",
+        "night_open": "☀️ <b>Қайырлы таң!</b> Топ оянды — шай мен әңгіме ☕",
+        "log": "📋 <b>ЛОГ АРНА</b>\n\nҚазір: {current}\n\nҚосу: ботты арнаға әкімші етіп, топта <code>/setlog @арна</code> жазыңыз.\nӨшіру: <code>/setlog off</code>",
+        "log_none": "қосылмаған", "log_set": "✅ Лог арна қосылды: {chat}", "log_off": "✅ Лог арна өшірілді.",
+        "log_fail": "❌ Арнаға жаза алмадым. Ботты арнаға әкімші етіңіз.",
+        "log_need": "✍️ Мысалы: /setlog @my_channel", "log_test": "📋 Бұл арна енді «{group}» тобының логы 👍",
+        "report_need": "↩️ Хабарға /report деп жауап беріңіз.",
+        "report_sent": "🚨 Шағым қабылданды! {n} әкімші шақырылды 👮‍♂️",
+        "report_none": "🚨 Шағым қабылданды, бірақ әкімшілердің ешқайсысы ботты іске қоспаған 😅",
+        "report_wait": "⏳ Күте тұрыңыз — әкімшілер әлі кофе ішіп жатыр ☕", "report_self_admin": "😄 Әкімшіге әкімші туралы шағым? Қызық…",
+        "report_pm": "🚨 <b>ШАҒЫМ</b> · {group}\n\n👤 Кімнен: {reporter}\n🎯 Кім туралы: {target}\n💬 {text}{link}",
+        "b_r_del": "🗑 Өшіру", "b_r_mute": "🔇 1 сағ үнсіз", "b_r_ban": "🚀 Бан",
+        "r_done": "✅ Орындалды: {act}", "r_fail": "😓 Орындалмады (хабар өшкен немесе құқық жоқ).",
+    },
+}
+
+
+def g2_t(chat_id, key, **kwargs):
+    text = G2_TEXT[mod_lang(chat_id)].get(key) or G2_TEXT["uz"][key]
+    if isinstance(text, list):
+        text = random.choice(text)
+    return text.format(**kwargs) if kwargs else text
+
+
+def g2_word(chat_id, group, key):
+    return (G2_TEXT[mod_lang(chat_id)].get(group) or G2_TEXT["uz"][group])[key]
+
+
+def init_guard2():
+    c = db()
+    have = {r[1] for r in c.execute("PRAGMA table_info(group_settings)")}
+    extra = {
+        "night": "INTEGER NOT NULL DEFAULT 0", "night_start": "INTEGER NOT NULL DEFAULT 0",
+        "night_end": "INTEGER NOT NULL DEFAULT 7", "night_active": "INTEGER NOT NULL DEFAULT 0",
+        "night_saved": "TEXT NOT NULL DEFAULT ''", "log_chat": "INTEGER NOT NULL DEFAULT 0",
+        "locks": "INTEGER NOT NULL DEFAULT 0",
+    }
+    with c:
+        for col, decl in extra.items():
+            if col not in have:
+                c.execute(f"ALTER TABLE group_settings ADD COLUMN {col} {decl}")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS group_badwords (
+                chat_id INTEGER NOT NULL,
+                word TEXT NOT NULL,
+                PRIMARY KEY (chat_id, word)
+            )
+        """)
+
+
+# ── Log kanal ──
+
+async def mod_log(bot, chat_id, text):
+    log_chat = gs_get(chat_id)["log_chat"]
+    if not log_chat:
+        return
+    try:
+        title = escape(await chat_title(bot, chat_id))
+        await bot.send_message(log_chat, f"🏷 <b>{title}</b> · <code>{chat_id}</code>\n{text}")
+    except TelegramError as e:
+        logger.warning("Log kanalga yozilmadi (%s): %s", log_chat, e)
+
+
+async def cmd_setlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text(mod_t(chat.id, "group_only"))
+        return
+    if not await is_moderator(context.bot, msg, update.effective_user):
+        await msg.reply_text(mod_t(chat.id, "not_admin"))
+        return
+    arg = (context.args[0] if context.args else "").strip()
+    if not arg:
+        await msg.reply_text(g2_t(chat.id, "log_need"))
+        return
+    if arg.lower() in ("off", "o'chir", "0"):
+        gs_set(chat.id, "log_chat", 0)
+        await msg.reply_text(g2_t(chat.id, "log_off"))
+        return
+    target = int(arg) if arg.lstrip("-").isdigit() else arg
+    try:
+        sent = await context.bot.send_message(target, g2_t(chat.id, "log_test", group=escape(chat.title or "")))
+    except TelegramError:
+        await msg.reply_text(g2_t(chat.id, "log_fail"))
+        return
+    gs_set(chat.id, "log_chat", sent.chat.id)
+    await msg.reply_text(g2_t(chat.id, "log_set", chat=escape(sent.chat.title or str(sent.chat.id))))
+
+
+# ── Taqiqlangan so'zlar ──
+
+def badwords(chat_id):
+    if chat_id not in BADWORDS_CACHE:
+        BADWORDS_CACHE[chat_id] = [
+            r[0] for r in db().execute("SELECT word FROM group_badwords WHERE chat_id=? ORDER BY word", (chat_id,))
+        ]
+    return BADWORDS_CACHE[chat_id]
+
+
+def badwords_add(chat_id, words):
+    added = []
+    c = db()
+    with c:
+        for w in words:
+            w = " ".join(w.lower().split())[:50]
+            if w and c.execute("INSERT OR IGNORE INTO group_badwords(chat_id, word) VALUES (?, ?)", (chat_id, w)).rowcount:
+                added.append(w)
+    BADWORDS_CACHE.pop(chat_id, None)
+    return added
+
+
+def find_badword(chat_id, text):
+    low = (text or "").lower()
+    for w in badwords(chat_id):
+        if re.search(rf"(?<!\w){re.escape(w)}(?!\w)", low):
+            return w
+    return None
+
+
+async def cmd_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text(mod_t(chat.id, "group_only"))
+        return
+    if not await is_moderator(context.bot, msg, update.effective_user):
+        await msg.reply_text(mod_t(chat.id, "not_admin"))
+        return
+    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    word = " ".join(context.args or []).strip()
+    if command == "words":
+        text, _ = await settings_page(context.bot, chat.id, "words")
+        await msg.reply_text(text)
+        return
+    if not word:
+        await msg.reply_text(g2_t(chat.id, "word_need"))
+        return
+    if command == "addword":
+        for w in badwords_add(chat.id, [word]) or [word.lower()]:
+            await msg.reply_text(g2_t(chat.id, "word_added", word=escape(w)))
+        return
+    c = db()
+    with c:
+        removed = c.execute("DELETE FROM group_badwords WHERE chat_id=? AND word=?", (chat.id, word.lower())).rowcount
+    BADWORDS_CACHE.pop(chat.id, None)
+    await msg.reply_text(g2_t(chat.id, "word_removed" if removed else "word_missing", word=escape(word.lower())))
+
+
+# ── Cheklovlar ──
+
+def lock_kind(msg):
+    if getattr(msg, "forward_origin", None):
+        return "forward"
+    for kind in ("sticker", "animation", "voice", "video_note"):
+        if getattr(msg, kind, None):
+            return kind
+    return None
+
+
+# ── Tungi rejim ──
+
+def night_in_window(start, end, hour):
+    if start == end:
+        return False
+    return start <= hour < end if start < end else (hour >= start or hour < end)
+
+
+def tashkent_hour():
+    return time.gmtime(time.time() + TASHKENT_OFFSET).tm_hour
+
+
+async def night_close(bot, chat_id):
+    try:
+        chat = await bot.get_chat(chat_id)
+        saved = json.dumps(chat.permissions.to_dict()) if chat.permissions else ""
+        await bot.set_chat_permissions(chat_id, ChatPermissions(can_send_messages=False))
+    except TelegramError as e:
+        saved = ""
+        logger.warning("Tungi rejim: guruh yopilmadi (%s): %s — xabarlar o'chiriladi", chat_id, e)
+    gs_set(chat_id, "night_saved", saved)
+    gs_set(chat_id, "night_active", 1)
+    try:
+        await bot.send_message(chat_id, g2_t(chat_id, "night_close", end=f"{gs_get(chat_id)['night_end']:02d}"))
+    except TelegramError:
+        pass
+    await mod_log(bot, chat_id, "🌙 Tungi rejim boshlandi")
+
+
+async def night_open(bot, chat_id):
+    saved = gs_get(chat_id)["night_saved"]
+    try:
+        # Yopishdan oldingi ruxsatlar qaytariladi; ular bo'lmasa — oddiy "hamma yoza oladi" ruxsatlari.
+        perms = ChatPermissions.de_json(json.loads(saved), bot) if saved else None
+        if not perms or not perms.can_send_messages:
+            perms = ChatPermissions(
+                can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True,
+                can_send_videos=True, can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True,
+                can_send_other_messages=True, can_add_web_page_previews=True, can_invite_users=True,
+            )
+        await bot.set_chat_permissions(chat_id, perms)
+    except (TelegramError, ValueError) as e:
+        logger.warning("Tungi rejim: guruh ochilmadi (%s): %s", chat_id, e)
+    gs_set(chat_id, "night_active", 0)
+    try:
+        await bot.send_message(chat_id, g2_t(chat_id, "night_open"))
+    except TelegramError:
+        pass
+    await mod_log(bot, chat_id, "☀️ Tungi rejim tugadi")
+
+
+async def night_worker(application):
+    while True:
+        try:
+            hour = tashkent_hour()
+            rows = db().execute(
+                "SELECT chat_id, night, night_start, night_end, night_active FROM group_settings "
+                "WHERE night=1 OR night_active=1"
+            ).fetchall()
+            for chat_id, night, start, end, active in rows:
+                should = bool(night) and night_in_window(start, end, hour)
+                if should and not active:
+                    await night_close(application.bot, chat_id)
+                elif active and not should:
+                    await night_open(application.bot, chat_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Tungi rejim: tekshirishda xato")
+        await asyncio.sleep(NIGHT_TICK)
+
+
+# ── /report va @admin ──
+
+def message_link(chat_id, message_id):
+    s = str(chat_id)
+    return f"https://t.me/c/{s[4:]}/{message_id}" if s.startswith("-100") else ""
+
+
+async def do_report(context, msg, reporter):
+    chat_id = msg.chat_id
+    target_msg = msg.reply_to_message
+    if not target_msg or not target_msg.from_user:
+        await msg.reply_text(g2_t(chat_id, "report_need"))
+        return
+    target = target_msg.from_user
+    admins = await admin_ids(context.bot, chat_id)
+    if target.id in admins:
+        await msg.reply_text(g2_t(chat_id, "report_self_admin"))
+        return
+    key = (chat_id, reporter.id)
+    if time.monotonic() - REPORT_LAST.get(key, -1e9) < REPORT_COOLDOWN:
+        await msg.reply_text(g2_t(chat_id, "report_wait"))
+        return
+    REPORT_LAST[key] = time.monotonic()
+    excerpt = escape((target_msg.text or target_msg.caption or "[media]")[:300])
+    link = message_link(chat_id, target_msg.message_id)
+    sent = 0
+    for admin_id in admins:
+        if admin_id == context.bot.id:
+            continue
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(g2_t(admin_id, "b_r_del"), callback_data=f"rp:{chat_id}:{target.id}:{target_msg.message_id}:del"),
+            InlineKeyboardButton(g2_t(admin_id, "b_r_mute"), callback_data=f"rp:{chat_id}:{target.id}:{target_msg.message_id}:mute"),
+            InlineKeyboardButton(g2_t(admin_id, "b_r_ban"), callback_data=f"rp:{chat_id}:{target.id}:{target_msg.message_id}:ban"),
+        ]])
+        try:
+            await context.bot.send_message(
+                admin_id,
+                g2_t(chat_id, "report_pm", group=escape(msg.chat.title or ""),
+                     reporter=user_mention(reporter.id, reporter.first_name),
+                     target=user_mention(target.id, target.first_name), text=excerpt,
+                     link=f"\n🔗 {link}" if link else ""),
+                reply_markup=kb, disable_web_page_preview=True,
+            )
+            sent += 1
+        except TelegramError:
+            pass
+    await msg.reply_text(g2_t(chat_id, "report_sent", n=sent) if sent else g2_t(chat_id, "report_none"))
+    await mod_log(context.bot, chat_id,
+                  f"🚨 Shikoyat: {user_mention(reporter.id, reporter.first_name)} → {user_mention(target.id, target.first_name)}")
+
+
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text(mod_t(chat.id, "group_only"))
+        return
+    if update.effective_user:
+        await do_report(context, msg, update.effective_user)
+
+
+async def cb_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    _, chat_text, uid_text, mid_text, act = q.data.split(":")
+    chat_id, uid, mid = int(chat_text), int(uid_text), int(mid_text)
+    if not await user_is_chat_admin(context.bot, chat_id, q.from_user.id):
+        await q.answer(st_t(chat_id, "not_admin_of"), show_alert=True)
+        return
+    labels = {"del": "b_r_del", "mute": "b_r_mute", "ban": "b_r_ban"}
+    try:
+        if act == "del":
+            await context.bot.delete_message(chat_id, mid)
+        elif act == "mute":
+            await mod_mute(context.bot, chat_id, uid, 3600)
+        elif act == "ban":
+            await context.bot.ban_chat_member(chat_id, uid)
+        else:
+            await q.answer()
+            return
+    except TelegramError:
+        await q.answer(g2_t(chat_id, "r_fail"), show_alert=True)
+        return
+    done = g2_t(chat_id, "r_done", act=g2_t(chat_id, labels[act]))
+    await q.answer(done)
+    try:
+        await q.edit_message_text(q.message.text_html + "\n\n" + done, reply_markup=q.message.reply_markup)
+    except TelegramError:
+        pass
+    await mod_log(context.bot, chat_id,
+                  f"{done} — {user_mention(uid, uid)} ({user_mention(q.from_user.id, q.from_user.first_name)})")
+
+
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
         print(
@@ -14566,6 +15151,7 @@ def main():
     init_birja()
     init_kids()
     init_guard()
+    init_guard2()
     load_crash_config()
 
     app = (
@@ -14594,6 +15180,9 @@ def main():
         (["settings", "sozlamalar"], cmd_settings),
         (["warn", "unwarn", "warns", "mute", "unmute", "ban", "unban", "kick"], cmd_mod),
         (["promote", "demote"], cmd_promote),
+        (["addword", "delword", "words"], cmd_words),
+        (["report"], cmd_report),
+        (["setlog"], cmd_setlog),
         (["shop"], cmd_shop),
         (["pul"], cmd_pul),
         (["hisob"], cmd_hisob),
@@ -14637,6 +15226,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_captcha, pattern=r"^cap:\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_settings, pattern=r"^gs:-?\d+:\w+$"))
     app.add_handler(CallbackQueryHandler(cb_admin, pattern=r"^ga:-?\d+:\d+(:\w+)?$"))
+    app.add_handler(CallbackQueryHandler(cb_report, pattern=r"^rp:-?\d+:\d+:\d+:(del|mute|ban)$"))
     app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash|memory):\d+:(uz|eng|ru|kz)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))

@@ -17,6 +17,8 @@ import sqlite3
 import re
 import secrets
 import time
+import urllib.parse
+import urllib.request
 from html import escape
 
 from telegram import (
@@ -2046,6 +2048,19 @@ def panel_money_text(c):
     ).fetchall()
     in_games = money_in_games()
     average = others_total // others_holders if others_holders else 0
+    loans_n, loans_due = c.execute(
+        "SELECT COUNT(*), COALESCE(SUM(due), 0) FROM bank_loans WHERE status='active'"
+    ).fetchone()
+    deps_n, deps_amount, deps_payout = c.execute(
+        "SELECT COUNT(*), COALESCE(SUM(amount), 0), COALESCE(SUM(payout), 0) FROM bank_deposits WHERE status='active'"
+    ).fetchone()
+    debtors, debt = c.execute(
+        "SELECT COUNT(*), COALESCE(-SUM(money), 0) FROM user_wallet WHERE money < 0"
+    ).fetchone()
+    birja_value = sum(
+        qty * (BIRJA_PRICES.get(asset) or {"price": 0.0})["price"]
+        for asset, qty in c.execute("SELECT asset, qty FROM birja_holdings WHERE qty > 0")
+    )
 
     lines = [
         "💰 <b>PUL STATISTIKASI</b>",
@@ -2058,6 +2073,12 @@ def panel_money_text(c):
         f"👥 Puli bor foydalanuvchilar: <b>{fmt_money(holders)}</b> / {fmt_money(users_with_wallet)} hamyon",
         f"📊 O'rtacha (puli borlar, egalarsiz): <b>{fmt_money(average)}$</b>",
         f"🔝 Eng katta balans (egalarsiz): <b>{fmt_money(others_max)}$</b>",
+        "",
+        "🏅 <b>Gold Invest</b>",
+        f"💸 Faol kreditlar: <b>{loans_n}</b> ta · qaytarilishi kerak <b>{fmt_money(loans_due)}$</b>",
+        f"🏦 Faol omonatlar: <b>{deps_n}</b> ta · <b>{fmt_money(deps_amount)}$</b> → to'lanadi {fmt_money(deps_payout)}$",
+        f"🔻 Minus balanslar: <b>{debtors}</b> ta · jami qarz <b>{fmt_money(debt)}$</b>",
+        f"📈 Birjadagi aktivlar qiymati: <b>{fmt_money(round(birja_value))}$</b>",
     ]
     if top:
         lines += ["", "🏆 <b>Eng boy 10 foydalanuvchi:</b>"]
@@ -3169,6 +3190,14 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }.get(profile_lang, "🛍 DO‘KON")
     profile_buttons.insert(0, [
         InlineKeyboardButton(shop_label, callback_data="shop:open")
+    ])
+    bank_label, birja_label = {
+        "uz": ("🏦 Banklar", "📈 Birja"), "eng": ("🏦 Banks", "📈 Exchange"),
+        "ru": ("🏦 Банки", "📈 Биржа"), "kz": ("🏦 Банктер", "📈 Биржа"),
+    }.get(profile_lang, ("🏦 Banklar", "📈 Birja"))
+    profile_buttons.insert(1, [
+        InlineKeyboardButton(bank_label, callback_data=f"bk:{user.id}:open"),
+        InlineKeyboardButton(birja_label, callback_data=f"bx:{user.id}:open"),
     ])
     profile_text = t(
         chat.id,
@@ -8214,6 +8243,8 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application):
     application.create_task(family_delivery_worker(application), name="family-delivery-worker")
     application.create_task(croc_prepare_words(), name="croc-words")
+    application.create_task(bank_worker(application), name="bank-worker")
+    application.create_task(birja_worker(application), name="birja-worker")
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -10446,6 +10477,10 @@ async def cmd_pul(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     c = db()
     owner = is_money_owner(sender.id)
+    # Kredit pulini boshqa akkauntga o'tkazib, qarzni tashlab ketishning oldini olamiz.
+    if not owner and active_loan(sender.id):
+        await msg.reply_text("⛔ Faol kreditingiz bor — uni to‘lamaguningizcha pul yubora olmaysiz.")
+        return
     try:
         with c:
             if not owner:
@@ -11230,6 +11265,1215 @@ async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(result)
 
 
+# ───────────────────────────── 🏦 BANKLAR (Gold Invest) ─────────────────────────────
+# /profil → 🏦 Banklar. Hozircha bitta bank: Gold Invest.
+#   Kredit: kuniga 13%, 1–7 kun. Birinchi kredit — 1 000$, keyingilari 1 000$ … 50 000$.
+#           Muddat tugaganda summa hamyondan avtomatik yechiladi (balans minusga tushishi mumkin).
+#   Omonat: 5 000$ … 30 000$, 3–10 kun, kuniga 5%. Muddatidan oldin yechilmaydi,
+#           muddat tugaganda pul foizi bilan hamyonga avtomatik tushadi.
+# Callback: "bk:<uid>:<amal>:..." — menyuni faqat profil egasi boshqaradi.
+
+LOAN_RATE = 0.13
+LOAN_FIRST = 1000
+LOAN_AMOUNTS = [1000, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 25000, 30000, 40000, 50000]
+LOAN_DAYS = range(1, 8)
+DEPOSIT_RATE = 0.05
+DEPOSIT_AMOUNTS = [5000, 10000, 15000, 20000, 25000, 30000]
+DEPOSIT_DAYS = range(3, 11)
+BANK_TICK = 30              # muddati kelgan kredit/omonatlarni tekshirish oralig'i (soniya)
+DAY_SECONDS = 86400
+TASHKENT_OFFSET = 5 * 3600
+
+BANK_TEXT = {
+    "uz": {
+        "banks": "🏦 <b>BANKLAR</b>\n\nBankni tanlang 👇\n\n🎮 Simulator — haqiqiy pul emas",
+        "home": (
+            "🏅 <b>GOLD INVEST BANK</b>\n\n💵 Hamyon: <b>{wallet}$</b>\n\n"
+            "💸 Kredit: {loan}\n🏦 Omonat: {deposit}\n\n"
+            "📈 Kredit — kuniga {loan_rate}% · 1–7 kun\n📈 Omonat — kuniga {dep_rate}% · 3–10 kun"
+        ),
+        "none": "yo‘q",
+        "loan_line": "<b>{due}$</b> qaytariladi · {when} gacha",
+        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · {when} da tushadi",
+        "b_loan": "💸 Kredit olish", "b_repay": "✅ Kreditni to‘lash · {due}$", "b_deposit": "🏦 Omonat ochish",
+        "b_back": "⬅️ Orqaga", "b_banks": "🏦 Banklar",
+        "loan_first": (
+            "💸 <b>KREDIT</b>\n\nBu sizning birinchi kreditingiz — <b>{amount}$</b>.\n"
+            "Keyingi safar 1 000$ dan 50 000$ gacha olishingiz mumkin bo‘ladi.\n\n"
+            "📈 Foiz: kuniga <b>{rate}%</b>\nMuddatni tanlang — tugmada qaytariladigan summa 👇\n\n{warn}"
+        ),
+        "loan_amount": "💸 <b>KREDIT</b>\n\n📈 Foiz: kuniga <b>{rate}%</b>\nSummani tanlang — yonida kunlik foizi 👇",
+        "loan_term": "💸 <b>KREDIT · {amount}$</b>\n\n📈 Foiz: kuniga <b>{rate}%</b>\nMuddatni tanlang — tugmada qaytariladigan summa 👇\n\n{warn}",
+        "warn": "⚠️ Muddat tugaganda summa hamyondan avtomatik yechiladi — balans minusga tushishi mumkin.",
+        "per_day": "/kun", "days": "kun",
+        "loan_ok": "✅ Kredit berildi: <b>+{amount}$</b>\n📅 {days} kun · qaytariladi: <b>{due}$</b>\n⏰ Muddat: {when}",
+        "loan_has": "⛔ Sizda to‘lanmagan kredit bor.",
+        "loan_debt": "⛔ Balansingiz minusda — avval qarzni yoping.",
+        "repay_ok": "✅ Kredit to‘landi: <b>−{due}$</b>",
+        "dep_amount": (
+            "🏦 <b>OMONAT</b>\n\n📈 Foiz: kuniga <b>{rate}%</b>\n💵 {min}$ dan {max}$ gacha · 3–10 kun\n"
+            "🔒 Muddatidan oldin yechib bo‘lmaydi\n💰 Hamyon: {wallet}$\n\nSummani tanlang 👇"
+        ),
+        "dep_term": "🏦 <b>OMONAT · {amount}$</b>\n\n📈 Kuniga {rate}%\nMuddatni tanlang — tugmada muddat oxirida tushadigan summa 👇",
+        "dep_ok": "✅ Omonat ochildi: <b>−{amount}$</b>\n📅 {days} kun · {when} da hamyonga <b>{payout}$</b> tushadi",
+        "dep_has": "⛔ Sizda faol omonat bor — u tugagach yangisini ochishingiz mumkin.",
+        "dep_loan": "⛔ Kredit to‘lanmaguncha (yoki balans minusda bo‘lsa) omonat ochib bo‘lmaydi.",
+        "no_funds": "💸 Hamyonda yetarli pul yo‘q (balans: {bal}$).",
+        "not_yours": "⛔ Bu menyu sizniki emas — o‘zingiz /profil yozing.",
+        "n_loan": "🏅 <b>Gold Invest</b>: kredit muddati tugadi — hamyondan <b>{due}$</b> yechildi.\n💰 Balans: {bal}$",
+        "n_dep": "🏅 <b>Gold Invest</b>: omonat muddati tugadi — hamyonga <b>{payout}$</b> tushdi (foyda +{profit}$).\n💰 Balans: {bal}$",
+    },
+    "eng": {
+        "banks": "🏦 <b>BANKS</b>\n\nChoose a bank 👇\n\n🎮 Simulator — not real money",
+        "home": (
+            "🏅 <b>GOLD INVEST BANK</b>\n\n💵 Wallet: <b>{wallet}$</b>\n\n"
+            "💸 Loan: {loan}\n🏦 Deposit: {deposit}\n\n"
+            "📈 Loan — {loan_rate}% per day · 1–7 days\n📈 Deposit — {dep_rate}% per day · 3–10 days"
+        ),
+        "none": "none",
+        "loan_line": "<b>{due}$</b> to repay · until {when}",
+        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · paid on {when}",
+        "b_loan": "💸 Take a loan", "b_repay": "✅ Repay loan · {due}$", "b_deposit": "🏦 Open a deposit",
+        "b_back": "⬅️ Back", "b_banks": "🏦 Banks",
+        "loan_first": (
+            "💸 <b>LOAN</b>\n\nThis is your first loan — <b>{amount}$</b>.\n"
+            "Next time you can borrow from 1 000$ to 50 000$.\n\n"
+            "📈 Interest: <b>{rate}%</b> per day\nChoose the term — the button shows the amount to repay 👇\n\n{warn}"
+        ),
+        "loan_amount": "💸 <b>LOAN</b>\n\n📈 Interest: <b>{rate}%</b> per day\nChoose the amount — daily interest shown next to it 👇",
+        "loan_term": "💸 <b>LOAN · {amount}$</b>\n\n📈 Interest: <b>{rate}%</b> per day\nChoose the term — the button shows the amount to repay 👇\n\n{warn}",
+        "warn": "⚠️ When the term ends, the amount is taken from your wallet automatically — the balance may go negative.",
+        "per_day": "/day", "days": "d",
+        "loan_ok": "✅ Loan granted: <b>+{amount}$</b>\n📅 {days} days · repay: <b>{due}$</b>\n⏰ Due: {when}",
+        "loan_has": "⛔ You have an unpaid loan.",
+        "loan_debt": "⛔ Your balance is negative — clear the debt first.",
+        "repay_ok": "✅ Loan repaid: <b>−{due}$</b>",
+        "dep_amount": (
+            "🏦 <b>DEPOSIT</b>\n\n📈 Interest: <b>{rate}%</b> per day\n💵 {min}$ to {max}$ · 3–10 days\n"
+            "🔒 Cannot be withdrawn early\n💰 Wallet: {wallet}$\n\nChoose the amount 👇"
+        ),
+        "dep_term": "🏦 <b>DEPOSIT · {amount}$</b>\n\n📈 {rate}% per day\nChoose the term — the button shows the payout 👇",
+        "dep_ok": "✅ Deposit opened: <b>−{amount}$</b>\n📅 {days} days · <b>{payout}$</b> will be paid on {when}",
+        "dep_has": "⛔ You already have an active deposit — open a new one after it ends.",
+        "dep_loan": "⛔ You can't open a deposit while you have a loan or a negative balance.",
+        "no_funds": "💸 Not enough money in your wallet (balance: {bal}$).",
+        "not_yours": "⛔ This menu is not yours — type /profile yourself.",
+        "n_loan": "🏅 <b>Gold Invest</b>: your loan is due — <b>{due}$</b> was taken from your wallet.\n💰 Balance: {bal}$",
+        "n_dep": "🏅 <b>Gold Invest</b>: your deposit matured — <b>{payout}$</b> was paid to your wallet (profit +{profit}$).\n💰 Balance: {bal}$",
+    },
+    "ru": {
+        "banks": "🏦 <b>БАНКИ</b>\n\nВыберите банк 👇\n\n🎮 Симулятор — не настоящие деньги",
+        "home": (
+            "🏅 <b>GOLD INVEST BANK</b>\n\n💵 Кошелёк: <b>{wallet}$</b>\n\n"
+            "💸 Кредит: {loan}\n🏦 Вклад: {deposit}\n\n"
+            "📈 Кредит — {loan_rate}% в день · 1–7 дней\n📈 Вклад — {dep_rate}% в день · 3–10 дней"
+        ),
+        "none": "нет",
+        "loan_line": "<b>{due}$</b> к возврату · до {when}",
+        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · выплата {when}",
+        "b_loan": "💸 Взять кредит", "b_repay": "✅ Погасить кредит · {due}$", "b_deposit": "🏦 Открыть вклад",
+        "b_back": "⬅️ Назад", "b_banks": "🏦 Банки",
+        "loan_first": (
+            "💸 <b>КРЕДИТ</b>\n\nЭто ваш первый кредит — <b>{amount}$</b>.\n"
+            "В следующий раз можно взять от 1 000$ до 50 000$.\n\n"
+            "📈 Ставка: <b>{rate}%</b> в день\nВыберите срок — на кнопке сумма к возврату 👇\n\n{warn}"
+        ),
+        "loan_amount": "💸 <b>КРЕДИТ</b>\n\n📈 Ставка: <b>{rate}%</b> в день\nВыберите сумму — рядом проценты за день 👇",
+        "loan_term": "💸 <b>КРЕДИТ · {amount}$</b>\n\n📈 Ставка: <b>{rate}%</b> в день\nВыберите срок — на кнопке сумма к возврату 👇\n\n{warn}",
+        "warn": "⚠️ По окончании срока сумма списывается с кошелька автоматически — баланс может уйти в минус.",
+        "per_day": "/день", "days": "дн.",
+        "loan_ok": "✅ Кредит выдан: <b>+{amount}$</b>\n📅 {days} дн. · к возврату: <b>{due}$</b>\n⏰ Срок: {when}",
+        "loan_has": "⛔ У вас есть непогашенный кредит.",
+        "loan_debt": "⛔ Ваш баланс в минусе — сначала погасите долг.",
+        "repay_ok": "✅ Кредит погашен: <b>−{due}$</b>",
+        "dep_amount": (
+            "🏦 <b>ВКЛАД</b>\n\n📈 Ставка: <b>{rate}%</b> в день\n💵 От {min}$ до {max}$ · 3–10 дней\n"
+            "🔒 Досрочно снять нельзя\n💰 Кошелёк: {wallet}$\n\nВыберите сумму 👇"
+        ),
+        "dep_term": "🏦 <b>ВКЛАД · {amount}$</b>\n\n📈 {rate}% в день\nВыберите срок — на кнопке сумма к выплате 👇",
+        "dep_ok": "✅ Вклад открыт: <b>−{amount}$</b>\n📅 {days} дн. · {when} на кошелёк поступит <b>{payout}$</b>",
+        "dep_has": "⛔ У вас уже есть активный вклад — новый можно открыть после его окончания.",
+        "dep_loan": "⛔ Нельзя открыть вклад, пока есть кредит или баланс в минусе.",
+        "no_funds": "💸 Недостаточно денег в кошельке (баланс: {bal}$).",
+        "not_yours": "⛔ Это не ваше меню — напишите /profil сами.",
+        "n_loan": "🏅 <b>Gold Invest</b>: срок кредита истёк — с кошелька списано <b>{due}$</b>.\n💰 Баланс: {bal}$",
+        "n_dep": "🏅 <b>Gold Invest</b>: срок вклада истёк — на кошелёк поступило <b>{payout}$</b> (прибыль +{profit}$).\n💰 Баланс: {bal}$",
+    },
+    "kz": {
+        "banks": "🏦 <b>БАНКТЕР</b>\n\nБанкті таңдаңыз 👇\n\n🎮 Симулятор — нақты ақша емес",
+        "home": (
+            "🏅 <b>GOLD INVEST BANK</b>\n\n💵 Әмиян: <b>{wallet}$</b>\n\n"
+            "💸 Несие: {loan}\n🏦 Салым: {deposit}\n\n"
+            "📈 Несие — күніне {loan_rate}% · 1–7 күн\n📈 Салым — күніне {dep_rate}% · 3–10 күн"
+        ),
+        "none": "жоқ",
+        "loan_line": "<b>{due}$</b> қайтарылады · {when} дейін",
+        "dep_line": "<b>{amount}$</b> → <b>{payout}$</b> · {when} түседі",
+        "b_loan": "💸 Несие алу", "b_repay": "✅ Несиені өтеу · {due}$", "b_deposit": "🏦 Салым ашу",
+        "b_back": "⬅️ Артқа", "b_banks": "🏦 Банктер",
+        "loan_first": (
+            "💸 <b>НЕСИЕ</b>\n\nБұл сіздің алғашқы несиеңіз — <b>{amount}$</b>.\n"
+            "Келесі жолы 1 000$-дан 50 000$-ға дейін алуға болады.\n\n"
+            "📈 Пайыз: күніне <b>{rate}%</b>\nМерзімді таңдаңыз — батырмада қайтарылатын сома 👇\n\n{warn}"
+        ),
+        "loan_amount": "💸 <b>НЕСИЕ</b>\n\n📈 Пайыз: күніне <b>{rate}%</b>\nСоманы таңдаңыз — қасында күндік пайызы 👇",
+        "loan_term": "💸 <b>НЕСИЕ · {amount}$</b>\n\n📈 Пайыз: күніне <b>{rate}%</b>\nМерзімді таңдаңыз — батырмада қайтарылатын сома 👇\n\n{warn}",
+        "warn": "⚠️ Мерзім біткенде сома әмияннан автоматты түрде алынады — баланс минусқа түсуі мүмкін.",
+        "per_day": "/күн", "days": "күн",
+        "loan_ok": "✅ Несие берілді: <b>+{amount}$</b>\n📅 {days} күн · қайтарылады: <b>{due}$</b>\n⏰ Мерзімі: {when}",
+        "loan_has": "⛔ Сізде өтелмеген несие бар.",
+        "loan_debt": "⛔ Балансыңыз минуста — алдымен қарызды жабыңыз.",
+        "repay_ok": "✅ Несие өтелді: <b>−{due}$</b>",
+        "dep_amount": (
+            "🏦 <b>САЛЫМ</b>\n\n📈 Пайыз: күніне <b>{rate}%</b>\n💵 {min}$-дан {max}$-ға дейін · 3–10 күн\n"
+            "🔒 Мерзімінен бұрын алуға болмайды\n💰 Әмиян: {wallet}$\n\nСоманы таңдаңыз 👇"
+        ),
+        "dep_term": "🏦 <b>САЛЫМ · {amount}$</b>\n\n📈 Күніне {rate}%\nМерзімді таңдаңыз — батырмада түсетін сома 👇",
+        "dep_ok": "✅ Салым ашылды: <b>−{amount}$</b>\n📅 {days} күн · {when} әмиянға <b>{payout}$</b> түседі",
+        "dep_has": "⛔ Сізде белсенді салым бар — ол біткен соң жаңасын ашуға болады.",
+        "dep_loan": "⛔ Несие өтелмейінше (немесе баланс минуста болса) салым ашуға болмайды.",
+        "no_funds": "💸 Әмиянда ақша жеткіліксіз (баланс: {bal}$).",
+        "not_yours": "⛔ Бұл мәзір сіздікі емес — өзіңіз /profil жазыңыз.",
+        "n_loan": "🏅 <b>Gold Invest</b>: несие мерзімі бітті — әмияннан <b>{due}$</b> алынды.\n💰 Баланс: {bal}$",
+        "n_dep": "🏅 <b>Gold Invest</b>: салым мерзімі бітті — әмиянға <b>{payout}$</b> түсті (пайда +{profit}$).\n💰 Баланс: {bal}$",
+    },
+}
+
+
+def bank_t(chat_id, key, **kwargs):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    text = BANK_TEXT.get(lang, BANK_TEXT["uz"]).get(key) or BANK_TEXT["uz"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def fmt_when(ts):
+    """Unix vaqt → Toshkent vaqti (dd.mm HH:MM)."""
+    return time.strftime("%d.%m %H:%M", time.gmtime(int(ts) + TASHKENT_OFFSET))
+
+
+def loan_due(amount, days):
+    return amount + round(amount * LOAN_RATE * days)
+
+
+def deposit_payout(amount, days):
+    return amount + round(amount * DEPOSIT_RATE * days)
+
+
+def init_bank():
+    c = db()
+    with c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS bank_loans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                days INTEGER NOT NULL,
+                due INTEGER NOT NULL,
+                taken_at INTEGER NOT NULL,
+                due_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                closed_at INTEGER
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_bank_loans_user ON bank_loans(user_id, status)")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS bank_deposits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                days INTEGER NOT NULL,
+                payout INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                matures_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                closed_at INTEGER
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_bank_deposits_user ON bank_deposits(user_id, status)")
+
+
+def active_loan(user_id):
+    return db().execute(
+        "SELECT id, amount, days, due, due_at FROM bank_loans WHERE user_id=? AND status='active'",
+        (user_id,),
+    ).fetchone()
+
+
+def active_deposit(user_id):
+    return db().execute(
+        "SELECT id, amount, days, payout, matures_at FROM bank_deposits WHERE user_id=? AND status='active'",
+        (user_id,),
+    ).fetchone()
+
+
+def had_loan_before(user_id):
+    return db().execute(
+        "SELECT 1 FROM bank_loans WHERE user_id=? AND status!='active' LIMIT 1", (user_id,)
+    ).fetchone() is not None
+
+
+def _wallet_add(c, user_id, delta):
+    """Tranzaksiya ichida ishlatiladi (commit qilmaydi)."""
+    c.execute("INSERT OR IGNORE INTO user_wallet(user_id, money) VALUES (?, 0)", (user_id,))
+    c.execute("UPDATE user_wallet SET money = money + ? WHERE user_id = ?", (int(delta), user_id))
+
+
+def _wallet_take(c, user_id, amount):
+    """Puli yetsa yechadi (tranzaksiya ichida). True — yechildi."""
+    cur = c.execute(
+        "UPDATE user_wallet SET money = money - ? WHERE user_id = ? AND money >= ?",
+        (int(amount), user_id, int(amount)),
+    )
+    return cur.rowcount == 1
+
+
+def bank_btn(uid, label, *parts):
+    return InlineKeyboardButton(label, callback_data=":".join(["bk", str(uid), *map(str, parts)]))
+
+
+def bank_banks_view(chat_id, uid):
+    return bank_t(chat_id, "banks"), InlineKeyboardMarkup([
+        [bank_btn(uid, "🏅 Gold Invest", "gold")],
+    ])
+
+
+def bank_home_view(chat_id, uid):
+    loan = active_loan(uid)
+    dep = active_deposit(uid)
+    loan_text = (
+        bank_t(chat_id, "loan_line", due=fmt_money(loan[3]), when=fmt_when(loan[4]))
+        if loan else bank_t(chat_id, "none")
+    )
+    dep_text = (
+        bank_t(chat_id, "dep_line", amount=fmt_money(dep[1]), payout=fmt_money(dep[3]), when=fmt_when(dep[4]))
+        if dep else bank_t(chat_id, "none")
+    )
+    text = bank_t(
+        chat_id, "home", wallet=fmt_money(wallet_balance(uid)), loan=loan_text, deposit=dep_text,
+        loan_rate=round(LOAN_RATE * 100), dep_rate=round(DEPOSIT_RATE * 100),
+    )
+    rows = []
+    if loan:
+        rows.append([bank_btn(uid, bank_t(chat_id, "b_repay", due=fmt_money(loan[3])), "repay")])
+    else:
+        rows.append([bank_btn(uid, bank_t(chat_id, "b_loan"), "loan")])
+    if not dep:
+        rows.append([bank_btn(uid, bank_t(chat_id, "b_deposit"), "dep")])
+    rows.append([bank_btn(uid, bank_t(chat_id, "b_banks"), "banks")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def bank_back_row(chat_id, uid):
+    return [bank_btn(uid, bank_t(chat_id, "b_back"), "gold")]
+
+
+def bank_loan_term_view(chat_id, uid, amount, first):
+    rows, row = [], []
+    for d in LOAN_DAYS:
+        row.append(bank_btn(
+            uid, f"{d} {bank_t(chat_id, 'days')} → {fmt_money(loan_due(amount, d))}$", "lt", amount, d,
+        ))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(bank_back_row(chat_id, uid))
+    rate = round(LOAN_RATE * 100)
+    warn = bank_t(chat_id, "warn")
+    if first:
+        text = bank_t(chat_id, "loan_first", amount=fmt_money(amount), rate=rate, warn=warn)
+    else:
+        text = bank_t(chat_id, "loan_term", amount=fmt_money(amount), rate=rate, warn=warn)
+    return text, InlineKeyboardMarkup(rows)
+
+
+def bank_loan_amount_view(chat_id, uid):
+    per_day = bank_t(chat_id, "per_day")
+    buttons = [
+        bank_btn(uid, f"{fmt_money(a)}$ · +{fmt_money(round(a * LOAN_RATE))}${per_day}", "la", a)
+        for a in LOAN_AMOUNTS
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append(bank_back_row(chat_id, uid))
+    return bank_t(chat_id, "loan_amount", rate=round(LOAN_RATE * 100)), InlineKeyboardMarkup(rows)
+
+
+def bank_dep_amount_view(chat_id, uid):
+    buttons = [bank_btn(uid, f"{fmt_money(a)}$", "da", a) for a in DEPOSIT_AMOUNTS]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    rows.append(bank_back_row(chat_id, uid))
+    text = bank_t(
+        chat_id, "dep_amount", rate=round(DEPOSIT_RATE * 100),
+        min=fmt_money(DEPOSIT_AMOUNTS[0]), max=fmt_money(DEPOSIT_AMOUNTS[-1]),
+        wallet=fmt_money(wallet_balance(uid)),
+    )
+    return text, InlineKeyboardMarkup(rows)
+
+
+def bank_dep_term_view(chat_id, uid, amount):
+    days_label = bank_t(chat_id, "days")
+    buttons = [
+        bank_btn(uid, f"{d} {days_label} → {fmt_money(deposit_payout(amount, d))}$", "dt", amount, d)
+        for d in DEPOSIT_DAYS
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append(bank_back_row(chat_id, uid))
+    return bank_t(chat_id, "dep_term", amount=fmt_money(amount), rate=round(DEPOSIT_RATE * 100)), InlineKeyboardMarkup(rows)
+
+
+async def cb_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split(":")
+    chat_id = q.message.chat.id
+    uid = int(parts[1])
+    action = parts[2]
+    user = q.from_user
+
+    if user.id != uid:
+        await q.answer(bank_t(chat_id, "not_yours"), show_alert=True)
+        return
+
+    async def show(view, notice=None):
+        text, kb = view
+        if notice:
+            text = notice + "\n\n" + text
+        if action == "open":
+            await context.bot.send_message(chat_id, text, reply_markup=kb)
+        else:
+            await edit(context.bot, chat_id, q.message.message_id, text, kb)
+
+    if action in ("open", "banks"):
+        await q.answer()
+        await show(bank_banks_view(chat_id, uid))
+        return
+
+    if action == "gold":
+        await q.answer()
+        await show(bank_home_view(chat_id, uid))
+        return
+
+    c = db()
+    now = int(time.time())
+
+    if action == "loan":
+        if active_loan(uid):
+            await q.answer(bank_t(chat_id, "loan_has"), show_alert=True)
+            return
+        if wallet_balance(uid) < 0:
+            await q.answer(bank_t(chat_id, "loan_debt"), show_alert=True)
+            return
+        await q.answer()
+        if had_loan_before(uid):
+            await show(bank_loan_amount_view(chat_id, uid))
+        else:
+            await show(bank_loan_term_view(chat_id, uid, LOAN_FIRST, first=True))
+        return
+
+    if action == "la":
+        amount = int(parts[3])
+        if amount not in LOAN_AMOUNTS or not had_loan_before(uid):
+            await q.answer()
+            return
+        await q.answer()
+        await show(bank_loan_term_view(chat_id, uid, amount, first=False))
+        return
+
+    if action == "lt":
+        amount, days = int(parts[3]), int(parts[4])
+        allowed = LOAN_AMOUNTS if had_loan_before(uid) else [LOAN_FIRST]
+        if amount not in allowed or days not in LOAN_DAYS:
+            await q.answer()
+            return
+        if active_loan(uid):
+            await q.answer(bank_t(chat_id, "loan_has"), show_alert=True)
+            return
+        if wallet_balance(uid) < 0:
+            await q.answer(bank_t(chat_id, "loan_debt"), show_alert=True)
+            return
+        due = loan_due(amount, days)
+        due_at = now + days * DAY_SECONDS
+        save_user(user)
+        with c:
+            c.execute(
+                "INSERT INTO bank_loans(user_id, amount, days, due, taken_at, due_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (uid, amount, days, due, now, due_at),
+            )
+            _wallet_add(c, uid, amount)
+        await q.answer()
+        await show(bank_home_view(chat_id, uid), bank_t(
+            chat_id, "loan_ok", amount=fmt_money(amount), days=days, due=fmt_money(due), when=fmt_when(due_at),
+        ))
+        await log_money_event(
+            context.bot,
+            f"🏅 <b>KREDIT</b>\n{person_name(uid)}: +{amount}$ · {days} kun · qaytariladi {due}$",
+        )
+        return
+
+    if action == "repay":
+        loan = active_loan(uid)
+        if not loan:
+            await q.answer()
+            await show(bank_home_view(chat_id, uid))
+            return
+        loan_id, _, _, due, _ = loan
+        with c:
+            paid = _wallet_take(c, uid, due)
+            if paid:
+                c.execute(
+                    "UPDATE bank_loans SET status='paid', closed_at=? WHERE id=? AND status='active'",
+                    (now, loan_id),
+                )
+        if not paid:
+            await q.answer(bank_t(chat_id, "no_funds", bal=fmt_money(wallet_balance(uid))), show_alert=True)
+            return
+        await q.answer()
+        await show(bank_home_view(chat_id, uid), bank_t(chat_id, "repay_ok", due=fmt_money(due)))
+        await log_money_event(context.bot, f"🏅 <b>KREDIT TO‘LANDI</b>\n{person_name(uid)}: −{due}$")
+        return
+
+    if action == "dep":
+        if active_deposit(uid):
+            await q.answer(bank_t(chat_id, "dep_has"), show_alert=True)
+            return
+        if active_loan(uid) or wallet_balance(uid) < 0:
+            await q.answer(bank_t(chat_id, "dep_loan"), show_alert=True)
+            return
+        await q.answer()
+        await show(bank_dep_amount_view(chat_id, uid))
+        return
+
+    if action == "da":
+        amount = int(parts[3])
+        if amount not in DEPOSIT_AMOUNTS:
+            await q.answer()
+            return
+        if wallet_balance(uid) < amount:
+            await q.answer(bank_t(chat_id, "no_funds", bal=fmt_money(wallet_balance(uid))), show_alert=True)
+            return
+        await q.answer()
+        await show(bank_dep_term_view(chat_id, uid, amount))
+        return
+
+    if action == "dt":
+        amount, days = int(parts[3]), int(parts[4])
+        if amount not in DEPOSIT_AMOUNTS or days not in DEPOSIT_DAYS:
+            await q.answer()
+            return
+        if active_deposit(uid):
+            await q.answer(bank_t(chat_id, "dep_has"), show_alert=True)
+            return
+        if active_loan(uid):
+            await q.answer(bank_t(chat_id, "dep_loan"), show_alert=True)
+            return
+        payout = deposit_payout(amount, days)
+        matures_at = now + days * DAY_SECONDS
+        with c:
+            taken = _wallet_take(c, uid, amount)
+            if taken:
+                c.execute(
+                    """INSERT INTO bank_deposits(user_id, amount, days, payout, created_at, matures_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (uid, amount, days, payout, now, matures_at),
+                )
+        if not taken:
+            await q.answer(bank_t(chat_id, "no_funds", bal=fmt_money(wallet_balance(uid))), show_alert=True)
+            return
+        await q.answer()
+        await show(bank_home_view(chat_id, uid), bank_t(
+            chat_id, "dep_ok", amount=fmt_money(amount), days=days, payout=fmt_money(payout), when=fmt_when(matures_at),
+        ))
+        await log_money_event(
+            context.bot,
+            f"🏅 <b>OMONAT</b>\n{person_name(uid)}: −{amount}$ · {days} kun · tushadi {payout}$",
+        )
+        return
+
+    await q.answer()
+
+
+async def bank_settle_due(bot):
+    """Muddati kelgan kreditlarni yechadi va omonatlarni to'laydi."""
+    now = int(time.time())
+    c = db()
+    loans = c.execute(
+        "SELECT id, user_id, due FROM bank_loans WHERE status='active' AND due_at<=?", (now,)
+    ).fetchall()
+    for loan_id, uid, due in loans:
+        with c:
+            cur = c.execute(
+                "UPDATE bank_loans SET status='auto', closed_at=? WHERE id=? AND status='active'",
+                (now, loan_id),
+            )
+            if cur.rowcount != 1:
+                continue
+            _wallet_add(c, uid, -due)   # balans minusga tushishi mumkin — bu qarz
+        bal = wallet_balance(uid)
+        await bank_notify(bot, uid, "n_loan", due=fmt_money(due), bal=fmt_money(bal))
+        await log_money_event(bot, f"🏅 <b>KREDIT AVTO-YECHILDI</b>\n{person_name(uid)}: −{due}$ (balans {bal}$)")
+
+    deposits = c.execute(
+        "SELECT id, user_id, amount, payout FROM bank_deposits WHERE status='active' AND matures_at<=?", (now,)
+    ).fetchall()
+    for dep_id, uid, amount, payout in deposits:
+        with c:
+            cur = c.execute(
+                "UPDATE bank_deposits SET status='paid', closed_at=? WHERE id=? AND status='active'",
+                (now, dep_id),
+            )
+            if cur.rowcount != 1:
+                continue
+            _wallet_add(c, uid, payout)
+        bal = wallet_balance(uid)
+        await bank_notify(bot, uid, "n_dep", payout=fmt_money(payout), profit=fmt_money(payout - amount), bal=fmt_money(bal))
+        await log_money_event(bot, f"🏅 <b>OMONAT TUSHDI</b>\n{person_name(uid)}: +{payout}$")
+
+
+async def bank_notify(bot, uid, key, **kwargs):
+    try:
+        await bot.send_message(uid, bank_t(uid, key, **kwargs))
+    except TelegramError:
+        pass   # foydalanuvchi botni bloklagan / /start bosmagan
+
+
+async def bank_worker(application):
+    while True:
+        try:
+            await bank_settle_due(application.bot)
+        except Exception:  # noqa: BLE001
+            logger.exception("Bank: muddatlarni tekshirishda xato")
+        await asyncio.sleep(BANK_TICK)
+
+
+# ───────────────────────────── 📈 BIRJA (simulator) ─────────────────────────────
+# /profil → 📈 Birja. Narxlar real bozordan: Binance ochiq bozor API (data-api.binance.vision),
+# ishlamasa — CoinGecko. Har BIRJA_TICK soniyada yangilanadi. Savdo bot pulida (hamyon).
+# Iqtisodni himoya qilish: 0.5% komissiya, sotib olingandan keyin 10 daqiqa sotib bo'lmaydi
+# (real birjadan kechikish orqali "kafolatlangan foyda" olishning oldini oladi), narx eskirsa savdo to'xtaydi.
+
+BIRJA_ASSETS = {
+    # kalit: (nomi, belgi, Binance juftligi, CoinGecko id)
+    "BTC": ("Bitcoin", "₿", "BTCUSDT", "bitcoin"),
+    "ETH": ("Ethereum", "Ξ", "ETHUSDT", "ethereum"),
+    "TON": ("Toncoin", "💎", "TONUSDT", "the-open-network"),
+    "SOL": ("Solana", "◎", "SOLUSDT", "solana"),
+    "BNB": ("BNB", "🔶", "BNBUSDT", "binancecoin"),
+    "GOLD": ("Oltin · 1 unsiya", "🥇", "PAXGUSDT", "pax-gold"),
+}
+BIRJA_FEE = 0.005
+BIRJA_HOLD = 600            # sotib olingandan keyin sotish mumkin bo'lmagan vaqt (soniya)
+BIRJA_TICK = 60
+BIRJA_STALE = 300           # narx shundan eski bo'lsa savdo to'xtatiladi
+BIRJA_MIN_ORDER = 10
+BIRJA_MAX_ORDER = 100000
+BIRJA_BUY_FIXED = [100, 500, 1000, 5000]
+BIRJA_PCTS = [25, 50, 100]
+BIRJA_PRICES: dict[str, dict] = {}   # {"BTC": {"price": .., "change": .., "ts": ..}}
+_BINANCE_URL = "https://data-api.binance.vision/api/v3"
+_COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
+
+BIRJA_TEXT = {
+    "uz": {
+        "home": "📈 <b>BIRJA</b> · 🎮 simulator\n\nNarxlar real bozordan har daqiqada yangilanadi.\n💵 Hamyon: <b>{wallet}$</b>\n\n{rows}\n\n💸 Komissiya: {fee}% · ⏳ sotib olingandan keyin {hold} daqiqa sotib bo‘lmaydi",
+        "asset": "{icon} <b>{name}</b> ({sym})\n\n💲 Narx: <b>{price}$</b>\n📊 24 soat: {change}\n🕒 Yangilandi: {ago} soniya oldin\n\n💼 Sizda: <b>{qty} {sym}</b> ≈ {value}$\n📈 Foyda/zarar: {pnl}",
+        "buy_menu": "🟢 <b>{sym} SOTIB OLISH</b>\n\n💲 Narx: {price}$\n💵 Hamyon: {wallet}$\n💸 Komissiya: {fee}%\n\nQancha dollarlik sotib olasiz? 👇",
+        "sell_menu": "🔴 <b>{sym} SOTISH</b>\n\n💲 Narx: {price}$\n💼 Sizda: {qty} {sym} ≈ {value}$\n💸 Komissiya: {fee}%\n\nQanchasini sotasiz? 👇",
+        "bought": "✅ Sotib olindi: <b>{qty} {sym}</b> · {usd}$ (komissiya {fee}$)",
+        "sold": "✅ Sotildi: {qty} {sym} → <b>+{usd}$</b> (komissiya {fee}$)",
+        "portfolio": "💼 <b>PORTFELIM</b>\n\n{rows}\n\n💰 Jami qiymat: <b>{total}$</b>\n📈 Jami foyda/zarar: {pnl}\n💵 Hamyon: {wallet}$",
+        "portfolio_empty": "💼 <b>PORTFELIM</b>\n\nHozircha aktivlaringiz yo‘q. Birjadan biror aktiv tanlang 👇",
+        "top": "🏆 <b>BIRJA REYTINGI</b>\n(portfel qiymati bo‘yicha)\n\n{rows}",
+        "top_empty": "🏆 <b>BIRJA REYTINGI</b>\n\nHali hech kim savdo qilmagan.",
+        "b_buy": "🟢 Sotib olish", "b_sell": "🔴 Sotish", "b_chart": "📊 Grafik (24 soat)",
+        "b_portfolio": "💼 Portfelim", "b_top": "🏆 Reyting", "b_back": "⬅️ Birja", "b_refresh": "🔄 Yangilash",
+        "all": "Hammasi",
+        "stale": "⏳ Narxlar hozir yangilanmayapti — birozdan keyin urinib ko‘ring.",
+        "hold": "⏳ {sym} ni sotish uchun yana {min} daqiqa kuting (sotib olingandan keyin {hold} daqiqa).",
+        "min_order": "Minimal savdo — {min}$.",
+        "max_order": "Bitta savdo ko‘pi bilan {max}$.",
+        "no_funds": "💸 Hamyonda yetarli pul yo‘q (balans: {bal}$).",
+        "nothing": "Sizda {sym} yo‘q.",
+        "chart_none": "📊 Grafik hozircha mavjud emas — birozdan keyin urinib ko‘ring.",
+        "not_yours": "⛔ Bu menyu sizniki emas — o‘zingiz /profil yozing.",
+    },
+    "eng": {
+        "home": "📈 <b>EXCHANGE</b> · 🎮 simulator\n\nPrices follow the real market and update every minute.\n💵 Wallet: <b>{wallet}$</b>\n\n{rows}\n\n💸 Fee: {fee}% · ⏳ can't sell for {hold} minutes after buying",
+        "asset": "{icon} <b>{name}</b> ({sym})\n\n💲 Price: <b>{price}$</b>\n📊 24h: {change}\n🕒 Updated: {ago} s ago\n\n💼 You hold: <b>{qty} {sym}</b> ≈ {value}$\n📈 Profit/loss: {pnl}",
+        "buy_menu": "🟢 <b>BUY {sym}</b>\n\n💲 Price: {price}$\n💵 Wallet: {wallet}$\n💸 Fee: {fee}%\n\nHow much in dollars? 👇",
+        "sell_menu": "🔴 <b>SELL {sym}</b>\n\n💲 Price: {price}$\n💼 You hold: {qty} {sym} ≈ {value}$\n💸 Fee: {fee}%\n\nHow much will you sell? 👇",
+        "bought": "✅ Bought: <b>{qty} {sym}</b> · {usd}$ (fee {fee}$)",
+        "sold": "✅ Sold: {qty} {sym} → <b>+{usd}$</b> (fee {fee}$)",
+        "portfolio": "💼 <b>MY PORTFOLIO</b>\n\n{rows}\n\n💰 Total value: <b>{total}$</b>\n📈 Total profit/loss: {pnl}\n💵 Wallet: {wallet}$",
+        "portfolio_empty": "💼 <b>MY PORTFOLIO</b>\n\nYou have no assets yet. Pick one on the exchange 👇",
+        "top": "🏆 <b>EXCHANGE LEADERBOARD</b>\n(by portfolio value)\n\n{rows}",
+        "top_empty": "🏆 <b>EXCHANGE LEADERBOARD</b>\n\nNobody has traded yet.",
+        "b_buy": "🟢 Buy", "b_sell": "🔴 Sell", "b_chart": "📊 Chart (24h)",
+        "b_portfolio": "💼 Portfolio", "b_top": "🏆 Leaderboard", "b_back": "⬅️ Exchange", "b_refresh": "🔄 Refresh",
+        "all": "All",
+        "stale": "⏳ Prices are not updating right now — try again a bit later.",
+        "hold": "⏳ Wait {min} more minutes to sell {sym} ({hold} minutes after buying).",
+        "min_order": "Minimum trade is {min}$.",
+        "max_order": "One trade can be at most {max}$.",
+        "no_funds": "💸 Not enough money in your wallet (balance: {bal}$).",
+        "nothing": "You don't hold any {sym}.",
+        "chart_none": "📊 The chart is not available right now — try again later.",
+        "not_yours": "⛔ This menu is not yours — type /profile yourself.",
+    },
+    "ru": {
+        "home": "📈 <b>БИРЖА</b> · 🎮 симулятор\n\nЦены следуют реальному рынку и обновляются каждую минуту.\n💵 Кошелёк: <b>{wallet}$</b>\n\n{rows}\n\n💸 Комиссия: {fee}% · ⏳ после покупки нельзя продать {hold} минут",
+        "asset": "{icon} <b>{name}</b> ({sym})\n\n💲 Цена: <b>{price}$</b>\n📊 24 часа: {change}\n🕒 Обновлено: {ago} с назад\n\n💼 У вас: <b>{qty} {sym}</b> ≈ {value}$\n📈 Прибыль/убыток: {pnl}",
+        "buy_menu": "🟢 <b>КУПИТЬ {sym}</b>\n\n💲 Цена: {price}$\n💵 Кошелёк: {wallet}$\n💸 Комиссия: {fee}%\n\nНа сколько долларов купить? 👇",
+        "sell_menu": "🔴 <b>ПРОДАТЬ {sym}</b>\n\n💲 Цена: {price}$\n💼 У вас: {qty} {sym} ≈ {value}$\n💸 Комиссия: {fee}%\n\nСколько продать? 👇",
+        "bought": "✅ Куплено: <b>{qty} {sym}</b> · {usd}$ (комиссия {fee}$)",
+        "sold": "✅ Продано: {qty} {sym} → <b>+{usd}$</b> (комиссия {fee}$)",
+        "portfolio": "💼 <b>МОЙ ПОРТФЕЛЬ</b>\n\n{rows}\n\n💰 Общая стоимость: <b>{total}$</b>\n📈 Общая прибыль/убыток: {pnl}\n💵 Кошелёк: {wallet}$",
+        "portfolio_empty": "💼 <b>МОЙ ПОРТФЕЛЬ</b>\n\nУ вас пока нет активов. Выберите актив на бирже 👇",
+        "top": "🏆 <b>РЕЙТИНГ БИРЖИ</b>\n(по стоимости портфеля)\n\n{rows}",
+        "top_empty": "🏆 <b>РЕЙТИНГ БИРЖИ</b>\n\nПока никто не торговал.",
+        "b_buy": "🟢 Купить", "b_sell": "🔴 Продать", "b_chart": "📊 График (24 ч)",
+        "b_portfolio": "💼 Портфель", "b_top": "🏆 Рейтинг", "b_back": "⬅️ Биржа", "b_refresh": "🔄 Обновить",
+        "all": "Всё",
+        "stale": "⏳ Цены сейчас не обновляются — попробуйте чуть позже.",
+        "hold": "⏳ Продать {sym} можно через {min} мин. ({hold} минут после покупки).",
+        "min_order": "Минимальная сделка — {min}$.",
+        "max_order": "Одна сделка — не больше {max}$.",
+        "no_funds": "💸 Недостаточно денег в кошельке (баланс: {bal}$).",
+        "nothing": "У вас нет {sym}.",
+        "chart_none": "📊 График сейчас недоступен — попробуйте позже.",
+        "not_yours": "⛔ Это не ваше меню — напишите /profil сами.",
+    },
+    "kz": {
+        "home": "📈 <b>БИРЖА</b> · 🎮 симулятор\n\nБағалар нақты нарыққа сай әр минут сайын жаңарады.\n💵 Әмиян: <b>{wallet}$</b>\n\n{rows}\n\n💸 Комиссия: {fee}% · ⏳ сатып алғаннан кейін {hold} минут сатуға болмайды",
+        "asset": "{icon} <b>{name}</b> ({sym})\n\n💲 Баға: <b>{price}$</b>\n📊 24 сағат: {change}\n🕒 Жаңарды: {ago} с бұрын\n\n💼 Сізде: <b>{qty} {sym}</b> ≈ {value}$\n📈 Пайда/шығын: {pnl}",
+        "buy_menu": "🟢 <b>{sym} САТЫП АЛУ</b>\n\n💲 Баға: {price}$\n💵 Әмиян: {wallet}$\n💸 Комиссия: {fee}%\n\nҚанша долларға аласыз? 👇",
+        "sell_menu": "🔴 <b>{sym} САТУ</b>\n\n💲 Баға: {price}$\n💼 Сізде: {qty} {sym} ≈ {value}$\n💸 Комиссия: {fee}%\n\nҚаншасын сатасыз? 👇",
+        "bought": "✅ Сатып алынды: <b>{qty} {sym}</b> · {usd}$ (комиссия {fee}$)",
+        "sold": "✅ Сатылды: {qty} {sym} → <b>+{usd}$</b> (комиссия {fee}$)",
+        "portfolio": "💼 <b>ПОРТФЕЛІМ</b>\n\n{rows}\n\n💰 Жалпы құны: <b>{total}$</b>\n📈 Жалпы пайда/шығын: {pnl}\n💵 Әмиян: {wallet}$",
+        "portfolio_empty": "💼 <b>ПОРТФЕЛІМ</b>\n\nӘзірге активтеріңіз жоқ. Биржадан актив таңдаңыз 👇",
+        "top": "🏆 <b>БИРЖА РЕЙТИНГІ</b>\n(портфель құны бойынша)\n\n{rows}",
+        "top_empty": "🏆 <b>БИРЖА РЕЙТИНГІ</b>\n\nӘзірге ешкім сауда жасамаған.",
+        "b_buy": "🟢 Сатып алу", "b_sell": "🔴 Сату", "b_chart": "📊 График (24 сағ)",
+        "b_portfolio": "💼 Портфель", "b_top": "🏆 Рейтинг", "b_back": "⬅️ Биржа", "b_refresh": "🔄 Жаңарту",
+        "all": "Барлығы",
+        "stale": "⏳ Бағалар қазір жаңармай тұр — сәл кейін көріңіз.",
+        "hold": "⏳ {sym} сату үшін тағы {min} минут күтіңіз (сатып алғаннан кейін {hold} минут).",
+        "min_order": "Ең аз сауда — {min}$.",
+        "max_order": "Бір сауда {max}$-дан аспайды.",
+        "no_funds": "💸 Әмиянда ақша жеткіліксіз (баланс: {bal}$).",
+        "nothing": "Сізде {sym} жоқ.",
+        "chart_none": "📊 График қазір қолжетімсіз — кейінірек көріңіз.",
+        "not_yours": "⛔ Бұл мәзір сіздікі емес — өзіңіз /profil жазыңыз.",
+    },
+}
+
+
+def birja_t(chat_id, key, **kwargs):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    text = BIRJA_TEXT.get(lang, BIRJA_TEXT["uz"]).get(key) or BIRJA_TEXT["uz"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def fmt_price(p):
+    if p >= 100:
+        return f"{p:,.2f}".replace(",", " ")
+    if p >= 1:
+        return f"{p:,.4f}".replace(",", " ")
+    return f"{p:.6f}"
+
+
+def fmt_qty(q):
+    text = f"{q:.8f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def fmt_change(ch):
+    icon = "🟢" if ch >= 0 else "🔴"
+    return f"{icon} {ch:+.2f}%"
+
+
+def fmt_pnl(value):
+    icon = "🟢" if value >= 0 else "🔴"
+    return f"{icon} {'+' if value >= 0 else '−'}{fmt_money(abs(round(value)))}$"
+
+
+def init_birja():
+    c = db()
+    with c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS birja_holdings (
+                user_id INTEGER NOT NULL,
+                asset TEXT NOT NULL,
+                qty REAL NOT NULL DEFAULT 0,
+                cost REAL NOT NULL DEFAULT 0,
+                last_buy INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, asset)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS birja_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                asset TEXT NOT NULL,
+                side TEXT NOT NULL,
+                qty REAL NOT NULL,
+                price REAL NOT NULL,
+                usd INTEGER NOT NULL,
+                fee INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS birja_prices (
+                asset TEXT PRIMARY KEY,
+                price REAL NOT NULL,
+                change REAL NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+        """)
+    for asset, price, change, ts in c.execute("SELECT asset, price, change, updated_at FROM birja_prices"):
+        if asset in BIRJA_ASSETS:
+            BIRJA_PRICES[asset] = {"price": price, "change": change, "ts": ts}
+
+
+def _http_json(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "son_bot/1.0", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _fetch_binance():
+    symbols = json.dumps([v[2] for v in BIRJA_ASSETS.values()], separators=(",", ":"))
+    data = _http_json(f"{_BINANCE_URL}/ticker/24hr?symbols={urllib.parse.quote(symbols)}")
+    by_symbol = {row["symbol"]: row for row in data}
+    out = {}
+    for asset, (_, _, symbol, _) in BIRJA_ASSETS.items():
+        row = by_symbol.get(symbol)
+        if row and float(row["lastPrice"]) > 0:
+            out[asset] = (float(row["lastPrice"]), float(row["priceChangePercent"]))
+    return out
+
+
+def _fetch_coingecko():
+    ids = ",".join(v[3] for v in BIRJA_ASSETS.values())
+    data = _http_json(f"{_COINGECKO_URL}?ids={ids}&vs_currencies=usd&include_24hr_change=true")
+    out = {}
+    for asset, (_, _, _, cg_id) in BIRJA_ASSETS.items():
+        row = data.get(cg_id)
+        if row and row.get("usd"):
+            out[asset] = (float(row["usd"]), float(row.get("usd_24h_change") or 0.0))
+    return out
+
+
+async def birja_refresh_prices():
+    prices = {}
+    for fetch in (_fetch_binance, _fetch_coingecko):
+        try:
+            prices = await asyncio.to_thread(fetch)
+        except Exception as e:  # noqa: BLE001 — tarmoq/format xatosi: keyingi manbani sinaymiz
+            logger.warning("Birja: %s ishlamadi: %s", fetch.__name__, e)
+            continue
+        if len(prices) == len(BIRJA_ASSETS):
+            break
+    if not prices:
+        return
+    now = int(time.time())
+    c = db()
+    with c:
+        for asset, (price, change) in prices.items():
+            BIRJA_PRICES[asset] = {"price": price, "change": change, "ts": now}
+            c.execute(
+                """INSERT INTO birja_prices(asset, price, change, updated_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(asset) DO UPDATE SET price=excluded.price, change=excluded.change,
+                   updated_at=excluded.updated_at""",
+                (asset, price, change, now),
+            )
+
+
+async def birja_worker(application):
+    while True:
+        try:
+            await birja_refresh_prices()
+        except Exception:  # noqa: BLE001
+            logger.exception("Birja: narxlarni yangilashda xato")
+        await asyncio.sleep(BIRJA_TICK)
+
+
+def birja_price(asset):
+    """Joriy narx (eskirgan bo'lsa — None)."""
+    p = BIRJA_PRICES.get(asset)
+    if not p or time.time() - p["ts"] > BIRJA_STALE:
+        return None
+    return p["price"]
+
+
+def birja_holding(uid, asset):
+    row = db().execute(
+        "SELECT qty, cost, last_buy FROM birja_holdings WHERE user_id=? AND asset=?", (uid, asset)
+    ).fetchone()
+    return row if row else (0.0, 0.0, 0)
+
+
+def birja_btn(uid, label, *parts):
+    return InlineKeyboardButton(label, callback_data=":".join(["bx", str(uid), *map(str, parts)]))
+
+
+def birja_home_view(chat_id, uid):
+    rows_text = []
+    buttons = []
+    for asset, (name, icon, _, _) in BIRJA_ASSETS.items():
+        p = BIRJA_PRICES.get(asset)
+        if p:
+            rows_text.append(f"{icon} <b>{asset}</b> — {fmt_price(p['price'])}$ ({fmt_change(p['change'])})")
+        else:
+            rows_text.append(f"{icon} <b>{asset}</b> — …")
+        buttons.append(birja_btn(uid, f"{icon} {asset}", "a", asset))
+    kb = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    kb.append([
+        birja_btn(uid, birja_t(chat_id, "b_portfolio"), "pf"),
+        birja_btn(uid, birja_t(chat_id, "b_top"), "top"),
+    ])
+    kb.append([birja_btn(uid, birja_t(chat_id, "b_refresh"), "home")])
+    text = birja_t(
+        chat_id, "home", wallet=fmt_money(wallet_balance(uid)), rows="\n".join(rows_text),
+        fee=f"{BIRJA_FEE * 100:g}", hold=BIRJA_HOLD // 60,
+    )
+    return text, InlineKeyboardMarkup(kb)
+
+
+def birja_back_row(chat_id, uid):
+    return [birja_btn(uid, birja_t(chat_id, "b_back"), "home")]
+
+
+def birja_asset_view(chat_id, uid, asset):
+    name, icon, _, _ = BIRJA_ASSETS[asset]
+    p = BIRJA_PRICES.get(asset) or {"price": 0.0, "change": 0.0, "ts": 0}
+    qty, cost, _ = birja_holding(uid, asset)
+    value = qty * p["price"]
+    text = birja_t(
+        chat_id, "asset", icon=icon, name=name, sym=asset, price=fmt_price(p["price"]),
+        change=fmt_change(p["change"]), ago=max(0, int(time.time() - p["ts"])),
+        qty=fmt_qty(qty), value=fmt_money(round(value)), pnl=fmt_pnl(value - cost) if qty > 0 else "—",
+    )
+    kb = [
+        [birja_btn(uid, birja_t(chat_id, "b_buy"), "bm", asset), birja_btn(uid, birja_t(chat_id, "b_sell"), "sm", asset)],
+        [birja_btn(uid, birja_t(chat_id, "b_chart"), "ch", asset)],
+        [birja_btn(uid, birja_t(chat_id, "b_refresh"), "a", asset)],
+        birja_back_row(chat_id, uid),
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+def birja_buy_view(chat_id, uid, asset):
+    p = BIRJA_PRICES.get(asset) or {"price": 0.0}
+    fixed = [birja_btn(uid, f"{fmt_money(a)}$", "b", asset, f"a{a}") for a in BIRJA_BUY_FIXED]
+    pct = [birja_btn(uid, f"{x}%" if x < 100 else birja_t(chat_id, "all"), "b", asset, f"p{x}") for x in BIRJA_PCTS]
+    kb = [fixed[:2], fixed[2:], pct, [birja_btn(uid, "⬅️ " + asset, "a", asset)]]
+    text = birja_t(
+        chat_id, "buy_menu", sym=asset, price=fmt_price(p["price"]),
+        wallet=fmt_money(wallet_balance(uid)), fee=f"{BIRJA_FEE * 100:g}",
+    )
+    return text, InlineKeyboardMarkup(kb)
+
+
+def birja_sell_view(chat_id, uid, asset):
+    p = BIRJA_PRICES.get(asset) or {"price": 0.0}
+    qty, _, _ = birja_holding(uid, asset)
+    pct = [birja_btn(uid, f"{x}%" if x < 100 else birja_t(chat_id, "all"), "s", asset, f"p{x}") for x in BIRJA_PCTS]
+    kb = [pct, [birja_btn(uid, "⬅️ " + asset, "a", asset)]]
+    text = birja_t(
+        chat_id, "sell_menu", sym=asset, price=fmt_price(p["price"]), qty=fmt_qty(qty),
+        value=fmt_money(round(qty * p["price"])), fee=f"{BIRJA_FEE * 100:g}",
+    )
+    return text, InlineKeyboardMarkup(kb)
+
+
+def birja_portfolio_value(uid):
+    rows = db().execute(
+        "SELECT asset, qty, cost FROM birja_holdings WHERE user_id=? AND qty > 0", (uid,)
+    ).fetchall()
+    out = []
+    for asset, qty, cost in rows:
+        if asset not in BIRJA_ASSETS:
+            continue
+        price = (BIRJA_PRICES.get(asset) or {"price": 0.0})["price"]
+        out.append((asset, qty, cost, qty * price))
+    return out
+
+
+def birja_portfolio_view(chat_id, uid):
+    items = birja_portfolio_value(uid)
+    kb = InlineKeyboardMarkup([birja_back_row(chat_id, uid)])
+    if not items:
+        return birja_t(chat_id, "portfolio_empty"), kb
+    lines = []
+    total = total_cost = 0.0
+    for asset, qty, cost, value in sorted(items, key=lambda x: -x[3]):
+        icon = BIRJA_ASSETS[asset][1]
+        lines.append(f"{icon} <b>{fmt_qty(qty)} {asset}</b> ≈ {fmt_money(round(value))}$ · {fmt_pnl(value - cost)}")
+        total += value
+        total_cost += cost
+    text = birja_t(
+        chat_id, "portfolio", rows="\n".join(lines), total=fmt_money(round(total)),
+        pnl=fmt_pnl(total - total_cost), wallet=fmt_money(wallet_balance(uid)),
+    )
+    return text, kb
+
+
+def birja_top_view(chat_id, uid):
+    rows = db().execute("SELECT user_id, asset, qty FROM birja_holdings WHERE qty > 0").fetchall()
+    totals = {}
+    for user_id, asset, qty in rows:
+        price = (BIRJA_PRICES.get(asset) or {"price": 0.0})["price"]
+        totals[user_id] = totals.get(user_id, 0.0) + qty * price
+    kb = InlineKeyboardMarkup([birja_back_row(chat_id, uid)])
+    if not totals:
+        return birja_t(chat_id, "top_empty"), kb
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (user_id, value) in enumerate(sorted(totals.items(), key=lambda x: -x[1])[:10]):
+        row = db().execute("SELECT first_name, username FROM users WHERE user_id=?", (user_id,)).fetchone()
+        name = pretty_name(*(row or (None, None)))
+        lines.append(f"{medals[i] if i < 3 else f'{i + 1}.'} <b>{name}</b> — {fmt_money(round(value))}$")
+    return birja_t(chat_id, "top", rows="\n".join(lines)), kb
+
+
+def birja_buy(uid, asset, usd, price):
+    """Hamyondan usd yechib, komissiyadan keyingi summaga aktiv beradi. (qty, fee) yoki None."""
+    fee = max(1, round(usd * BIRJA_FEE))
+    qty = (usd - fee) / price
+    now = int(time.time())
+    c = db()
+    with c:
+        if not _wallet_take(c, uid, usd):
+            return None
+        c.execute(
+            """INSERT INTO birja_holdings(user_id, asset, qty, cost, last_buy) VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, asset) DO UPDATE SET qty = qty + excluded.qty,
+               cost = cost + excluded.cost, last_buy = excluded.last_buy""",
+            (uid, asset, qty, usd, now),
+        )
+        c.execute(
+            "INSERT INTO birja_trades(user_id, asset, side, qty, price, usd, fee, created_at) VALUES (?, ?, 'buy', ?, ?, ?, ?, ?)",
+            (uid, asset, qty, price, usd, fee, now),
+        )
+    return qty, fee
+
+
+def birja_sell(uid, asset, pct, price):
+    """Aktivning pct% ini sotadi. (qty, usd, fee) yoki None."""
+    qty_have, cost, _ = birja_holding(uid, asset)
+    if qty_have <= 0:
+        return None
+    qty = qty_have if pct >= 100 else qty_have * pct / 100
+    gross = qty * price
+    fee = max(1, round(gross * BIRJA_FEE)) if gross >= 1 else 0
+    usd = max(0, int(gross) - fee)
+    left = qty_have - qty
+    now = int(time.time())
+    c = db()
+    with c:
+        if left <= 1e-12:
+            c.execute("DELETE FROM birja_holdings WHERE user_id=? AND asset=?", (uid, asset))
+        else:
+            c.execute(
+                "UPDATE birja_holdings SET qty=?, cost=? WHERE user_id=? AND asset=?",
+                (left, cost * left / qty_have, uid, asset),
+            )
+        _wallet_add(c, uid, usd)
+        c.execute(
+            "INSERT INTO birja_trades(user_id, asset, side, qty, price, usd, fee, created_at) VALUES (?, ?, 'sell', ?, ?, ?, ?, ?)",
+            (uid, asset, qty, price, usd, fee, now),
+        )
+    return qty, usd, fee
+
+
+def render_birja_chart(asset, points):
+    """points: [(ts, close)] → PNG baytlari."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    w, h, pad_l, pad_r, pad_t, pad_b = 900, 450, 20, 120, 60, 40
+    img = Image.new("RGB", (w, h), (17, 22, 31))
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.load_default(size=20)
+        small = ImageFont.load_default(size=16)
+    except TypeError:   # eski Pillow
+        font = small = ImageFont.load_default()
+    prices = [p for _, p in points]
+    lo, hi = min(prices), max(prices)
+    span = (hi - lo) or hi * 0.001 or 1
+    up = prices[-1] >= prices[0]
+    color = (38, 194, 129) if up else (234, 84, 85)
+
+    def xy(i, p):
+        x = pad_l + (w - pad_l - pad_r) * i / max(1, len(prices) - 1)
+        y = pad_t + (h - pad_t - pad_b) * (1 - (p - lo) / span)
+        return x, y
+
+    for k in range(5):   # gorizontal chiziqlar va narx yorliqlari
+        y = pad_t + (h - pad_t - pad_b) * k / 4
+        draw.line([(pad_l, y), (w - pad_r, y)], fill=(40, 48, 61), width=1)
+        draw.text((w - pad_r + 10, y - 9), fmt_price(hi - span * k / 4), fill=(150, 160, 175), font=small)
+    line = [xy(i, p) for i, p in enumerate(prices)]
+    draw.polygon(line + [(line[-1][0], h - pad_b), (line[0][0], h - pad_b)], fill=tuple(v // 4 for v in color))
+    draw.line(line, fill=color, width=3)
+    change = (prices[-1] / prices[0] - 1) * 100 if prices[0] else 0
+    draw.text((pad_l, 18), f"{asset}/USD  24h", fill=(235, 238, 243), font=font)
+    draw.text((pad_l + 220, 18), f"{fmt_price(prices[-1])}$  ({change:+.2f}%)", fill=color, font=font)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _fetch_chart(asset):
+    symbol = BIRJA_ASSETS[asset][2]
+    data = _http_json(f"{_BINANCE_URL}/klines?symbol={symbol}&interval=15m&limit=96")
+    points = [(int(row[0]) // 1000, float(row[4])) for row in data]
+    if len(points) < 2:
+        raise ValueError("grafik uchun ma'lumot yetarli emas")
+    return render_birja_chart(asset, points)
+
+
+async def cb_birja(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split(":")
+    chat_id = q.message.chat.id
+    uid = int(parts[1])
+    action = parts[2]
+
+    if q.from_user.id != uid:
+        await q.answer(birja_t(chat_id, "not_yours"), show_alert=True)
+        return
+
+    async def show(view, notice=None):
+        text, kb = view
+        if notice:
+            text = notice + "\n\n" + text
+        if action == "open":
+            await context.bot.send_message(chat_id, text, reply_markup=kb)
+        else:
+            await edit(context.bot, chat_id, q.message.message_id, text, kb)
+
+    if action in ("open", "home"):
+        await q.answer()
+        await show(birja_home_view(chat_id, uid))
+        return
+    if action == "pf":
+        await q.answer()
+        await show(birja_portfolio_view(chat_id, uid))
+        return
+    if action == "top":
+        await q.answer()
+        await show(birja_top_view(chat_id, uid))
+        return
+
+    asset = parts[3] if len(parts) > 3 else ""
+    if asset not in BIRJA_ASSETS:
+        await q.answer()
+        return
+
+    if action == "a":
+        await q.answer()
+        await show(birja_asset_view(chat_id, uid, asset))
+        return
+    if action == "bm":
+        await q.answer()
+        await show(birja_buy_view(chat_id, uid, asset))
+        return
+    if action == "sm":
+        qty, _, _ = birja_holding(uid, asset)
+        if qty <= 0:
+            await q.answer(birja_t(chat_id, "nothing", sym=asset), show_alert=True)
+            return
+        await q.answer()
+        await show(birja_sell_view(chat_id, uid, asset))
+        return
+
+    if action == "ch":
+        await q.answer()
+        try:
+            png = await asyncio.to_thread(_fetch_chart, asset)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Birja grafigi chizilmadi (%s): %s", asset, e)
+            await context.bot.send_message(chat_id, birja_t(chat_id, "chart_none"))
+            return
+        name, icon, _, _ = BIRJA_ASSETS[asset]
+        await context.bot.send_photo(chat_id, png, caption=f"{icon} <b>{name}</b> ({asset}) · 24h")
+        return
+
+    price = birja_price(asset)
+    if price is None:
+        await q.answer(birja_t(chat_id, "stale"), show_alert=True)
+        return
+    code = parts[4] if len(parts) > 4 else ""
+
+    if action == "b":
+        wallet = wallet_balance(uid)
+        if code.startswith("a"):
+            usd = int(code[1:])
+        elif code.startswith("p"):
+            usd = int(max(0, wallet) * int(code[1:]) / 100)
+        else:
+            await q.answer()
+            return
+        usd = min(usd, BIRJA_MAX_ORDER) if code.startswith("p") else usd
+        if usd < BIRJA_MIN_ORDER:
+            await q.answer(birja_t(chat_id, "min_order", min=BIRJA_MIN_ORDER), show_alert=True)
+            return
+        if usd > BIRJA_MAX_ORDER:
+            await q.answer(birja_t(chat_id, "max_order", max=fmt_money(BIRJA_MAX_ORDER)), show_alert=True)
+            return
+        if usd > wallet:
+            await q.answer(birja_t(chat_id, "no_funds", bal=fmt_money(wallet)), show_alert=True)
+            return
+        save_user(q.from_user)
+        result = birja_buy(uid, asset, usd, price)
+        if not result:
+            await q.answer(birja_t(chat_id, "no_funds", bal=fmt_money(wallet_balance(uid))), show_alert=True)
+            return
+        qty, fee = result
+        await q.answer()
+        await show(birja_asset_view(chat_id, uid, asset), birja_t(
+            chat_id, "bought", qty=fmt_qty(qty), sym=asset, usd=fmt_money(usd), fee=fmt_money(fee),
+        ))
+        return
+
+    if action == "s":
+        qty_have, _, last_buy = birja_holding(uid, asset)
+        if qty_have <= 0:
+            await q.answer(birja_t(chat_id, "nothing", sym=asset), show_alert=True)
+            return
+        wait = BIRJA_HOLD - (int(time.time()) - last_buy)
+        if wait > 0:
+            await q.answer(birja_t(
+                chat_id, "hold", sym=asset, min=max(1, math.ceil(wait / 60)), hold=BIRJA_HOLD // 60,
+            ), show_alert=True)
+            return
+        try:
+            pct = int(code[1:]) if code.startswith("p") else 0
+        except ValueError:
+            pct = 0
+        if pct not in BIRJA_PCTS:
+            await q.answer()
+            return
+        if qty_have * price * pct / 100 < BIRJA_MIN_ORDER and pct < 100:
+            await q.answer(birja_t(chat_id, "min_order", min=BIRJA_MIN_ORDER), show_alert=True)
+            return
+        result = birja_sell(uid, asset, pct, price)
+        if not result:
+            await q.answer(birja_t(chat_id, "nothing", sym=asset), show_alert=True)
+            return
+        qty, usd, fee = result
+        await q.answer()
+        await show(birja_asset_view(chat_id, uid, asset), birja_t(
+            chat_id, "sold", qty=fmt_qty(qty), sym=asset, usd=fmt_money(usd), fee=fmt_money(fee),
+        ))
+        return
+
+    await q.answer()
+
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
         print(
@@ -11242,6 +12486,8 @@ def main():
     init_db()
     init_economy()
     init_group_members()
+    init_bank()
+    init_birja()
     load_crash_config()
 
     app = (
@@ -11301,6 +12547,8 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_croc, pattern=r"^croc:show$"))
     app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|croc|casino|frog|back|menu)$"))
     app.add_handler(CallbackQueryHandler(cb_frog, pattern=r"^fr:"))
+    app.add_handler(CallbackQueryHandler(cb_bank, pattern=r"^bk:\d+:"))
+    app.add_handler(CallbackQueryHandler(cb_birja, pattern=r"^bx:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash|memory):\d+:(uz|eng|ru|kz)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))

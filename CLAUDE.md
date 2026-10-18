@@ -53,7 +53,9 @@
   `?start=ga_<|chat|>_<uid>`): huquqlarni ✅/❌, adminlikdan olish; `/promote [unvon]`, `/demote`; Telegram'da admin qilinsa
   `announce_new_admin` panel tugmasini chiqaradi. Bot faqat o'zi tayinlagan adminlarni o'zgartira oladi.
 - 🛡 2-bosqich: 🚫 taqiqlangan so'zlar (`group_badwords`, `/addword /delword /words`, settings → So'zlar), 🔒 cheklovlar
-  (`locks` bitmaskasi: stiker/GIF/ovozli/dumaloq video/forward), 🌙 tungi rejim (`night_*` ustunlari, `night_worker` har 60 s,
+  (`locks` bitmaskasi: stiker/GIF/ovozli/dumaloq video/forward). Taqiqlangan so'z ishlatilsa (Empire Security uslubi):
+  xabar o'chadi + a'zo `BADWORD_MUTE` (30 daq) jim qilinadi, `tashkent_dt` bilan muddat ko'rsatiladi va «✅ Bekor qilish»
+  tugmasi (`bw:<chat>:<uid>`, `cb_badword_undo` — faqat admin unmute qiladi) chiqadi. 🌙 tungi rejim (`night_*` ustunlari, `night_worker` har 60 s,
   Toshkent vaqti; `set_chat_permissions` bilan yopadi, oldingi ruxsatlar `night_saved` da), 📣 `/report` va "@admin" (adminlarga
   shaxsiy xabar + 🗑/🔇/🚀 tugmalar `cb_report`), 📋 log kanal (`/setlog @kanal|off`, `mod_log`).
 - 💱 Botlar aro pul almashuvi (`cb_exchange`, `ex:<uid>:...`; owner panel → 💱 Pul almashuvi, `panel:exch*`): hamkor bot bilan

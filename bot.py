@@ -16126,6 +16126,41 @@ async def panel_stats_callback(query, context):
             raise
 
 
+async def cmd_taxrir(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return
+    if user.id not in CAREER_OWNER_IDS:
+        await msg.reply_text("⛔ Bu buyruq faqat bot egalari uchun.")
+        return
+    text, kb = panel_stats_edit_view()
+    await msg.reply_text(text, reply_markup=kb)
+
+
+async def cmd_haqiqiy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return
+    if user.id not in CAREER_OWNER_IDS:
+        await msg.reply_text("⛔ Bu buyruq faqat bot egalari uchun.")
+        return
+    c = db()
+    users_count = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    groups = len(panel_group_ids(c))
+    total_games = c.execute("SELECT COALESCE(SUM(games), 0) FROM chat_stats").fetchone()[0]
+    over = {k: v for k, v in c.execute("SELECT key, value FROM panel_overrides")}
+    note = "\n\n✍️ Hozir tahrirlangan ko‘rsatkichlar bor — panelda boshqa son chiqadi. /taxrir orqali sozlang." if over else ""
+    await msg.reply_text(
+        "📊 <b>HAQIQIY STATISTIKA</b>\n\n"
+        f"👤 Foydalanuvchilar: <b>{users_count}</b>\n"
+        f"🏘 Guruhlar: <b>{groups}</b>\n"
+        f"🎮 Faol o‘yinlar: <b>{len(GAMES)}</b>\n"
+        f"📈 Jami ishtiroklar: <b>{total_games}</b>" + note
+    )
+
+
 async def panel_stats_text(update, context):
     key = context.user_data.get("panel_stat_state")
     msg = update.effective_message
@@ -16230,6 +16265,8 @@ def main():
 
     commands = [
         (["panel"], cmd_panel),
+        (["taxrir"], cmd_taxrir),
+        (["haqiqiy"], cmd_haqiqiy),
         (["tasdiq"], cmd_tasdiq),
         (["start"], cmd_start),
         (["juft"], cmd_juft),

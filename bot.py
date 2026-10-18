@@ -19050,27 +19050,43 @@ function initCrash(){
     for(let x=-(gridOff%step);x<W;x+=step){ ctx.beginPath(); ctx.moveTo(x,gy); ctx.lineTo(x-14*dpr,H); ctx.stroke(); }
     ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
   }
-  // ---- 3D samolyot: kichik mesh + perspektiva + yoritish (flat shading) ----
+  // ---- 3D "Royal" samolyot: qizil korpus + oltin bezaklar, toj belgisi (mesh + perspektiva + yoritish) ----
+  const RED=[214,22,40], GOLD=[255,196,58], BLACK=[26,20,24], GLASS=[18,26,44];
   const P3=(function(){
-    const F=[], W=[];   // F — fuselaj (yopiq, orqa yuzalar kesiladi), W — ikki tomonlama yuzalar
-    const rings=[[1.45,0,0],[1.15,.17,.02],[.75,.27,.03],[.1,.3,.02],[-.6,.22,.05],[-1.25,.09,.14]], N=10;
-    const ring=r=>Array.from({length:N},(_,i)=>{ const a=i/N*Math.PI*2; return [r[0],Math.cos(a)*r[1]+r[2],Math.sin(a)*r[1]]; });
-    const R=rings.map(ring);
+    const F=[], W=[], N=12;
+    // [x, radius, y-siljish, rang]
+    const rings=[[1.8,0,0],[1.6,.17,0],[1.47,.4,0],[1.34,.43,0],[1.0,.42,.01],[.55,.4,.02],[.05,.36,.04],[-.5,.26,.07],[-1.0,.15,.12],[-1.32,.07,.16]];
+    const segCol=[GOLD,GOLD,RED,RED,RED,RED,RED,RED,RED];
+    const R=rings.map(r=>Array.from({length:N},(_,i)=>{ const a=i/N*Math.PI*2; return [r[0],Math.cos(a)*r[1]+r[2],Math.sin(a)*r[1]]; }));
     for(let k=0;k<R.length-1;k++) for(let i=0;i<N;i++){ const j=(i+1)%N;
-      F.push({v:[R[k][i],R[k+1][i],R[k+1][j],R[k][j]],c:k===0?[255,235,240]:[236,40,72],sp:1}); }
-    F.push({v:R[R.length-1].slice().reverse(),c:[120,10,30]});
-    // kabina (shisha)
-    W.push({v:[[.95,.2,0],[.55,.36,-.13],[.2,.31,-.16],[.2,.31,.16],[.55,.36,.13]],c:[150,230,255],sp:2,glass:1});
-    // asosiy qanotlar (dihedral bilan)
-    const wing=(z)=>[[.35,.0,0],[-.25,.0,0],[-.5,.1,z],[-.2,.1,z]];
-    W.push({v:wing(1.75),c:[200,22,52]}); W.push({v:wing(-1.75),c:[200,22,52]});
-    // qanot uchidagi oltin chiziq
-    W.push({v:[[-.2,.1,1.75],[-.5,.1,1.75],[-.46,.098,1.55],[-.18,.098,1.55]],c:[255,210,74],sp:1});
-    W.push({v:[[-.2,.1,-1.75],[-.5,.1,-1.75],[-.46,.098,-1.55],[-.18,.098,-1.55]],c:[255,210,74],sp:1});
-    // dum stabilizatorlari va vertikal qanot
-    W.push({v:[[-.95,.08,0],[-1.3,.1,0],[-1.42,.14,.7],[-1.2,.13,.7]],c:[190,20,48]});
-    W.push({v:[[-.95,.08,0],[-1.3,.1,0],[-1.42,.14,-.7],[-1.2,.13,-.7]],c:[190,20,48]});
-    W.push({v:[[-.85,.15,0],[-1.32,.18,0],[-1.45,.78,0],[-1.22,.76,0]],c:[220,30,60]});
+      let c=segCol[k];
+      if(k===2) c=GOLD;                                   // kapot oldidagi oltin halqa
+      if(k>=3 && k<=6 && (i===3||i===8)) c=GOLD;          // yon tomondagi oltin chaqmoq chizig'i
+      if(k>=4 && k<=6 && (i===5||i===6)) c=[150,14,28];   // pastki qorin — to'qroq
+      F.push({v:[R[k][i],R[k+1][i],R[k+1][j],R[k][j]],c,sp:c===GOLD?2:1}); }
+    F.push({v:R[R.length-1].slice().reverse(),c:BLACK});
+    // kabina: qoramtir shisha + oltin ramka
+    W.push({v:[[.62,.37,0],[.38,.58,-.17],[.0,.56,-.19],[-.24,.38,-.17],[-.24,.38,.17],[.0,.56,.19],[.38,.58,.17]],c:GLASS,sp:3,frame:1,bias:.04});
+    // past joylashgan qanotlar: qizil + oltin old qirra + oltin uch
+    for(const sg of [1,-1]){
+      W.push({v:[[.5,-.2,.2*sg],[-.32,-.2,.2*sg],[-.44,-.1,1.6*sg],[-.12,-.1,1.6*sg]],c:RED,sp:4});
+      W.push({v:[[.5,-.198,.2*sg],[.4,-.196,.2*sg],[-.1,-.108,1.42*sg],[-.04,-.11,1.42*sg]],c:GOLD,sp:2,bias:.02});
+      W.push({v:[[-.04,-.11,1.42*sg],[-.41,-.11,1.42*sg],[-.45,-.1,1.64*sg],[-.12,-.1,1.64*sg]],c:GOLD,sp:2,bias:.02});
+      // dum stabilizatori
+      W.push({v:[[-.98,.06,.05*sg],[-1.32,.08,.05*sg],[-1.44,.11,.72*sg],[-1.2,.11,.72*sg]],c:RED,sp:4});
+      W.push({v:[[-1.2,.11,.72*sg],[-1.44,.11,.72*sg],[-1.42,.11,.6*sg],[-1.18,.11,.6*sg]],c:GOLD,sp:2,bias:.02});
+    }
+    // vertikal dum: qora, oltin hoshiya, ikkala tomonda oltin toj
+    const fin=[[-.82,.16,0],[-1.36,.18,0],[-1.5,.86,0],[-1.2,.86,0]];
+    W.push({v:fin,c:BLACK,sp:1,edge:GOLD});
+    const crown=(cx,cy,sz,z,n)=>({v:[[cx-sz,cy-sz*.55,z],[cx+sz,cy-sz*.55,z],[cx+sz*1.1,cy+sz*.6,z],[cx+sz*.5,cy+sz*.05,z],[cx,cy+sz*.75,z],[cx-sz*.5,cy+sz*.05,z],[cx-sz*1.1,cy+sz*.6,z]],
+      c:GOLD,sp:2,n:[0,0,n],bias:.08});
+    for(const sg of [1,-1]){
+      W.push(crown(-1.24,.5,.13,.012*sg,sg));
+      // korpus yonidagi qora panel + toj
+      W.push({v:[[.6,-.12,.425*sg],[1.14,-.12,.43*sg],[1.14,.19,.425*sg],[.6,.19,.415*sg]],c:BLACK,sp:1,n:[0,0,sg],bias:.05,edge:GOLD});
+      W.push(crown(.87,.04,.14,.44*sg,sg));
+    }
     return {F,W};
   })();
   const LIGHT=(()=>{ const l=[-.35,.75,.55], n=Math.hypot(...l); return l.map(x=>x/n); })();
@@ -19082,50 +19098,64 @@ function initCrash(){
     c=Math.cos(tilt); s=Math.sin(tilt); t=y*c-z*s; z=y*s+z*c; y=t;          // kamera biroz yuqoridan
     return [x,y,z];
   }
+  const rgb=(c,a)=>'rgba('+c[0]+','+c[1]+','+c[2]+','+(a==null?1:a)+')';
   function drawPlane(x,y,ang,s,roll){
     roll=roll||0; const now=performance.now();
-    const pitch=-ang, yaw=0.5, tilt=0.32, D=6;
+    const pitch=-ang, yaw=0.5, tilt=0.32, D=6, R3=v=>rot(v,roll,pitch,yaw,tilt);
     const proj=p=>{ const f=D/(D-p[2]); return [x+p[0]*s*f, y-p[1]*s*f, p[2]]; };
     const polys=[];
-    const add=(f,two)=>{
-      const vv=f.v.map(v=>rot(v,roll,pitch,yaw,tilt));
-      const a=vv[0],b=vv[1],c=vv[2];
-      let n=[(b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),(b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])];
+    const add=(f,closed)=>{
+      const vv=f.v.map(R3), pp=vv.map(proj);
+      let n;
+      if(f.n){ n=R3(f.n); if(n[2]<=0.02) return; }      // bir tomonlama bezak (toj/panel)
+      else { const a=vv[0],b=vv[1],c=vv[2];
+        n=[(b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),(b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])]; }
       const nl=Math.hypot(...n)||1; n=n.map(q=>q/nl);
-      const pp=vv.map(proj);
-      if(!two){ // fuselaj: ekranda teskari bo'lsa — orqa yuza
-        let ar=0; for(let i=0;i<pp.length;i++){ const p1=pp[i],p2=pp[(i+1)%pp.length]; ar+=p1[0]*p2[1]-p2[0]*p1[1]; }
-        if(ar>0) return; }
-      let d=n[0]*LIGHT[0]+n[1]*LIGHT[1]+n[2]*LIGHT[2]; if(two) d=Math.abs(d);
-      const lum=.32+.78*Math.max(0,d), spec=f.sp?Math.pow(Math.max(0,d),f.sp>1?6:14)*(f.sp>1?120:150):0;
-      const col=f.c.map(q=>Math.min(255,Math.round(q*lum+spec)));
-      polys.push({pp,z:vv.reduce((m,v)=>m+v[2],0)/vv.length,col,glass:f.glass});
+      if(closed){ let ar=0; for(let i=0;i<pp.length;i++){ const p1=pp[i],p2=pp[(i+1)%pp.length]; ar+=p1[0]*p2[1]-p2[0]*p1[1]; } if(ar>0) return; }
+      let d=n[0]*LIGHT[0]+n[1]*LIGHT[1]+n[2]*LIGHT[2]; if(!closed) d=Math.abs(d);
+      const lum=Math.max(f.c===GOLD?.62:0,(f.sp===4?.28+.6*Math.max(0,d):.3+.8*Math.max(0,d)));
+      const spec=f.sp===4?Math.pow(Math.max(0,d),30)*60:f.sp===3?Math.pow(Math.max(0,d),4)*160:f.sp===2?Math.pow(Math.max(0,d),5)*110:f.sp?Math.pow(Math.max(0,d),18)*120:0;
+      polys.push({pp,z:vv.reduce((m,v)=>m+v[2],0)/vv.length+(f.bias||0),col:f.c.map(q=>Math.min(255,Math.round(q*lum+spec))),f});
     };
-    P3.F.forEach(f=>add(f,false)); P3.W.forEach(f=>add(f,true));
+    P3.F.forEach(f=>add(f,true)); P3.W.forEach(f=>add(f,false));
     polys.sort((a,b)=>a.z-b.z);
-    // pastdan yumshoq neon nur
-    const gl=ctx.createRadialGradient(x,y,0,x,y,s*2.2); gl.addColorStop(0,'rgba(255,60,100,.35)'); gl.addColorStop(1,'rgba(255,60,100,0)');
-    ctx.fillStyle=gl; ctx.beginPath(); ctx.arc(x,y,s*2.2,0,7); ctx.fill();
-    // dvigatel alangasi (orqada)
-    const tail=proj(rot([-1.3,.09,0],roll,pitch,yaw,tilt)), back=proj(rot([-2.3-.4*Math.sin(now/45),.09,0],roll,pitch,yaw,tilt));
-    const fl=ctx.createLinearGradient(back[0],back[1],tail[0],tail[1]); fl.addColorStop(0,'rgba(255,170,40,0)'); fl.addColorStop(1,'rgba(255,220,90,.95)');
-    ctx.strokeStyle=fl; ctx.lineCap='round'; ctx.lineWidth=s*.22; ctx.beginPath(); ctx.moveTo(tail[0],tail[1]); ctx.lineTo(back[0],back[1]); ctx.stroke();
+    // iliq oltin nur
+    const gl=ctx.createRadialGradient(x,y,0,x,y,s*2.4); gl.addColorStop(0,'rgba(255,150,40,.32)'); gl.addColorStop(1,'rgba(255,120,40,0)');
+    ctx.fillStyle=gl; ctx.beginPath(); ctx.arc(x,y,s*2.4,0,7); ctx.fill();
+    // olovli iz (dumdan orqaga)
+    const tail=proj(R3([-1.35,.1,0])), fk=Math.sin(now/45);
+    for(const [len,w,c0] of [[2.6+.4*fk,.34,'rgba(255,90,20,'],[2.0+.3*fk,.2,'rgba(255,170,40,'],[1.3+.2*fk,.09,'rgba(255,245,190,']]){
+      const back=proj(R3([-1.35-len,.1,0]));
+      const g=ctx.createLinearGradient(back[0],back[1],tail[0],tail[1]); g.addColorStop(0,c0+'0)'); g.addColorStop(1,c0+'.9)');
+      ctx.strokeStyle=g; ctx.lineCap='round'; ctx.lineWidth=s*w; ctx.beginPath(); ctx.moveTo(tail[0],tail[1]); ctx.lineTo(back[0],back[1]); ctx.stroke(); }
     for(const p of polys){
       ctx.beginPath(); ctx.moveTo(p.pp[0][0],p.pp[0][1]); for(let i=1;i<p.pp.length;i++) ctx.lineTo(p.pp[i][0],p.pp[i][1]); ctx.closePath();
-      ctx.fillStyle='rgba('+p.col[0]+','+p.col[1]+','+p.col[2]+','+(p.glass?.85:1)+')'; ctx.fill();
-      ctx.strokeStyle='rgba('+p.col[0]+','+p.col[1]+','+p.col[2]+',.9)'; ctx.lineWidth=.6; ctx.stroke();
+      ctx.fillStyle=rgb(p.col); ctx.fill();
+      if(p.f.frame||p.f.edge){ ctx.strokeStyle=rgb(GOLD); ctx.lineWidth=Math.max(1,s*.06); ctx.lineJoin='round'; ctx.stroke(); }
+      else { ctx.strokeStyle=rgb(p.col,.9); ctx.lineWidth=.6; ctx.stroke(); }
+      if(p.f.frame){ // shisha yaltirashi
+        const a=p.pp[1],b=p.pp[2]; ctx.strokeStyle='rgba(200,230,255,.55)'; ctx.lineWidth=Math.max(1,s*.05);
+        ctx.beginPath(); ctx.moveTo(a[0]+(b[0]-a[0])*.2,a[1]+(b[1]-a[1])*.2+s*.06); ctx.lineTo(a[0]+(b[0]-a[0])*.7,a[1]+(b[1]-a[1])*.7+s*.06); ctx.stroke(); }
     }
-    // aylanuvchi parrak (burunda, 3D da qisqargan)
-    const hub=rot([1.5,0,0],roll,pitch,yaw,tilt), pa=now/22;
-    ctx.save(); const h=proj(hub);
-    for(let k=0;k<2;k++){ const a=pa+k*Math.PI;
-      const tip=proj(rot([1.5,Math.cos(a)*.75,Math.sin(a)*.75],roll,pitch,yaw,tilt));
-      ctx.strokeStyle='rgba(40,30,40,.75)'; ctx.lineWidth=s*.09; ctx.lineCap='round';
-      ctx.beginPath(); ctx.moveTo(h[0],h[1]); ctx.lineTo(tip[0],tip[1]); ctx.stroke(); }
-    const r1=proj(rot([1.5,.75,0],roll,pitch,yaw,tilt)), r2=proj(rot([1.5,0,.75],roll,pitch,yaw,tilt));
-    ctx.fillStyle='rgba(255,255,255,.13)'; ctx.beginPath();
-    ctx.ellipse(h[0],h[1],Math.max(2,Math.hypot(r2[0]-h[0],r2[1]-h[1])),Math.max(2,Math.hypot(r1[0]-h[0],r1[1]-h[1])),Math.atan2(r1[1]-h[1],r1[0]-h[0])-Math.PI/2,0,7); ctx.fill();
-    ctx.fillStyle='#ffd24a'; ctx.beginPath(); ctx.arc(h[0],h[1],s*.1,0,7); ctx.fill();
+    // pervanel: oltin aylanish diski + 3 ta qora parrak (oltin uchli) + oltin konus
+    const h=proj(R3([1.66,0,0])), pa=now/18, PR=1.0;
+    const r1=proj(R3([1.66,PR,0])), r2=proj(R3([1.66,0,PR]));
+    const ea=Math.hypot(r2[0]-h[0],r2[1]-h[1]), eb=Math.hypot(r1[0]-h[0],r1[1]-h[1]), et=Math.atan2(r1[1]-h[1],r1[0]-h[0])-Math.PI/2;
+    ctx.save();
+    const dg=ctx.createRadialGradient(h[0],h[1],0,h[0],h[1],Math.max(ea,eb));
+    dg.addColorStop(0,'rgba(255,215,110,.05)'); dg.addColorStop(.75,'rgba(255,200,80,.22)'); dg.addColorStop(1,'rgba(255,220,120,.45)');
+    ctx.fillStyle=dg; ctx.beginPath(); ctx.ellipse(h[0],h[1],Math.max(2,ea),Math.max(2,eb),et,0,7); ctx.fill();
+    ctx.strokeStyle='rgba(255,215,120,.5)'; ctx.lineWidth=1;
+    for(const k of [.55,.8]){ ctx.beginPath(); ctx.ellipse(h[0],h[1],Math.max(1,ea*k),Math.max(1,eb*k),et,0,7); ctx.stroke(); }
+    for(let k=0;k<3;k++){ const a=pa+k*Math.PI*2/3;
+      const mid=proj(R3([1.66,Math.cos(a)*PR*.78,Math.sin(a)*PR*.78])), tp=proj(R3([1.66,Math.cos(a)*PR,Math.sin(a)*PR]));
+      ctx.lineCap='round'; ctx.strokeStyle='rgba(20,16,20,.8)'; ctx.lineWidth=s*.13;
+      ctx.beginPath(); ctx.moveTo(h[0],h[1]); ctx.lineTo(mid[0],mid[1]); ctx.stroke();
+      ctx.strokeStyle='rgba(255,200,70,.9)'; ctx.beginPath(); ctx.moveTo(mid[0],mid[1]); ctx.lineTo(tp[0],tp[1]); ctx.stroke(); }
+    const tipP=proj(R3([2.0,0,0])), sg=ctx.createRadialGradient(h[0]-s*.06,h[1]-s*.08,0,h[0],h[1],s*.24);
+    sg.addColorStop(0,'#fff6cf'); sg.addColorStop(.5,'#ffc93a'); sg.addColorStop(1,'#8a5a0c');
+    ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(h[0],h[1],s*.2,0,7); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(h[0]+(tipP[1]-h[1])*.45,h[1]-(tipP[0]-h[0])*.45); ctx.lineTo(tipP[0],tipP[1]); ctx.lineTo(h[0]-(tipP[1]-h[1])*.45,h[1]+(tipP[0]-h[0])*.45); ctx.closePath(); ctx.fill();
     ctx.restore();
   }
   // 3D animatsiya: chayqalish (krен) + har 7 s da "bochka" aylanishi
@@ -19153,7 +19183,7 @@ function initCrash(){
   function particles(dt){
     for(let i=puffs.length-1;i>=0;i--){ const p=puffs[i]; p.life-=dt*1.4; p.x-=dt*40*dpr; p.r+=dt*10*dpr;
       if(p.life<=0){ puffs.splice(i,1); continue; }
-      ctx.fillStyle='rgba(255,190,210,'+(p.life*.25).toFixed(3)+')'; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,7); ctx.fill(); }
+      ctx.fillStyle='rgba(255,'+Math.round(120+p.life*100)+',40,'+(p.life*.35).toFixed(3)+')'; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,7); ctx.fill(); }
     for(let i=sparks.length-1;i>=0;i--){ const p=sparks[i]; p.life-=dt*1.1; p.x+=p.vx; p.y+=p.vy; p.vy+=0.05*dpr; p.vx*=.98;
       if(p.life<=0){ sparks.splice(i,1); continue; }
       ctx.globalAlpha=p.life; ctx.fillStyle=p.c; ctx.beginPath(); ctx.arc(p.x,p.y,2.2*dpr*p.life+0.5,0,7); ctx.fill(); ctx.globalAlpha=1; }

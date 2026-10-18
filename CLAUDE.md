@@ -131,6 +131,6 @@
 - 👑 Web app qirollik oltin mavzusi: WEBAPP_HTML `<style>` oxiridagi "QIROLLIK OLTIN MAVZUSI" bloki (`--g-metal`/`--g-text`/`--g-border`,
   Cinzel shrifti, yaltiroq kartalar/tugmalar, `.spark` uchqunlar — `pointerdown` listener). `#s-crash` eski neon o'zgaruvchilarini qayta
   belgilaydi — Crash dizayni o'zgarmaydi. Pastki tablar kattaroq, ikon + nom (`.ti`/`.tl`).
-- Crash samolyoti 3D: `P3` mesh (fuselaj halqalari + qanot/dum yuzalari), `rot()` krен/pitch/yaw/tilt, perspektiva, flat shading,
+- Crash samolyoti 3D ("Royal" — foydalanuvchi rasmi asosida: qizil korpus, oltin kapot halqasi/konus/chiziq, qora dum va yon panelda oltin toj, oltin ramkali kabina, 3 parrakli pervanel + oltin disk, olovli iz): `P3` mesh (fuselaj halqalari + qanot/dum yuzalari, `n` — bir tomonlama bezaklar), `rot()` krен/pitch/yaw/tilt, perspektiva, flat shading,
   aylanuvchi parrak; `flyRoll` — chayqalish + har 7 s da bochka aylanishi; portlashda aylanib uchib ketadi.
 - Web Baqa: tuzoqlar `_web_frog_traps` (SystemRandom, har o'yinda yangi), `WEB_FROG_EXTRA` (8%) — qatorga yashirin qo'shimcha tuzoq.

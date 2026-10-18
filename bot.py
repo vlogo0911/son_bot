@@ -4334,13 +4334,27 @@ async def cmd_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not chat or not msg:
         return
+    is_owner = update.effective_user and update.effective_user.id in CAREER_OWNER_IDS
     if not WEBAPP_URL:
-        await msg.reply_text("🌐 Web app hali sozlanmagan (domen yo‘q). Bot egasi /panel → 🌐 Web App orqali sozlaydi.")
+        extra = ("\n\n🛠 <b>Egalarga:</b> Railway → Variables ga <code>WEBAPP_URL=https://&lt;domeningiz&gt;</code> "
+                 "qo‘shing (yoki <code>RAILWAY_PUBLIC_DOMAIN</code>) va qayta deploy qiling.") if is_owner else ""
+        await msg.reply_text("🌐 Web app hali sozlanmagan (domen yo‘q)." + extra)
         return
     url = WEBAPP_URL + "/app"
+    if not url.startswith("https://"):
+        await msg.reply_text(
+            f"⚠️ Web app manzili HTTPS bo‘lishi kerak. Hozirgi: <code>{escape(url)}</code>\n"
+            "Egalar: <code>WEBAPP_URL=https://...</code> qilib tuzating." if is_owner
+            else "⚠️ Web app manzili noto‘g‘ri sozlangan.")
+        return
     if chat.type == ChatType.PRIVATE:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Ilovani ochish", web_app=WebAppInfo(url))]])
-        await msg.reply_text("🎮 <b>Empire Stats</b> — ilovani oching 👇", reply_markup=kb)
+        try:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Ilovani ochish", web_app=WebAppInfo(url))]])
+            await msg.reply_text("🎮 <b>Empire Stats</b> — ilovani oching 👇", reply_markup=kb)
+        except BadRequest as e:
+            await msg.reply_text(
+                f"⚠️ Tugma ochilmadi: {escape(str(e))}\n🔗 Manzil: <code>{escape(url)}</code>" if is_owner
+                else "⚠️ Ilovani ochib bo‘lmadi. Egaga xabar bering.")
     else:
         try:
             bot_un = (await context.bot.get_me()).username
@@ -17421,12 +17435,51 @@ async def webapp_payload(user_id):
             ORDER BY w.money DESC LIMIT 15""",
         owners,
     ).fetchall()
+    # 🏦 Bank: faol kredit va omonat
+    def _bank_name(bid):
+        b = bank_get(bid)
+        return b["name"] if b else "Bank"
+    bank = {"loan": None, "deposit": None}
+    lo = active_loan(user_id)
+    if lo:
+        bank["loan"] = {"amount": fmt_money(lo[1]), "days": lo[2], "due": fmt_money(lo[3]),
+                        "due_at": tashkent_dt(lo[4]) if lo[4] else "—", "bank": _bank_name(lo[5])}
+    dep = active_deposit(user_id)
+    if dep:
+        bank["deposit"] = {"amount": fmt_money(dep[1]), "days": dep[2], "payout": fmt_money(dep[3]),
+                           "matures_at": tashkent_dt(dep[4]) if dep[4] else "—", "bank": _bank_name(dep[5])}
+
+    # 📈 Birja: ushlab turilgan aktivlar
+    birja_rows = []
+    for asset, qty, cost in c.execute(
+            "SELECT asset, qty, cost FROM birja_holdings WHERE user_id=? AND qty>0", (user_id,)):
+        price = (BIRJA_PRICES.get(asset) or {"price": 0.0})["price"]
+        value = qty * price
+        birja_rows.append({
+            "asset": asset, "qty": round(qty, 6), "price": round(price, 2),
+            "value": round(value, 2), "value_fmt": fmt_money(round(value)),
+            "profit": round(value - cost, 2),
+        })
+
+    # 👶 Farzandlar
+    _stage_uz = {"baby": "👶 Chaqaloq", "kinder": "🧒 Bog‘cha", "school": "🎒 Maktab",
+                 "college": "🏫 Kollej", "uni": "🎓 Universitet", "work": "💼 Ishchi"}
+    kid_list = []
+    for kid in kids_of(user_id):
+        st = kid_stage(kid)
+        kid_list.append({
+            "name": kid["child_name"] or "—", "age": kid["age"], "stage": _stage_uz.get(st, st),
+            "working": bool(kid["working"]),
+            "hunger": round(kid["hunger"]), "happy": round(kid["happy"]),
+        })
+
     data = {
         "name": name, "username": username, "id": user_id,
         "money": money, "money_fmt": fmt_money(money),
         "points": points, "games": games, "wins": wins, "losses": losses, "draws": draws,
-        "level": level_name(0, points), "rank": rank, "kids": len(kids_of(user_id)),
-        "loan": bool(active_loan(user_id)), "birja": round(birja_val, 2),
+        "level": level_name(0, points), "rank": rank, "kids": len(kid_list),
+        "loan": bool(lo), "birja": round(birja_val, 2),
+        "bank": bank, "birja_list": birja_rows, "kids_list": kid_list,
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -17578,6 +17631,52 @@ function render(res){
   r.appendChild(list);
   app.appendChild(r);
 
+  // BANK
+  const bk=$('<div class="sec" id="s-bank"></div>');
+  bk.appendChild($('<h2>🏦 Bank</h2>'));
+  if(d.bank && d.bank.loan){
+    const l=d.bank.loan;
+    bk.appendChild($('<div class="card full"><div class="lbl">💳 Faol kredit · '+esc(l.bank)+'</div>'+
+      '<div class="val mag">'+esc(l.due)+'$</div>'+
+      '<div class="hsub">Olingan: '+esc(l.amount)+'$ · '+esc(l.days)+' kun · muddat: '+esc(l.due_at)+'</div></div>'));
+  }
+  if(d.bank && d.bank.deposit){
+    const s=d.bank.deposit;
+    bk.appendChild($('<div class="card full" style="margin-top:12px"><div class="lbl">💰 Omonat · '+esc(s.bank)+'</div>'+
+      '<div class="val lime">'+esc(s.payout)+'$</div>'+
+      '<div class="hsub">Qo‘yilgan: '+esc(s.amount)+'$ · '+esc(s.days)+' kun · yechish: '+esc(s.matures_at)+'</div></div>'));
+  }
+  if((!d.bank||(!d.bank.loan&&!d.bank.deposit)))
+    bk.appendChild($('<div class="card full"><div class="center">Faol kredit yoki omonat yo‘q.<br><span class="hsub">Botda /profil → 🏦 Banklar</span></div></div>'));
+  app.appendChild(bk);
+
+  // BIRJA
+  const bx=$('<div class="sec" id="s-birja"></div>');
+  bx.appendChild($('<h2>📈 Birja</h2>'));
+  const bl=$('<div class="card full"></div>');
+  (d.birja_list||[]).forEach(it=>{
+    const up=it.profit>=0;
+    bl.appendChild($('<div class="row"><div><b>'+esc(it.asset)+'</b> <span class="hsub">'+esc(it.qty)+'</span></div>'+
+      '<div style="text-align:right"><b class="val neon" style="font-size:15px">'+esc(it.value_fmt)+'$</b>'+
+      '<div class="hsub" style="color:'+(up?'var(--lime)':'#ff6b6b')+'">'+(up?'▲ +':'▼ ')+esc(it.profit)+'$</div></div></div>'));
+  });
+  if(!(d.birja_list||[]).length) bl.appendChild($('<div class="center">Aktivlar yo‘q.<br><span class="hsub">Botda /profil → 📈 Birja</span></div>'));
+  bx.appendChild(bl);
+  app.appendChild(bx);
+
+  // FARZAND
+  const fz=$('<div class="sec" id="s-farzand"></div>');
+  fz.appendChild($('<h2>👶 Farzandlar</h2>'));
+  const fl=$('<div class="card full"></div>');
+  (d.kids_list||[]).forEach(k=>{
+    fl.appendChild($('<div class="row"><div><b>'+esc(k.name)+'</b> <span class="hsub">'+esc(k.age)+' yosh</span>'+
+      '<div class="hsub">'+esc(k.stage)+(k.working?' · 💼':'')+'</div></div>'+
+      '<div style="text-align:right" class="hsub">🍔 '+esc(k.hunger)+'% · 😊 '+esc(k.happy)+'%</div></div>'));
+  });
+  if(!(d.kids_list||[]).length) fl.appendChild($('<div class="center">Farzandlar yo‘q.<br><span class="hsub">Botda /oila</span></div>'));
+  fz.appendChild(fl);
+  app.appendChild(fz);
+
   // OWNER
   if(d.is_owner && d.owner){
     const o=$('<div class="sec" id="s-owner"></div>');
@@ -17594,8 +17693,8 @@ function render(res){
 
   // TABS
   const tabs=$('<div class="tabs"></div>');
-  const defs=[['profil','👤 Profil'],['reyting','💎 Reyting']];
-  if(d.is_owner&&d.owner) defs.push(['owner','👑 Owner']);
+  const defs=[['profil','👤'],['reyting','💎'],['bank','🏦'],['birja','📈'],['farzand','👶']];
+  if(d.is_owner&&d.owner) defs.push(['owner','👑']);
   defs.forEach(([k,t])=>{
     const el=$('<div class="tab" data-k="'+k+'">'+t+'</div>');
     el.onclick=()=>{setTab(k);};

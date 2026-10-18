@@ -1,6 +1,6 @@
 # son_bot (@empire_statsbot)
 
-- Asosiy fayl: `bot.py` (Railway `Procfile`: `worker: python bot.py`). Barcha o'zgarishlar shu faylda qilinadi.
+- Asosiy fayl: `bot.py` (Railway `Procfile`: `web: python bot.py` — web app/almashuv HTTP serveri public domen orqali ishlashi uchun `web` jarayon). Barcha o'zgarishlar shu faylda qilinadi.
   Foydalanuvchi yuklagan `probot.zip` ichidagi `bot.py` shu repodagi bilan bir xil; zip'dagi
   `*.backup*` / `*.before_*` fayllar faqat eski zaxira nusxalar.
 - Railway shu repodan avtomatik deploy qiladi (GitHub commit statuslarida ko'rinadi).
@@ -96,3 +96,5 @@
   (`cmd_app`, shaxsiy chatda `WebAppInfo` tugma) + `post_init` da `set_chat_menu_button(MenuButtonWebApp)`. Yoqish/o'chirish:
   `webapp_config` jadvali (`all`, `owner` flaglari, default 1), owner panel → 🌐 Web App (`panel:webapp*`, `panel_webapp_view/callback`):
   hamma uchun va ownerlar uchun alohida yoqish/o'chirish. Faqat bot egalari.
+  Web app bo'limlari: Profil / Reyting (TOP-15) / Bank (faol kredit+omonat) / Birja (aktivlar+foyda) / Farzandlar / Owner.
+  `webapp_payload` da `bank`, `birja_list`, `kids_list` ham bor.

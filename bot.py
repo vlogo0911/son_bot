@@ -2022,6 +2022,7 @@ def panel_keyboard(user_id=None):
         rows.append([InlineKeyboardButton("🏦 Banklar boshqaruvi", callback_data="panel:banks")])
         rows.append([InlineKeyboardButton("💱 Pul almashuvi", callback_data="panel:exch")])
         rows.append([InlineKeyboardButton("🔢 Ko‘rsatkichlarni tahrirlash", callback_data="panel:stats_edit")])
+        rows.append([InlineKeyboardButton("📢 Majburiy obuna", callback_data="panel:fsub")])
         rows.append([InlineKeyboardButton("👶 Farzand o‘chirish", callback_data="panel:kiddel")])
         rows.append([InlineKeyboardButton("🎰 Crash sozlamalari", callback_data="panel:crash")])
         rows.append([InlineKeyboardButton("✨ Premium emoji", callback_data="panel:pemoji")])
@@ -2509,6 +2510,11 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "panel:kiddel" or query.data.startswith("panel:kiddel_"):
         # panel_permission_for_callback: "kiddel*" PANEL_PERMISSIONS'da yo'q → faqat bot egalari.
         await panel_kid_callback(query, context)
+        return
+
+    if query.data == "panel:fsub" or query.data.startswith("panel:fsub_"):
+        # "fsub*" PANEL_PERMISSIONS'da yo'q → faqat bot egalari.
+        await panel_fsub_callback(query, context)
         return
 
     if query.data == "panel:crash" or query.data.startswith("panel:crash:"):
@@ -4366,6 +4372,11 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer(t(chat_id, "use_group"), show_alert=True)
         return
 
+    # Majburiy obuna: o'yin boshlash/kirish uchun kanalga a'zo bo'lish shart.
+    if kind in ("number", "rsp", "xo", "memory", "crash", "croc", "frog", "casino"):
+        if await fsub_block_cb(q, context):
+            return
+
     # Qurbaqa GAMES'ni band qilmaydi — guruhda boshqa o'yin ketayotgan bo'lsa ham ochiladi.
     if kind == "frog":
         await q.answer()
@@ -4840,6 +4851,9 @@ async def _cb_memory_locked(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if len(game["names"]) >= 2:
             await q.answer(memory_t(chat_id, "full"), show_alert=True)
+            return
+
+        if await fsub_block_cb(q, context):
             return
 
         save_user(user)
@@ -5402,6 +5416,9 @@ async def _frog_action(q, context, key, game, parts):
             return
         if game["player"] is not None:
             await q.answer(frog_t(chat, "not_yours"), show_alert=True)
+            return
+        if await fsub_block_cb(q, context):
+            frog_close(key, game)   # lobby ochiq qolmasin
             return
         if wallet_balance(user.id) < FROG_MIN_BET:
             await q.answer(frog_t(chat, "no_funds", min=FROG_MIN_BET), show_alert=True)
@@ -6062,6 +6079,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not MIN_NUMBER <= guess <= MAX_NUMBER:
         return
 
+    if await fsub_block_msg(update, context):
+        return
+
     save_user(user)
 
     if guess in game["tried"]:
@@ -6180,6 +6200,9 @@ async def cb_rsp_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if user.id in game["names"]:
         await q.answer(t(chat_id, "rsp_already"), show_alert=True)
+        return
+
+    if await fsub_block_cb(q, context):
         return
 
     save_user(user)
@@ -6330,6 +6353,9 @@ async def cb_xo_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if user.id == game["owner"]:
         await q.answer(t(chat_id, "xo_own"), show_alert=True)
+        return
+
+    if await fsub_block_cb(q, context):
         return
 
     save_user(user)
@@ -7441,6 +7467,8 @@ async def crash_action(q, context, action):
         if wallet_balance(user.id) < CRASH_MIN_BET:
             await q.answer(cr_t(chat_id, "no_funds", min=CRASH_MIN_BET), show_alert=True)
             return
+        if await fsub_block_cb(q, context):
+            return
         save_user(user)
         game["players"][user.id] = {
             "name": uname(user), "bet": CRASH_MIN_BET, "cash": None, "paid": False, "refunded": False,
@@ -8487,6 +8515,9 @@ async def croc_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, game)
     if not croc_answer_matches(msg.text, game["word"], lang):
         return
 
+    if await fsub_block_msg(update, context):
+        return
+
     # Keyingi xabar bilan poyga bo'lmasligi uchun avval yakunlaymiz.
     game["finished"] = True
     save_user(user)
@@ -9503,6 +9534,10 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         await panel_kid_handle_text(update, context)
         return
 
+    if user.id in CAREER_OWNER_IDS and context.user_data.get("panel_fsub_state") == "waiting_channel":
+        await panel_fsub_text(update, context)
+        return
+
     if user.id in CAREER_OWNER_IDS and context.user_data.get("pemoji_state"):
         if await pemoji_handle_text(update, context):
             return
@@ -10011,6 +10046,10 @@ async def cb_inline_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     owner_id = int(owner_text)
     key = game_key(q)
     user = q.from_user
+
+    # Majburiy obuna: inline o'yinlarda ham a'zolik tekshiriladi.
+    if await fsub_block_cb(q, context):
+        return
 
     if key not in LANG_CACHE:
         set_inline_lang(key, lang)
@@ -16174,6 +16213,354 @@ async def panel_stats_text(update, context):
     await msg.reply_text("✅ Saqlandi.\n\n" + text, reply_markup=kb)
 
 
+# ── 📢 Majburiy obuna (force subscribe) ──
+# Owner panel orqali kanal @username bilan ulanadi. Obuna bo'lmagan a'zo o'yin o'ynay olmaydi.
+# Bot kanalda admin bo'lishi shart — aks holda a'zolikni tekshira olmaydi (bunday holatda fail-open:
+# hamma uchun bloklab qo'ymaslik uchun ruxsat beriladi).
+
+_FSUB_CACHE: dict[int, float] = {}   # user_id -> obuna tasdiqlangan "muddat" (epoch)
+FSUB_CACHE_TTL = 300                  # ijobiy natijani 5 daqiqa eslab turamiz
+
+FSUB_TEXT = {
+    "uz": {
+        "alert": "📢 O‘ynash uchun avval kanalga obuna bo‘ling!",
+        "prompt": ("📢 <b>Majburiy obuna</b>\n\n"
+                   "O‘yinlarni o‘ynash uchun avval kanalimizga obuna bo‘ling:\n{ch}\n\n"
+                   "Obuna bo‘lgach, «✅ Tekshirish» tugmasini bosing."),
+        "btn_join": "📢 Kanalga obuna bo‘lish",
+        "btn_check": "✅ Tekshirish",
+        "ok": "✅ Obuna tasdiqlandi! Endi o‘ynashingiz mumkin.",
+        "ok_msg": "✅ Obuna tasdiqlandi! Endi o‘yinlarni o‘ynashingiz mumkin.",
+        "still": "❌ Hali obuna bo‘lmagansiz. Obuna bo‘lib, qayta tekshiring.",
+    },
+    "eng": {
+        "alert": "📢 Subscribe to the channel first to play!",
+        "prompt": ("📢 <b>Subscription required</b>\n\n"
+                   "To play the games, first subscribe to our channel:\n{ch}\n\n"
+                   "After subscribing, tap «✅ Check»."),
+        "btn_join": "📢 Subscribe to channel",
+        "btn_check": "✅ Check",
+        "ok": "✅ Subscription confirmed! You can play now.",
+        "ok_msg": "✅ Subscription confirmed! You can play the games now.",
+        "still": "❌ You are not subscribed yet. Subscribe and check again.",
+    },
+    "ru": {
+        "alert": "📢 Сначала подпишитесь на канал, чтобы играть!",
+        "prompt": ("📢 <b>Обязательная подписка</b>\n\n"
+                   "Чтобы играть, сначала подпишитесь на наш канал:\n{ch}\n\n"
+                   "После подписки нажмите «✅ Проверить»."),
+        "btn_join": "📢 Подписаться на канал",
+        "btn_check": "✅ Проверить",
+        "ok": "✅ Подписка подтверждена! Теперь можно играть.",
+        "ok_msg": "✅ Подписка подтверждена! Теперь вы можете играть.",
+        "still": "❌ Вы ещё не подписаны. Подпишитесь и проверьте снова.",
+    },
+    "kz": {
+        "alert": "📢 Ойнау үшін алдымен арнаға жазылыңыз!",
+        "prompt": ("📢 <b>Міндетті жазылым</b>\n\n"
+                   "Ойындарды ойнау үшін алдымен арнамызға жазылыңыз:\n{ch}\n\n"
+                   "Жазылғаннан кейін «✅ Тексеру» түймесін басыңыз."),
+        "btn_join": "📢 Арнаға жазылу",
+        "btn_check": "✅ Тексеру",
+        "ok": "✅ Жазылым расталды! Енді ойнай аласыз.",
+        "ok_msg": "✅ Жазылым расталды! Енді ойындарды ойнай аласыз.",
+        "still": "❌ Сіз әлі жазылмағансыз. Жазылып, қайта тексеріңіз.",
+    },
+}
+
+
+def fsub_t(chat_id, key, **kw):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    d = FSUB_TEXT.get(lang) or FSUB_TEXT[DEFAULT_LANG]
+    s = d.get(key) or FSUB_TEXT[DEFAULT_LANG][key]
+    return s.format(**kw) if kw else s
+
+
+def init_forcesub():
+    with db() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS forcesub ("
+            "id INTEGER PRIMARY KEY CHECK (id = 1), "
+            "channel_id INTEGER, username TEXT, title TEXT, "
+            "enabled INTEGER NOT NULL DEFAULT 0)"
+        )
+
+
+def fsub_get():
+    row = db().execute(
+        "SELECT channel_id, username, title, enabled FROM forcesub WHERE id = 1"
+    ).fetchone()
+    if not row:
+        return None
+    return {"channel_id": row[0], "username": row[1], "title": row[2], "enabled": bool(row[3])}
+
+
+def fsub_set(**fields):
+    """forcesub yozuvini yangilaydi (bo'lmasa yaratadi)."""
+    cur = fsub_get() or {"channel_id": None, "username": None, "title": None, "enabled": False}
+    cur.update(fields)
+    with db() as c:
+        c.execute(
+            "INSERT INTO forcesub (id, channel_id, username, title, enabled) "
+            "VALUES (1, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "channel_id=excluded.channel_id, username=excluded.username, "
+            "title=excluded.title, enabled=excluded.enabled",
+            (cur["channel_id"], cur["username"], cur["title"], 1 if cur["enabled"] else 0),
+        )
+
+
+def fsub_clear():
+    with db() as c:
+        c.execute("DELETE FROM forcesub WHERE id = 1")
+
+
+def fsub_active():
+    """Majburiy obuna yoqilgan va kanal ulangan bo'lsa — config, aks holda None."""
+    cfg = fsub_get()
+    if cfg and cfg["enabled"] and cfg["channel_id"]:
+        return cfg
+    return None
+
+
+async def fsub_is_member(bot, user_id):
+    """Foydalanuvchi ulangan kanalga a'zomi? Majburiy obuna o'chiq bo'lsa — True.
+    Bot kanalni tekshira olmasa (admin emas / xato) — True (fail-open)."""
+    cfg = fsub_active()
+    if not cfg:
+        return True
+    if user_id in CAREER_OWNER_IDS:
+        return True
+    now = time.time()
+    if _FSUB_CACHE.get(user_id, 0) > now:
+        return True
+    try:
+        member = await bot.get_chat_member(cfg["channel_id"], user_id)
+    except TelegramError as e:
+        logger.warning("Majburiy obuna: %s uchun tekshirib bo'lmadi: %s", user_id, e)
+        return True
+    ok = member.status in (
+        ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER,
+    )
+    if ok:
+        _FSUB_CACHE[user_id] = now + FSUB_CACHE_TTL
+    else:
+        _FSUB_CACHE.pop(user_id, None)
+    return ok
+
+
+def fsub_prompt_kb(chat_id, cfg):
+    rows = []
+    if cfg.get("username"):
+        rows.append([InlineKeyboardButton(
+            fsub_t(chat_id, "btn_join"), url=f"https://t.me/{cfg['username']}")])
+    rows.append([InlineKeyboardButton(fsub_t(chat_id, "btn_check"), callback_data="fsub:check")])
+    return InlineKeyboardMarkup(rows)
+
+
+def fsub_channel_label(cfg):
+    if cfg.get("username"):
+        return "@" + cfg["username"]
+    return escape(cfg.get("title") or "kanal")
+
+
+async def fsub_block_cb(query, context):
+    """Callback-dan chaqiriladi. Obuna bo'lmasa — ogohlantiradi va True qaytaradi (to'xtatish kerak)."""
+    cfg = fsub_active()
+    if not cfg:
+        return False
+    user = query.from_user
+    if await fsub_is_member(context.bot, user.id):
+        return False
+    chat_id = query.message.chat.id if query.message else user.id
+    try:
+        await query.answer(fsub_t(chat_id, "alert"), show_alert=True)
+    except TelegramError:
+        pass
+    try:
+        await context.bot.send_message(
+            chat_id,
+            fsub_t(chat_id, "prompt", ch=fsub_channel_label(cfg)),
+            reply_markup=fsub_prompt_kb(chat_id, cfg),
+        )
+    except TelegramError:
+        pass
+    return True
+
+
+async def fsub_block_msg(update, context):
+    """Matnli (guruhdagi) o'yin javobidan chaqiriladi. Obuna bo'lmasa — True qaytaradi."""
+    cfg = fsub_active()
+    if not cfg:
+        return False
+    user = update.effective_user
+    if await fsub_is_member(context.bot, user.id):
+        return False
+    chat_id = update.effective_chat.id
+    try:
+        await update.effective_message.reply_text(
+            fsub_t(chat_id, "prompt", ch=fsub_channel_label(cfg)),
+            reply_markup=fsub_prompt_kb(chat_id, cfg),
+        )
+    except TelegramError:
+        pass
+    return True
+
+
+async def cb_fsub_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+    user = q.from_user
+    chat_id = q.message.chat.id if q.message else user.id
+    cfg = fsub_active()
+    if not cfg:
+        await q.answer()
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+        return
+    _FSUB_CACHE.pop(user.id, None)   # yangi tekshiruv
+    if await fsub_is_member(context.bot, user.id):
+        await q.answer(fsub_t(chat_id, "ok"), show_alert=True)
+        try:
+            await q.edit_message_text(fsub_t(chat_id, "ok_msg"))
+        except TelegramError:
+            pass
+    else:
+        await q.answer(fsub_t(chat_id, "still"), show_alert=True)
+
+
+# ── 👑 Owner panel: majburiy obuna sozlamalari ──
+
+PANEL_FSUB_CANCEL = InlineKeyboardMarkup([[
+    InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:fsub")
+]])
+
+
+def panel_fsub_view():
+    cfg = fsub_get()
+    lines = ["📢 <b>MAJBURIY OBUNA</b>", ""]
+    if cfg and cfg["channel_id"]:
+        on = "✅ yoqilgan" if cfg["enabled"] else "❌ o‘chiq"
+        ch = ("@" + cfg["username"]) if cfg["username"] else str(cfg["channel_id"])
+        lines.append(f"Kanal: <b>{escape(cfg['title'] or ch)}</b> ({ch})")
+        lines.append(f"Holat: <b>{on}</b>")
+        lines.append("")
+        lines.append("Obuna bo‘lmagan a’zolar o‘yin o‘ynay olmaydi.")
+        rows = [
+            [InlineKeyboardButton(
+                "🔴 O‘chirish" if cfg["enabled"] else "🟢 Yoqish",
+                callback_data="panel:fsub_toggle")],
+            [InlineKeyboardButton("♻️ Kanalni almashtirish", callback_data="panel:fsub_set")],
+            [InlineKeyboardButton("🗑 Kanalni uzish", callback_data="panel:fsub_del")],
+            [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
+        ]
+    else:
+        lines.append("Hali kanal ulanmagan.")
+        lines.append("")
+        lines.append("Kanal <b>@username</b> orqali ulanadi. Bot o‘sha kanalda <b>admin</b> bo‘lishi shart.")
+        rows = [
+            [InlineKeyboardButton("➕ Kanal ulash", callback_data="panel:fsub_set")],
+            [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
+        ]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def panel_fsub_callback(query, context):
+    data = query.data
+    if data == "panel:fsub":
+        context.user_data.pop("panel_fsub_state", None)
+        text, kb = panel_fsub_view()
+        try:
+            await query.edit_message_text(text, reply_markup=kb)
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+        return
+    if data == "panel:fsub_set":
+        context.user_data["panel_fsub_state"] = "waiting_channel"
+        await query.edit_message_text(
+            "📢 Kanal <b>@username</b> sini yuboring (masalan: <code>@mychannel</code>).\n\n"
+            "⚠️ Bot o‘sha kanalda <b>admin</b> bo‘lishi shart — aks holda obunani tekshira olmaydi.",
+            reply_markup=PANEL_FSUB_CANCEL,
+        )
+        return
+    if data == "panel:fsub_toggle":
+        cfg = fsub_get()
+        if not cfg or not cfg["channel_id"]:
+            await query.answer("Avval kanal ulang.", show_alert=True)
+            return
+        fsub_set(enabled=0 if cfg["enabled"] else 1)
+        _FSUB_CACHE.clear()
+        text, kb = panel_fsub_view()
+        await query.edit_message_text(text, reply_markup=kb)
+        return
+    if data == "panel:fsub_del":
+        fsub_clear()
+        _FSUB_CACHE.clear()
+        context.user_data.pop("panel_fsub_state", None)
+        text, kb = panel_fsub_view()
+        await query.edit_message_text("🗑 Kanal uzildi.\n\n" + text, reply_markup=kb)
+        return
+
+
+async def panel_fsub_text(update, context):
+    msg = update.effective_message
+    raw = (msg.text or "").strip()
+    # @username, t.me/username yoki oddiy username qabul qilamiz
+    name = raw
+    if "t.me/" in name:
+        name = name.split("t.me/", 1)[1]
+    name = name.lstrip("@").strip().strip("/").split("/")[0].split("?")[0]
+    if not re.fullmatch(r"[A-Za-z0-9_]{4,32}", name):
+        await msg.reply_text(
+            "❌ To‘g‘ri @username yuboring (masalan: <code>@mychannel</code>).",
+            reply_markup=PANEL_FSUB_CANCEL,
+        )
+        return
+    try:
+        chat_obj = await context.bot.get_chat("@" + name)
+    except TelegramError:
+        await msg.reply_text(
+            "❌ Kanal topilmadi. @username to‘g‘riligini va botni kanalga qo‘shganingizni tekshiring.",
+            reply_markup=PANEL_FSUB_CANCEL,
+        )
+        return
+    if chat_obj.type not in (ChatType.CHANNEL, ChatType.SUPERGROUP):
+        await msg.reply_text(
+            "❌ Bu kanal (yoki superguruh) emas. Faqat kanal/superguruh ulash mumkin.",
+            reply_markup=PANEL_FSUB_CANCEL,
+        )
+        return
+    # Bot o'sha kanalda admin ekanligini tekshiramiz
+    try:
+        me = await context.bot.get_chat_member(chat_obj.id, context.bot.id)
+        if me.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+            await msg.reply_text(
+                "⚠️ Bot bu kanalda admin emas. Avval botni kanalga admin qiling, keyin qayta urinib ko‘ring.",
+                reply_markup=PANEL_FSUB_CANCEL,
+            )
+            return
+    except TelegramError:
+        await msg.reply_text(
+            "⚠️ Botning kanaldagi holatini tekshirib bo‘lmadi. Botni kanalga admin qiling va qayta urinib ko‘ring.",
+            reply_markup=PANEL_FSUB_CANCEL,
+        )
+        return
+    fsub_set(
+        channel_id=chat_obj.id,
+        username=chat_obj.username or name,
+        title=chat_obj.title or "",
+        enabled=1,
+    )
+    _FSUB_CACHE.clear()
+    context.user_data.pop("panel_fsub_state", None)
+    text, kb = panel_fsub_view()
+    await msg.reply_text("✅ Kanal ulandi va majburiy obuna yoqildi.\n\n" + text, reply_markup=kb)
+
+
 # ── 👑 Owner panel: almashuv sozlamalari ──
 
 def panel_exchange_view():
@@ -16252,6 +16639,7 @@ def main():
     init_guard2()
     init_exchange()
     init_panel_overrides()
+    init_forcesub()
     load_crash_config()
 
     app = (
@@ -16331,6 +16719,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_settings, pattern=r"^gs:-?\d+:\w+$"))
     app.add_handler(CallbackQueryHandler(cb_admin, pattern=r"^ga:-?\d+:\d+(:\w+)?$"))
     app.add_handler(CallbackQueryHandler(cb_report, pattern=r"^rp:-?\d+:\d+:\d+:(del|mute|ban)$"))
+    app.add_handler(CallbackQueryHandler(cb_fsub_check, pattern=r"^fsub:check$"))
     app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash|memory):\d+:(uz|eng|ru|kz)$"))
     app.add_handler(InlineQueryHandler(secret_inline))
     app.add_handler(CallbackQueryHandler(cb_career, pattern=r"^career:"))

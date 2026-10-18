@@ -16736,7 +16736,7 @@ async def exchange_finalize_out(txid, uid):
             f"💱 <b>ALMASHUV (chiqdi)</b> · {escape(EXCHANGE_PARTNER_NAME)}\n{person_name(uid)}: −{gross}$ (hamkorga {net}$, txid {txid})")
         return True
     # Aniq rad (imzo/summа/o'chiq) — to'liq summani qaytaramiz.
-    if status in (400, 401, 403, 409, 503) and resp.get("error") != "starting":
+    if status in (400, 401, 403, 404, 409, 503) and resp.get("error") != "starting":
         with c:
             cur = c.execute("UPDATE exchange_txns SET status='failed' WHERE txid=? AND status='pending'", (txid,))
             if cur.rowcount == 1:

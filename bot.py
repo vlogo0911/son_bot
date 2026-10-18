@@ -28,6 +28,7 @@ from html import escape
 
 from telegram import (
     BotCommand,
+    BotCommandScopeAllGroupChats,
     ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -4318,8 +4319,12 @@ async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     msg = update.effective_message
-    if chat and msg:
-        await msg.reply_text(t(chat.id, "help"))
+    if not chat or not msg:
+        return
+    text = t(chat.id, "help")
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        text += "\n\n" + gh_t(chat.id, "admin_help")
+    await msg.reply_text(text)
 
 
 # ───────────────────────────── Til tanlash ─────────────────────────────
@@ -6061,6 +6066,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = msg.chat_id
+
+    # Group Help filtrlari: admin belgilagan so'zga avtomatik javob.
+    reply = gh_filter_match(chat_id, msg.text)
+    if reply:
+        try:
+            await msg.reply_text(reply)
+        except TelegramError:
+            pass
+        return
+
     game = GAMES.get(chat_id)
     if not game:
         return
@@ -8631,6 +8646,38 @@ async def post_init(application: Application):
             )
     except TelegramError as e:
         logger.warning("Buyruqlar menyusini o'rnatib bo'lmadi: %s", e)
+
+    # Guruh "/" menyusi: o'yin + barcha admin/moderatsiya buyruqlari ko'rinadi.
+    group_cmds = [
+        ("emps", "🎮 O‘yin tanlash"), ("settings", "⚙️ Guruh sozlamalari"),
+        ("aktiv", "📊 Eng faollar"), ("reyting", "🏆 Reyting"),
+        ("warn", "⚠️ Ogohlantirish"), ("unwarn", "🧽 Ogohlantirishni olib tashlash"),
+        ("warns", "📋 Ogohlantirishlar soni"),
+        ("mute", "🤐 Jim qilish (muddat: 10m/2h/1d)"), ("tmute", "⏳🤐 Vaqtincha jim"),
+        ("unmute", "🗣 Jimlikdan chiqarish"),
+        ("ban", "🚀 Ban"), ("tban", "⏳🚀 Vaqtincha ban"), ("unban", "🕊 Bandan chiqarish"),
+        ("kick", "🦶 Guruhdan chiqarish"),
+        ("promote", "👮 Admin qilish"), ("demote", "⬇️ Adminlikdan olish"),
+        ("title", "🎖 Admin unvoni"),
+        ("del", "🗑 Xabarni o‘chirish"), ("purge", "🧹 Ko‘p xabarni o‘chirish"),
+        ("pin", "📌 Mahkamlash"), ("unpin", "📌 Mahkamlashni olish"),
+        ("lock", "🔒 Cheklash"), ("unlock", "🔓 Cheklovni olish"), ("locks", "🔒 Cheklovlar ro‘yxati"),
+        ("addword", "🚫 Taqiqlangan so‘z qo‘shish"), ("delword", "✅ So‘zni olib tashlash"),
+        ("words", "📃 Taqiqlangan so‘zlar"),
+        ("filter", "💬 Filtr qo‘shish"), ("filters", "💬 Filtrlar"), ("delfilter", "🗑 Filtr o‘chirish"),
+        ("setwelcome", "👋 Salomlashish matni"), ("setrules", "📜 Qoidalarni o‘rnatish"),
+        ("rules", "📜 Guruh qoidalari"),
+        ("setlog", "📋 Log kanal"), ("report", "📣 Adminlarga shikoyat"),
+        ("info", "🪪 Foydalanuvchi ma’lumoti"), ("id", "🆔 ID"), ("admins", "👮 Adminlar"),
+        ("help", "❓ Yordam"),
+    ]
+    try:
+        await application.bot.set_my_commands(
+            [BotCommand(c, d) for c, d in group_cmds],
+            scope=BotCommandScopeAllGroupChats(),
+        )
+    except TelegramError as e:
+        logger.warning("Guruh buyruqlar menyusini o'rnatib bo'lmadi: %s", e)
 
 
 
@@ -13985,7 +14032,7 @@ async def cb_kid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 GUARD_DEFAULTS = {"captcha": 0, "welcome": 1, "antilink": 0, "antiflood": 0, "warn_limit": 3, "warn_action": "mute",
                   "welcome_text": "", "night": 0, "night_start": 0, "night_end": 7, "night_active": 0,
-                  "night_saved": "", "log_chat": 0, "locks": 0}
+                  "night_saved": "", "log_chat": 0, "locks": 0, "rules": ""}
 CAPTCHA_TTL = 120               # captcha uchun vaqt (soniya)
 FLOOD_COUNT, FLOOD_WINDOW = 7, 5   # 5 soniyada 7 ta xabar — flood
 FLOOD_MUTE = 300                # flood uchun jim qilish (soniya)
@@ -14048,6 +14095,7 @@ MOD_TEXT = {
         ],
         "unban": "🕊 {name} amnistiya oldi — qaytib kirishi mumkin.",
         "kick": "🦶 {name} guruhdan tepib chiqarildi! (xohlasa qaytib kirishi mumkin)",
+        "tban": "⏳🚀 {name} {dur}ga chetlatildi — keyin qaytib kira oladi.",
         "need_target": "↩️ Kimningdir xabariga reply qilib yozing yoki ID / @username kiriting.",
         "not_admin": "⛔ Bu buyruq faqat adminlar uchun. Yaxshi urinish edi 😏",
         "target_admin": "😅 Adminga qarshi? Yo‘q, bunday qilmaymiz.",
@@ -14569,7 +14617,7 @@ async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        ON CONFLICT(chat_id, user_id) DO UPDATE SET count=excluded.count""",
                     (chat.id, target, count),
                 )
-        elif command == "mute":
+        elif command in ("mute", "tmute"):
             seconds = parse_dur(args[0]) if args else 3600
             seconds = seconds or 3600
             await mod_mute(context.bot, chat.id, target, seconds)
@@ -14577,6 +14625,11 @@ async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif command == "unmute":
             await mod_unmute(context.bot, chat.id, target)
             text = mod_t(chat.id, "unmute", name=name)
+        elif command == "tban":
+            seconds = parse_dur(args[0]) if args else 3600
+            seconds = seconds or 3600
+            await context.bot.ban_chat_member(chat.id, target, until_date=int(time.time()) + seconds)
+            text = mod_t(chat.id, "tban", name=name, dur=fmt_dur(chat.id, seconds))
         elif command == "ban":
             await context.bot.ban_chat_member(chat.id, target)
             text = mod_t(chat.id, "ban", name=name)
@@ -15186,6 +15239,7 @@ LOCK_TYPES = ["sticker", "animation", "voice", "video_note", "forward"]   # lock
 NIGHT_TICK = 60
 REPORT_COOLDOWN = 60
 BADWORDS_CACHE: dict[int, list] = {}
+FILTERS_CACHE: dict[int, dict] = {}
 REPORT_LAST: dict[tuple, float] = {}
 
 G2_TEXT = {
@@ -15640,6 +15694,423 @@ async def cb_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await mod_log(context.bot, chat_id,
                   f"{done} — {user_mention(uid, uid)} ({user_mention(q.from_user.id, q.from_user.first_name)})")
 
+
+# ───────────────────────────── 🛡 GROUP HELP QO'SHIMCHA BUYRUQLARI ─────────────────────────────
+# Group Help uslubidagi to'liq admin buyruqlari: /del /purge /pin /unpin /id /info /admins
+# /lock /unlock /locks /title /setwelcome /setrules /rules (guruh) /filter /filters /delfilter.
+# Hammasi mavjud yordamchilarни qayta ishlatadi (is_moderator, admin_ids, mod_target, mod_log).
+
+GH_TEXT = {
+    "uz": {
+        "del_ok": "🗑 Xabar o‘chirildi.",
+        "del_need": "↩️ O‘chirmoqchi bo‘lgan xabarga reply qiling.",
+        "purge_need": "↩️ Qaysi xabardan o‘chirishni boshlashini ko‘rsatish uchun o‘sha xabarga reply qiling.",
+        "purge_ok": "🧹 {n} ta xabar o‘chirildi.",
+        "purge_big": "⚠️ Juda ko‘p xabar (max {max}). Kichikroq oraliqni tanlang.",
+        "pin_ok": "📌 Xabar mahkamlandi.",
+        "pin_need": "↩️ Mahkamlamoqchi bo‘lgan xabarga reply qiling.",
+        "unpin_ok": "📌 Mahkamlangan xabar olib tashlandi.",
+        "unpin_all": "📌 Barcha mahkamlangan xabarlar olib tashlandi.",
+        "id_self": "🪪 <b>ID ma’lumot</b>\n\n👥 Guruh: <code>{chat}</code>\n🙋 Siz: <code>{you}</code>",
+        "id_reply": "\n↩️ U kishi: <code>{uid}</code>",
+        "info": ("🪪 <b>FOYDALANUVCHI</b>\n\n👤 Ism: {name}\n🆔 ID: <code>{uid}</code>\n"
+                 "🔖 Username: {uname}\n🎖 Holat: {status}\n⚠️ Ogohlantirish: {warns}/{limit}"),
+        "admins": "👮 <b>GURUH ADMINLARI</b> ({n})\n\n{list}",
+        "lock_ok": "🔒 <b>{kind}</b> cheklandi.",
+        "unlock_ok": "🔓 <b>{kind}</b> chekLovdan chiqarildi.",
+        "lock_bad": "❓ Noma’lum tur. Mavjud: {types}.",
+        "locks_head": "🔒 <b>CHEKLOVLAR</b>\n\n",
+        "lock_on": "🔒 yoqilgan", "lock_off": "🔓 ochiq",
+        "title_ok": "🎖 {name} ning unvoni: <b>{title}</b>",
+        "title_need": "↩️ Admin xabariga reply qilib unvonni yozing: <code>/title Boshqaruvchi</code>",
+        "welcome_set": "👋 Yangi salomlashish matni saqlandi. Namuna:\n\n{sample}",
+        "welcome_bad": "❌ Matnda faqat <code>{{name}}</code> va <code>{{group}}</code> ishlatilsin.",
+        "welcome_need": "✏️ Matnni yozing: <code>/setwelcome Salom {{name}}! {{group}}ga xush kelibsiz 🎉</code>",
+        "rules_set": "📜 Guruh qoidalari saqlandi.",
+        "rules_need": "✏️ Qoidalarni yozing: <code>/setrules 1. Hurmat 2. Spam yo‘q ...</code>",
+        "rules_show": "📜 <b>GURUH QOIDALARI</b>\n\n{text}",
+        "rules_empty": "📜 Bu guruhda hali qoida o‘rnatilmagan. Admin <code>/setrules</code> bilan qo‘shadi.",
+        "filter_set": "💬 Filtr saqlandi: <b>{trig}</b>",
+        "filter_need": "✏️ <code>/filter so‘z javob matni</code> ko‘rinishida yozing (yoki javob o‘rniga xabarga reply qiling).",
+        "filter_del": "🗑 Filtr o‘chirildi: <b>{trig}</b>",
+        "filter_missing": "❓ Bunday filtr yo‘q: <b>{trig}</b>",
+        "filters_list": "💬 <b>FILTRLAR</b> ({n})\n\n{list}",
+        "filters_empty": "💬 Hali filtr yo‘q. <code>/filter so‘z javob</code> bilan qo‘shing.",
+        "admin_help": (
+            "🛡 <b>ADMIN BUYRUQLARI</b> (reply yoki @username/ID bilan)\n\n"
+            "👮 <b>Jazo:</b> /warn /unwarn /warns · /mute /tmute /unmute · /ban /tban /unban · /kick\n"
+            "   (muddat: <code>/mute 10m</code>, <code>/tban 2h</code>, <code>/tmute 1d</code>)\n"
+            "🧹 <b>Xabar:</b> /del (reply) · /purge (reply) · /pin /unpin\n"
+            "👑 <b>Adminlar:</b> /promote /demote · /title (reply) · /admins\n"
+            "🔒 <b>Cheklov:</b> /lock /unlock /locks (stiker, gif, ovozli, dumaloq, forward, all)\n"
+            "🚫 <b>So‘zlar:</b> /addword /delword /words\n"
+            "💬 <b>Filtr:</b> /filter so‘z javob · /filters · /delfilter so‘z\n"
+            "⚙️ <b>Sozlash:</b> /settings · /setwelcome · /setrules · /rules · /setlog\n"
+            "🪪 <b>Ma’lumot:</b> /info · /id · /report (yoki @admin)"
+        ),
+    },
+}
+GH_TYPES_UZ = {
+    "sticker": "stiker", "animation": "GIF", "voice": "ovozli",
+    "video_note": "dumaloq video", "forward": "forward",
+}
+
+
+def gh_t(chat_id, key, **kw):
+    lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
+    d = GH_TEXT.get(lang) or GH_TEXT["uz"]
+    s = d.get(key) or GH_TEXT["uz"][key]
+    return s.format(**kw) if kw else s
+
+
+def init_grouphelp():
+    c = db()
+    with c:
+        if "rules" not in {r[1] for r in c.execute("PRAGMA table_info(group_settings)")}:
+            c.execute("ALTER TABLE group_settings ADD COLUMN rules TEXT NOT NULL DEFAULT ''")
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS group_filters ("
+            "chat_id INTEGER NOT NULL, trigger TEXT NOT NULL, reply TEXT NOT NULL, "
+            "PRIMARY KEY (chat_id, trigger))"
+        )
+
+
+async def gh_admin_guard(update, context):
+    """Guruh + admin tekshiruvi. (msg, chat, user) yoki (None, None, None)."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat:
+        return None, None, None
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text(mod_t(chat.id if chat else 0, "group_only"))
+        return None, None, None
+    if not await is_moderator(context.bot, msg, user):
+        await msg.reply_text(mod_t(chat.id, "not_admin"))
+        return None, None, None
+    return msg, chat, user
+
+
+async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat, user = await gh_admin_guard(update, context)
+    if not msg:
+        return
+    if not msg.reply_to_message:
+        await msg.reply_text(gh_t(chat.id, "del_need"))
+        return
+    try:
+        await context.bot.delete_message(chat.id, msg.reply_to_message.message_id)
+        await msg.delete()
+    except TelegramError:
+        await msg.reply_text(mod_t(chat.id, "no_rights"))
+        return
+    sent = await context.bot.send_message(chat.id, gh_t(chat.id, "del_ok"))
+    await delete_later(context.bot, chat.id, sent.message_id, NOTICE_TTL)
+
+
+async def cmd_purge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat, user = await gh_admin_guard(update, context)
+    if not msg:
+        return
+    if not msg.reply_to_message:
+        await msg.reply_text(gh_t(chat.id, "purge_need"))
+        return
+    start = msg.reply_to_message.message_id
+    end = msg.message_id
+    ids = list(range(start, end + 1))
+    if len(ids) > 400:
+        await msg.reply_text(gh_t(chat.id, "purge_big", max=400))
+        return
+    deleted = 0
+    # delete_messages 100 tadan ko'p qabul qilmaydi
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i + 100]
+        try:
+            await context.bot.delete_messages(chat.id, chunk)
+            deleted += len(chunk)
+        except TelegramError:
+            # bir xato bo'lsa, bittalab urinib ko'ramiz (eski xabarlar o'chmasligi mumkin)
+            for mid in chunk:
+                try:
+                    await context.bot.delete_message(chat.id, mid)
+                    deleted += 1
+                except TelegramError:
+                    pass
+    sent = await context.bot.send_message(chat.id, gh_t(chat.id, "purge_ok", n=deleted))
+    await delete_later(context.bot, chat.id, sent.message_id, NOTICE_TTL)
+    await mod_log(context.bot, chat.id, f"🧹 /purge — {deleted} ta xabar ({user_mention(user.id, user.first_name)})")
+
+
+async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat, user = await gh_admin_guard(update, context)
+    if not msg:
+        return
+    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    if command == "unpin":
+        try:
+            if msg.reply_to_message:
+                await context.bot.unpin_chat_message(chat.id, msg.reply_to_message.message_id)
+                await msg.reply_text(gh_t(chat.id, "unpin_ok"))
+            else:
+                await context.bot.unpin_all_chat_messages(chat.id)
+                await msg.reply_text(gh_t(chat.id, "unpin_all"))
+        except TelegramError:
+            await msg.reply_text(mod_t(chat.id, "no_rights"))
+        return
+    if not msg.reply_to_message:
+        await msg.reply_text(gh_t(chat.id, "pin_need"))
+        return
+    loud = bool(context.args) and context.args[0].lower() in ("loud", "ovoz", "ovozli", "signal")
+    try:
+        await context.bot.pin_chat_message(
+            chat.id, msg.reply_to_message.message_id, disable_notification=not loud)
+        await msg.reply_text(gh_t(chat.id, "pin_ok"))
+    except TelegramError:
+        await msg.reply_text(mod_t(chat.id, "no_rights"))
+
+
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat:
+        return
+    text = gh_t(chat.id, "id_self", chat=chat.id, you=user.id if user else "?")
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        text += gh_t(chat.id, "id_reply", uid=msg.reply_to_message.from_user.id)
+    await msg.reply_text(text)
+
+
+STATUS_LABEL = {
+    ChatMemberStatus.OWNER: "👑 Egasi", ChatMemberStatus.ADMINISTRATOR: "👮 Admin",
+    ChatMemberStatus.MEMBER: "👤 A’zo", ChatMemberStatus.RESTRICTED: "🔇 Cheklangan",
+    ChatMemberStatus.LEFT: "🚪 Chiqib ketgan", ChatMemberStatus.BANNED: "🚫 Bloklangan",
+}
+
+
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text(mod_t(chat.id, "group_only"))
+        return
+    target, name, _, _ = await mod_target(update, context)
+    if not target:
+        u = update.effective_user
+        target, name = u.id, user_mention(u.id, u.first_name)
+    status, uname_s = "—", "—"
+    try:
+        member = await context.bot.get_chat_member(chat.id, target)
+        status = STATUS_LABEL.get(member.status, str(member.status))
+        if member.user and member.user.username:
+            uname_s = "@" + member.user.username
+    except TelegramError:
+        pass
+    row = db().execute("SELECT count FROM group_warns WHERE chat_id=? AND user_id=?", (chat.id, target)).fetchone()
+    warns = row[0] if row else 0
+    limit = gs_get(chat.id)["warn_limit"]
+    await msg.reply_text(gh_t(chat.id, "info", name=name, uid=target, uname=uname_s,
+                              status=status, warns=warns, limit=limit))
+
+
+async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text(mod_t(chat.id, "group_only"))
+        return
+    try:
+        members = await context.bot.get_chat_administrators(chat.id)
+    except TelegramError:
+        await msg.reply_text(mod_t(chat.id, "no_rights"))
+        return
+    lines = []
+    for m in members:
+        if m.user.is_bot:
+            continue
+        crown = "👑" if m.status == ChatMemberStatus.OWNER else "👮"
+        title = f" · <i>{escape(m.custom_title)}</i>" if getattr(m, "custom_title", None) else ""
+        lines.append(f"{crown} {user_mention(m.user.id, m.user.first_name)}{title}")
+    await msg.reply_text(gh_t(chat.id, "admins", n=len(lines), list="\n".join(lines) or "—"))
+
+
+LOCK_ALIASES = {
+    "sticker": "sticker", "stiker": "sticker", "стикер": "sticker",
+    "gif": "animation", "animation": "animation", "гиф": "animation",
+    "voice": "voice", "ovoz": "voice", "ovozli": "voice", "голос": "voice",
+    "video": "video_note", "video_note": "video_note", "dumaloq": "video_note", "round": "video_note",
+    "forward": "forward", "fwd": "forward", "форвард": "forward",
+}
+
+
+async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat, user = await gh_admin_guard(update, context)
+    if not msg:
+        return
+    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    settings = gs_get(chat.id)
+    if command == "locks":
+        lines = [gh_t(chat.id, "locks_head").rstrip("\n")]
+        for i, kind in enumerate(LOCK_TYPES):
+            on = settings["locks"] & (1 << i)
+            lines.append(f"• {GH_TYPES_UZ[kind]}: {gh_t(chat.id, 'lock_on' if on else 'lock_off')}")
+        await msg.reply_text("\n".join(lines))
+        return
+    arg = (context.args[0].lower() if context.args else "")
+    if arg in ("all", "hammasi", "все"):
+        bits = (1 << len(LOCK_TYPES)) - 1
+        new = bits if command == "lock" else 0
+        gs_set(chat.id, "locks", new)
+        await msg.reply_text(gh_t(chat.id, "lock_ok" if command == "lock" else "unlock_ok", kind="hammasi"))
+        return
+    kind = LOCK_ALIASES.get(arg)
+    if not kind:
+        await msg.reply_text(gh_t(chat.id, "lock_bad", types=", ".join(GH_TYPES_UZ[k] for k in LOCK_TYPES)))
+        return
+    bit = 1 << LOCK_TYPES.index(kind)
+    new = settings["locks"] | bit if command == "lock" else settings["locks"] & ~bit
+    gs_set(chat.id, "locks", new)
+    await msg.reply_text(gh_t(chat.id, "lock_ok" if command == "lock" else "unlock_ok", kind=GH_TYPES_UZ[kind]))
+
+
+async def cmd_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat, user = await gh_admin_guard(update, context)
+    if not msg:
+        return
+    if not (msg.reply_to_message and msg.reply_to_message.from_user) or not context.args:
+        await msg.reply_text(gh_t(chat.id, "title_need"))
+        return
+    target = msg.reply_to_message.from_user
+    title = " ".join(context.args)[:16]
+    try:
+        await context.bot.set_chat_administrator_custom_title(chat.id, target.id, title)
+    except TelegramError:
+        await msg.reply_text(mod_t(chat.id, "no_rights"))
+        return
+    await msg.reply_text(gh_t(chat.id, "title_ok", name=user_mention(target.id, target.first_name), title=escape(title)))
+
+
+def _welcome_valid(text):
+    probe = text
+    for token in ("{name}", "{group}"):
+        probe = probe.replace(token, "")
+    return "{" not in probe and "}" not in probe
+
+
+async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat, user = await gh_admin_guard(update, context)
+    if not msg:
+        return
+    text = msg.text.split(None, 1)[1].strip() if len(msg.text.split(None, 1)) > 1 else ""
+    if not text and msg.reply_to_message and msg.reply_to_message.text:
+        text = msg.reply_to_message.text.strip()
+    if not text:
+        await msg.reply_text(gh_t(chat.id, "welcome_need"))
+        return
+    if not _welcome_valid(text):
+        await msg.reply_text(gh_t(chat.id, "welcome_bad"))
+        return
+    gs_set(chat.id, "welcome_text", text[:2000])
+    gs_set(chat.id, "welcome", 1)
+    sample = text.replace("{name}", user_mention(user.id, user.first_name)).replace("{group}", escape(chat.title or ""))
+    await msg.reply_text(gh_t(chat.id, "welcome_set", sample=sample))
+
+
+async def cmd_setrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat, user = await gh_admin_guard(update, context)
+    if not msg:
+        return
+    text = msg.text.split(None, 1)[1].strip() if len(msg.text.split(None, 1)) > 1 else ""
+    if not text and msg.reply_to_message and msg.reply_to_message.text:
+        text = msg.reply_to_message.text.strip()
+    if not text:
+        await msg.reply_text(gh_t(chat.id, "rules_need"))
+        return
+    gs_set(chat.id, "rules", text[:3000])
+    await msg.reply_text(gh_t(chat.id, "rules_set"))
+
+
+async def cmd_grules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/rules — guruhda: o'rnatilgan qoidalar bo'lsa shuni, bo'lmasa o'yin qoidalarini (cmd_rules)."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        rules = gs_get(chat.id).get("rules") or ""
+        if rules:
+            await msg.reply_text(gh_t(chat.id, "rules_show", text=escape(rules)))
+            return
+    await cmd_rules(update, context)
+
+
+# ── Filtrlar (so'zga avtomatik javob) ──
+
+def gh_filters(chat_id):
+    if chat_id not in FILTERS_CACHE:
+        FILTERS_CACHE[chat_id] = {
+            r[0]: r[1] for r in db().execute(
+                "SELECT trigger, reply FROM group_filters WHERE chat_id=?", (chat_id,))
+        }
+    return FILTERS_CACHE[chat_id]
+
+
+def gh_filter_match(chat_id, text):
+    if not text:
+        return None
+    low = text.lower()
+    for trig, reply in gh_filters(chat_id).items():
+        if re.search(rf"(?<!\w){re.escape(trig)}(?!\w)", low):
+            return reply
+    return None
+
+
+async def cmd_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat, user = await gh_admin_guard(update, context)
+    if not msg:
+        return
+    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    if command == "filters":
+        f = gh_filters(chat.id)
+        if not f:
+            await msg.reply_text(gh_t(chat.id, "filters_empty"))
+            return
+        lst = "\n".join(f"• <b>{escape(k)}</b>" for k in sorted(f))
+        await msg.reply_text(gh_t(chat.id, "filters_list", n=len(f), list=lst))
+        return
+    parts = msg.text.split(None, 2)
+    if command == "delfilter":
+        trig = (parts[1].lower() if len(parts) > 1 else "").strip()
+        if not trig:
+            await msg.reply_text(gh_t(chat.id, "filter_need"))
+            return
+        c = db()
+        with c:
+            removed = c.execute("DELETE FROM group_filters WHERE chat_id=? AND trigger=?", (chat.id, trig)).rowcount
+        FILTERS_CACHE.pop(chat.id, None)
+        await msg.reply_text(gh_t(chat.id, "filter_del" if removed else "filter_missing", trig=escape(trig)))
+        return
+    # /filter <trigger> <reply>  (yoki reply orqali javob)
+    trig = (parts[1].lower() if len(parts) > 1 else "").strip()
+    reply = parts[2].strip() if len(parts) > 2 else ""
+    if not reply and msg.reply_to_message and msg.reply_to_message.text:
+        reply = msg.reply_to_message.text.strip()
+    if not trig or not reply:
+        await msg.reply_text(gh_t(chat.id, "filter_need"))
+        return
+    c = db()
+    with c:
+        c.execute(
+            "INSERT INTO group_filters(chat_id, trigger, reply) VALUES (?, ?, ?) "
+            "ON CONFLICT(chat_id, trigger) DO UPDATE SET reply=excluded.reply",
+            (chat.id, trig[:60], reply[:2000]),
+        )
+    FILTERS_CACHE.pop(chat.id, None)
+    await msg.reply_text(gh_t(chat.id, "filter_set", trig=escape(trig[:60])))
 
 
 # ───────────────────────────── 💱 BOTLAR ARO PUL ALMASHUVI (bridge) ─────────────────────────────
@@ -16637,6 +17108,7 @@ def main():
     init_kids()
     init_guard()
     init_guard2()
+    init_grouphelp()
     init_exchange()
     init_panel_overrides()
     init_forcesub()
@@ -16668,9 +17140,20 @@ def main():
         (["oila", "family"], cmd_oila),
         (["farzand", "kids"], cmd_farzand),
         (["settings", "sozlamalar"], cmd_settings),
-        (["warn", "unwarn", "warns", "mute", "unmute", "ban", "unban", "kick"], cmd_mod),
+        (["warn", "unwarn", "warns", "mute", "tmute", "unmute", "ban", "tban", "unban", "kick"], cmd_mod),
         (["promote", "demote"], cmd_promote),
         (["addword", "delword", "words"], cmd_words),
+        (["del", "delete", "ochir"], cmd_del),
+        (["purge", "tozala"], cmd_purge),
+        (["pin", "unpin"], cmd_pin),
+        (["id"], cmd_id),
+        (["info"], cmd_info),
+        (["admins", "adminlar"], cmd_admins),
+        (["lock", "unlock", "locks"], cmd_lock),
+        (["title", "unvon"], cmd_title),
+        (["setwelcome", "setwelc"], cmd_setwelcome),
+        (["setrules"], cmd_setrules),
+        (["filter", "filters", "delfilter"], cmd_filter),
         (["report"], cmd_report),
         (["setlog"], cmd_setlog),
         (["shop"], cmd_shop),
@@ -16682,8 +17165,9 @@ def main():
         (["konkurs"], cmd_konkurs),
         (["missiyalar", "missions"], cmd_missiyalar),
         (["ariza"], cmd_ariza),
-        (["qoidalar", "rules"], cmd_rules),
-        (["help"], cmd_help),
+        (["qoidalar"], cmd_rules),
+        (["rules"], cmd_grules),
+        (["help", "yordam"], cmd_help),
         (["lang"], cmd_lang),
     ]
     for names, handler in commands:

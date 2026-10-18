@@ -35,7 +35,9 @@ from telegram import (
     InlineQueryResultArticle,
     InputFile,
     InputTextMessageContent,
+    MenuButtonWebApp,
     Update,
+    WebAppInfo,
 )
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
@@ -2025,6 +2027,7 @@ def panel_keyboard(user_id=None):
         rows.append([InlineKeyboardButton("💱 Pul almashuvi", callback_data="panel:exch")])
         rows.append([InlineKeyboardButton("🔢 Ko‘rsatkichlarni tahrirlash", callback_data="panel:stats_edit")])
         rows.append([InlineKeyboardButton("📢 Majburiy obuna", callback_data="panel:fsub")])
+        rows.append([InlineKeyboardButton("🌐 Web App", callback_data="panel:webapp")])
         rows.append([InlineKeyboardButton("👶 Farzand o‘chirish", callback_data="panel:kiddel")])
         rows.append([InlineKeyboardButton("🎰 Crash sozlamalari", callback_data="panel:crash")])
         rows.append([InlineKeyboardButton("✨ Premium emoji", callback_data="panel:pemoji")])
@@ -2517,6 +2520,15 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "panel:fsub" or query.data.startswith("panel:fsub_"):
         # "fsub*" PANEL_PERMISSIONS'da yo'q → faqat bot egalari.
         await panel_fsub_callback(query, context)
+        return
+
+    if query.data == "panel:webapp" or query.data.startswith("panel:webapp_"):
+        # "webapp*" PANEL_PERMISSIONS'da yo'q → faqat bot egalari.
+        if query.data == "panel:webapp":
+            text, kb = panel_webapp_view()
+            await query.edit_message_text(text, reply_markup=kb)
+        else:
+            await panel_webapp_callback(query, context)
         return
 
     if query.data == "panel:crash" or query.data.startswith("panel:crash:"):
@@ -4315,6 +4327,28 @@ async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if chat and msg:
         await msg.reply_text(t(chat.id, "rules"))
+
+
+async def cmd_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    if not chat or not msg:
+        return
+    if not WEBAPP_URL:
+        await msg.reply_text("🌐 Web app hali sozlanmagan (domen yo‘q). Bot egasi /panel → 🌐 Web App orqali sozlaydi.")
+        return
+    url = WEBAPP_URL + "/app"
+    if chat.type == ChatType.PRIVATE:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Ilovani ochish", web_app=WebAppInfo(url))]])
+        await msg.reply_text("🎮 <b>Empire Stats</b> — ilovani oching 👇", reply_markup=kb)
+    else:
+        try:
+            bot_un = (await context.bot.get_me()).username
+        except TelegramError:
+            bot_un = ""
+        link = f"https://t.me/{bot_un}" if bot_un else url
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Shaxsiy chatda ochish", url=link)]])
+        await msg.reply_text("🎮 Ilovani shaxsiy chatda oching 👇 (menyu tugmasi orqali ham).", reply_markup=kb)
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8679,6 +8713,15 @@ async def post_init(application: Application):
         )
     except TelegramError as e:
         logger.warning("Guruh buyruqlar menyusini o'rnatib bo'lmadi: %s", e)
+
+    # Web app menyu tugmasi (shaxsiy chatlarda input yonida chiqadi)
+    if WEBAPP_URL:
+        try:
+            await application.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="🎮 Ilova", web_app=WebAppInfo(WEBAPP_URL + "/app")))
+            logger.info("Web app menyu tugmasi o'rnatildi: %s/app", WEBAPP_URL)
+        except TelegramError as e:
+            logger.warning("Web app menyu tugmasini o'rnatib bo'lmadi: %s", e)
 
 
 
@@ -16431,14 +16474,52 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_html(self, code, html):
+        body = html.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
-        if self.path.rstrip("/") == "/exchange/ping":
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/exchange/ping":
             self._send(200, {"ok": True, "bot": "son_bot"})
+        elif path in ("", "/app"):
+            self._send_html(200, WEBAPP_HTML)
         else:
             self._send(404, {"ok": False})
 
+    def _web_data(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length else b""
+            init = (json.loads(raw.decode()) if raw else {}).get("initData", "")
+        except (ValueError, OSError, json.JSONDecodeError):
+            init = ""
+        user = webapp_check_init_data(init)
+        if not user:
+            self._send(401, {"ok": False, "error": "auth"})
+            return
+        if _EXCHANGE_LOOP is None:
+            self._send(503, {"ok": False, "error": "starting"})
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(webapp_fetch(int(user["id"])), _EXCHANGE_LOOP)
+            res = fut.result(timeout=10)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("WebApp: ma'lumot olinmadi: %s", e)
+            self._send(500, {"ok": False, "error": "internal"})
+            return
+        self._send(200, {"ok": True, **res})
+
     def do_POST(self):
-        if self.path.rstrip("/") != "/exchange/credit":
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/app/api/data":
+            self._web_data()
+            return
+        if path != "/exchange/credit":
             self._send(404, {"ok": False})
             return
         try:
@@ -16485,16 +16566,18 @@ def exchange_start_server(application):
     global _EXCHANGE_LOOP, _EXCHANGE_SERVER, _EXCHANGE_LOOP_BOT
     _EXCHANGE_LOOP = asyncio.get_running_loop()
     _EXCHANGE_LOOP_BOT = application.bot
-    if not EXCHANGE_SECRET or not EXCHANGE_PORT.isdigit():
-        logger.info("Almashuv serveri ishga tushmadi (EXCHANGE_SECRET yoki PORT yo'q).")
+    # Server PORT bo'lsa ishga tushadi (web app uchun); almashuv yo'llari EXCHANGE_SECRET bo'lsa ishlaydi.
+    if not EXCHANGE_PORT.isdigit():
+        logger.info("HTTP server ishga tushmadi (PORT yo'q) — web app va almashuv o'chiq.")
         return
     try:
         _EXCHANGE_SERVER = ThreadingHTTPServer(("0.0.0.0", int(EXCHANGE_PORT)), _ExchangeHandler)
     except OSError as e:
-        logger.warning("Almashuv serveri portga bog'lanmadi (%s): %s", EXCHANGE_PORT, e)
+        logger.warning("HTTP server portga bog'lanmadi (%s): %s", EXCHANGE_PORT, e)
         return
-    threading.Thread(target=_EXCHANGE_SERVER.serve_forever, name="exchange-http", daemon=True).start()
-    logger.info("Almashuv serveri ishga tushdi: port %s", EXCHANGE_PORT)
+    threading.Thread(target=_EXCHANGE_SERVER.serve_forever, name="http-server", daemon=True).start()
+    logger.info("HTTP server ishga tushdi: port %s (web app%s)",
+                EXCHANGE_PORT, ", almashuv" if EXCHANGE_SECRET else "")
 
 
 # ── Chiquvchi: bizning foydalanuvchi hamkor botga pul yuboradi ──
@@ -17153,6 +17236,44 @@ async def panel_fsub_text(update, context):
     await msg.reply_text("✅ Kanal ulandi va majburiy obuna yoqildi.\n\n" + text, reply_markup=kb)
 
 
+# ── 👑 Owner panel: 🌐 Web App ──
+
+def panel_webapp_view():
+    flags = webapp_flags()
+    url = (WEBAPP_URL + "/app") if WEBAPP_URL else None
+    lines = ["🌐 <b>WEB APP</b>", ""]
+    if url:
+        lines.append(f"🔗 Manzil: <code>{escape(url)}</code>")
+    else:
+        lines.append("⚠️ Domen yo‘q. Railway → Settings → Networking → <b>Generate Domain</b> oling,\n"
+                     "so‘ng <code>WEBAPP_URL</code> (yoki <code>RAILWAY_PUBLIC_DOMAIN</code>) env qo‘shing.")
+    lines += ["",
+              f"👥 Hamma uchun: <b>{'✅ yoqilgan' if flags['all'] else '❌ o‘chiq'}</b>",
+              f"👑 Ownerlar uchun: <b>{'✅ yoqilgan' if flags['owner'] else '❌ o‘chiq'}</b>"]
+    rows = [
+        [InlineKeyboardButton("🔴 Hamma uchun o‘chirish" if flags["all"] else "🟢 Hamma uchun yoqish",
+                              callback_data="panel:webapp_all")],
+        [InlineKeyboardButton("🔴 Ownerlar uchun o‘chirish" if flags["owner"] else "🟢 Ownerlar uchun yoqish",
+                              callback_data="panel:webapp_owner")],
+        [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
+    ]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def panel_webapp_callback(query, context):
+    data = query.data
+    if data == "panel:webapp_all":
+        webapp_set("all", 0 if webapp_flags()["all"] else 1)
+    elif data == "panel:webapp_owner":
+        webapp_set("owner", 0 if webapp_flags()["owner"] else 1)
+    text, kb = panel_webapp_view()
+    try:
+        await query.edit_message_text(text, reply_markup=kb)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
 # ── 👑 Owner panel: almashuv sozlamalari ──
 
 def panel_exchange_view():
@@ -17212,6 +17333,292 @@ async def panel_exchange_callback(query, context):
             raise
 
 
+# ───────────────────────────── 🌐 WEB APP (Telegram Mini App) ─────────────────────────────
+# Botning mavjud HTTP serveridan (PORT) web app sahifasi (/app) va ma'lumot API'si (/app/api/data) uzatiladi.
+# Foydalanuvchi Telegram initData (bot token bilan HMAC) orqali aniqlanadi. Owner panel → 🌐 Web App:
+# hamma uchun yoqish/o'chirish va ownerlar uchun yoqish/o'chirish. URL: WEBAPP_URL (yoki RAILWAY_PUBLIC_DOMAIN).
+
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+if not WEBAPP_URL:
+    _rw_dom = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    if _rw_dom:
+        WEBAPP_URL = "https://" + _rw_dom
+
+
+def init_webapp():
+    with db() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS webapp_config (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+
+
+def webapp_flags():
+    d = {"all": 1, "owner": 1}
+    for k, v in db().execute("SELECT key, value FROM webapp_config"):
+        d[k] = v
+    return d
+
+
+def webapp_set(key, value):
+    with db() as c:
+        c.execute(
+            "INSERT INTO webapp_config(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, int(value)))
+
+
+def webapp_check_init_data(init_data, max_age=86400):
+    """Telegram initData'ni bot token bilan tekshiradi. To'g'ri bo'lsa — user dict, aks holda None."""
+    if not init_data or not BOT_TOKEN:
+        return None
+    try:
+        parsed = urllib.parse.parse_qs(init_data, strict_parsing=True, keep_blank_values=True)
+    except ValueError:
+        return None
+    data = {k: v[0] for k, v in parsed.items()}
+    recv_hash = data.pop("hash", None)
+    if not recv_hash:
+        return None
+    check = "\n".join(f"{k}={data[k]}" for k in sorted(data))
+    secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+    calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc, recv_hash):
+        return None
+    try:
+        if abs(time.time() - int(data.get("auth_date", 0))) > max_age:
+            return None
+    except (ValueError, TypeError):
+        return None
+    try:
+        user = json.loads(data.get("user", "{}"))
+    except json.JSONDecodeError:
+        return None
+    return user if user.get("id") else None
+
+
+async def webapp_payload(user_id):
+    """Web app uchun foydalanuvchi ma'lumotlari (bot sikli ipida — DB xavfsiz)."""
+    c = db()
+    row = c.execute("SELECT first_name, username FROM users WHERE user_id=?", (user_id,)).fetchone()
+    name = (row[0] if row else None) or str(user_id)
+    username = row[1] if row else None
+    money = wallet_balance(user_id)
+    points, games, wins, losses, draws = get_stats(None, user_id, True)
+    owners = tuple(CAREER_OWNER_IDS)
+    marks = ",".join("?" * len(owners)) or "NULL"
+    is_owner = user_id in CAREER_OWNER_IDS
+    rank = None
+    if not is_owner:
+        rank = c.execute(
+            f"SELECT COUNT(*)+1 FROM user_wallet WHERE money > ? AND user_id NOT IN ({marks})",
+            (money, *owners),
+        ).fetchone()[0]
+    birja_val = sum(
+        qty * (BIRJA_PRICES.get(a) or {"price": 0.0})["price"]
+        for a, qty in c.execute("SELECT asset, qty FROM birja_holdings WHERE user_id=? AND qty>0", (user_id,))
+    )
+    top = c.execute(
+        f"""SELECT w.user_id, w.money, u.first_name, u.username
+            FROM user_wallet w LEFT JOIN users u ON u.user_id = w.user_id
+            WHERE w.user_id NOT IN ({marks}) AND w.money > 0
+            ORDER BY w.money DESC LIMIT 15""",
+        owners,
+    ).fetchall()
+    data = {
+        "name": name, "username": username, "id": user_id,
+        "money": money, "money_fmt": fmt_money(money),
+        "points": points, "games": games, "wins": wins, "losses": losses, "draws": draws,
+        "level": level_name(0, points), "rank": rank, "kids": len(kids_of(user_id)),
+        "loan": bool(active_loan(user_id)), "birja": round(birja_val, 2),
+        "is_owner": is_owner,
+        "top": [{
+            "name": (t[2] or str(t[0])), "username": t[3],
+            "money_fmt": fmt_money(t[1]), "me": t[0] == user_id,
+        } for t in top],
+    }
+    if is_owner:
+        total = c.execute("SELECT COALESCE(SUM(money),0) FROM user_wallet").fetchone()[0]
+        users_count = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        data["owner"] = {
+            "users": stat_show("users", users_count),
+            "groups": stat_show("groups", len(panel_group_ids(c))),
+            "total_money": fmt_money(total),
+            "active_games": len(GAMES),
+            "in_games": fmt_money(money_in_games()),
+        }
+    return data
+
+
+async def webapp_fetch(user_id):
+    """Yoqilgan/o'chirilganlikni tekshirib, ma'lumotni qaytaradi (bot sikli ipida)."""
+    flags = webapp_flags()
+    is_owner = user_id in CAREER_OWNER_IDS
+    if not (flags["all"] or (is_owner and flags["owner"])):
+        return {"enabled": False, "owner": is_owner}
+    return {"enabled": True, "owner": is_owner, "data": await webapp_payload(user_id)}
+
+
+WEBAPP_HTML = r"""<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Empire Stats</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:#07070d; --card:#11111c; --line:#23233a;
+    --cyan:#22d3ee; --mag:#e879f9; --pur:#8b5cf6; --lime:#a3e635;
+    --txt:#e7e7f5; --dim:#8a8ab0;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  body{margin:0; background:var(--bg); color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background-image:radial-gradient(1200px 500px at 50% -10%, rgba(139,92,246,.18), transparent),
+                     radial-gradient(900px 400px at 100% 0, rgba(34,211,238,.12), transparent);
+    min-height:100vh; padding:16px 16px 92px;}
+  .hdr{display:flex; align-items:center; gap:14px; margin:6px 0 18px}
+  .ava{width:58px;height:58px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-size:26px;font-weight:800;color:#07070d;
+    background:linear-gradient(135deg,var(--cyan),var(--mag));
+    box-shadow:0 0 22px rgba(34,211,238,.5), 0 0 40px rgba(232,121,249,.3)}
+  .hname{font-size:20px;font-weight:800;letter-spacing:.3px}
+  .hsub{color:var(--dim);font-size:13px;margin-top:2px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .card{background:linear-gradient(180deg,var(--card),#0d0d16);border:1px solid var(--line);
+    border-radius:18px;padding:16px;position:relative;overflow:hidden}
+  .card::before{content:"";position:absolute;inset:0;border-radius:18px;padding:1px;
+    background:linear-gradient(135deg,rgba(34,211,238,.5),transparent 40%,rgba(232,121,249,.4));
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;mask-composite:exclude;opacity:.6;pointer-events:none}
+  .lbl{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.6px}
+  .val{font-size:22px;font-weight:800;margin-top:6px}
+  .val.neon{color:var(--cyan);text-shadow:0 0 14px rgba(34,211,238,.6)}
+  .val.mag{color:var(--mag);text-shadow:0 0 14px rgba(232,121,249,.6)}
+  .val.lime{color:var(--lime);text-shadow:0 0 12px rgba(163,230,53,.5)}
+  .full{grid-column:1/3}
+  .row{display:flex;align-items:center;justify-content:space-between;padding:11px 4px;border-bottom:1px solid var(--line)}
+  .row:last-child{border-bottom:none}
+  .rk{width:26px;font-weight:800;color:var(--dim)}
+  .rk.g1{color:#ffd54a;text-shadow:0 0 10px rgba(255,213,74,.6)}
+  .rk.g2{color:#cfd8e3}.rk.g3{color:#e0a46a}
+  .me{background:rgba(34,211,238,.08);border-radius:12px}
+  .tabs{position:fixed;left:0;right:0;bottom:0;display:flex;gap:6px;padding:10px 12px;
+    background:rgba(7,7,13,.9);backdrop-filter:blur(12px);border-top:1px solid var(--line)}
+  .tab{flex:1;text-align:center;padding:10px 4px;border-radius:14px;font-size:13px;font-weight:700;
+    color:var(--dim);border:1px solid transparent}
+  .tab.on{color:var(--txt);border-color:var(--line);
+    background:linear-gradient(135deg,rgba(34,211,238,.16),rgba(232,121,249,.16));
+    box-shadow:0 0 18px rgba(139,92,246,.25)}
+  .sec{display:none}.sec.on{display:block;animation:fade .25s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  h2{font-size:15px;letter-spacing:.5px;margin:4px 0 12px;color:var(--dim);text-transform:uppercase}
+  .chip{display:inline-flex;gap:6px;align-items:center;font-size:12px;color:var(--cyan);
+    border:1px solid rgba(34,211,238,.4);border-radius:999px;padding:4px 10px;margin-top:8px}
+  .center{text-align:center;color:var(--dim);padding:60px 20px}
+  .big{font-size:40px;margin-bottom:12px}
+</style>
+</head>
+<body>
+<div id="app"><div class="center"><div class="big">⏳</div>Yuklanmoqda…</div></div>
+<script>
+const tg = window.Telegram ? window.Telegram.WebApp : null;
+const $ = (h)=>{const d=document.createElement('div');d.innerHTML=h;return d.firstElementChild;};
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+let TAB='profil';
+
+function boot(){
+  if(tg){ tg.ready(); tg.expand(); try{tg.setHeaderColor('#07070d');tg.setBackgroundColor('#07070d');}catch(e){} }
+  fetch('/app/api/data',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({initData: tg?tg.initData:''})})
+    .then(r=>r.json()).then(render).catch(()=>fail('Aloqa xatosi'));
+}
+function fail(m){document.getElementById('app').innerHTML=
+  '<div class="center"><div class="big">📡</div>'+esc(m)+'</div>';}
+
+function render(res){
+  if(!res||!res.ok){return fail('Kirish tasdiqlanmadi. Botni Telegram orqali oching.');}
+  if(!res.enabled){return fail('🌐 Web app hozircha o‘chirilgan.');}
+  const d=res.data;
+  const app=document.getElementById('app');
+  const initial=(d.name||'?').trim().charAt(0).toUpperCase()||'🎮';
+  app.innerHTML='';
+  app.appendChild($(
+    '<div class="hdr"><div class="ava">'+esc(initial)+'</div>'+
+    '<div><div class="hname">'+esc(d.name)+'</div>'+
+    '<div class="hsub">'+(d.username?'@'+esc(d.username):'ID '+esc(d.id))+
+    (d.is_owner?' · 👑 Owner':'')+'</div></div></div>'));
+
+  // PROFIL
+  const p=$('<div class="sec" id="s-profil"></div>');
+  p.appendChild($('<div class="grid">'+
+    card('💰 Hamyon', d.money_fmt+'$', 'neon','full')+
+    card('🏆 Reyting', d.rank?('#'+d.rank):'—','mag')+
+    card('⭐ Daraja', esc(d.level),'lime')+
+    card('🎮 O‘yinlar', d.games,'')+
+    card('✅ G‘alaba', d.wins,'lime')+
+    card('📈 Ball', d.points,'neon')+
+    card('👶 Farzandlar', d.kids,'mag')+
+    '</div>'));
+  const extra=[];
+  if(d.birja>0) extra.push('<span class="chip">📈 Birja: '+esc(d.birja)+'$</span>');
+  if(d.loan) extra.push('<span class="chip" style="color:#ff6b6b;border-color:rgba(255,107,107,.4)">🏦 Faol kredit</span>');
+  if(extra.length) p.appendChild($('<div style="margin-top:12px">'+extra.join(' ')+'</div>'));
+  app.appendChild(p);
+
+  // REYTING
+  const r=$('<div class="sec" id="s-reyting"></div>');
+  r.appendChild($('<h2>💎 Eng boylar TOP</h2>'));
+  const list=$('<div class="card full"></div>');
+  (d.top||[]).forEach((t,i)=>{
+    const g=i===0?'g1':i===1?'g2':i===2?'g3':'';
+    list.appendChild($('<div class="row '+(t.me?'me':'')+'">'+
+      '<div style="display:flex;align-items:center;gap:10px"><span class="rk '+g+'">'+(i+1)+'</span>'+
+      '<span>'+esc(t.name)+(t.me?' <span style="color:var(--cyan)">(siz)</span>':'')+'</span></div>'+
+      '<b class="val neon" style="font-size:15px">'+esc(t.money_fmt)+'$</b></div>'));
+  });
+  if(!(d.top||[]).length) list.appendChild($('<div class="center">Hali ma’lumot yo‘q</div>'));
+  r.appendChild(list);
+  app.appendChild(r);
+
+  // OWNER
+  if(d.is_owner && d.owner){
+    const o=$('<div class="sec" id="s-owner"></div>');
+    o.appendChild($('<h2>👑 Owner panel</h2>'));
+    o.appendChild($('<div class="grid">'+
+      card('👤 Foydalanuvchilar', d.owner.users,'neon')+
+      card('🏘 Guruhlar', d.owner.groups,'mag')+
+      card('💵 Jami pul', d.owner.total_money+'$','lime','full')+
+      card('🎰 Faol o‘yinlar', d.owner.active_games,'')+
+      card('🎲 O‘yinlarda', d.owner.in_games+'$','neon')+
+      '</div>'));
+    app.appendChild(o);
+  }
+
+  // TABS
+  const tabs=$('<div class="tabs"></div>');
+  const defs=[['profil','👤 Profil'],['reyting','💎 Reyting']];
+  if(d.is_owner&&d.owner) defs.push(['owner','👑 Owner']);
+  defs.forEach(([k,t])=>{
+    const el=$('<div class="tab" data-k="'+k+'">'+t+'</div>');
+    el.onclick=()=>{setTab(k);};
+    tabs.appendChild(el);
+  });
+  app.appendChild(tabs);
+  setTab(defs.some(x=>x[0]===TAB)?TAB:'profil');
+}
+function setTab(k){
+  TAB=k;
+  document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==='s-'+k));
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===k));
+}
+function card(lbl,val,cls,full){
+  return '<div class="card '+(full||'')+'"><div class="lbl">'+lbl+'</div>'+
+    '<div class="val '+(cls||'')+'">'+esc(val)+'</div></div>';
+}
+boot();
+</script>
+</body>
+</html>"""
+
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
         print(
@@ -17233,6 +17640,7 @@ def main():
     init_exchange()
     init_panel_overrides()
     init_forcesub()
+    init_webapp()
     load_crash_config()
 
     app = (
@@ -17289,6 +17697,7 @@ def main():
         (["ariza"], cmd_ariza),
         (["qoidalar"], cmd_rules),
         (["rules"], cmd_grules),
+        (["app", "ilova"], cmd_app),
         (["help", "yordam"], cmd_help),
         (["lang"], cmd_lang),
     ]

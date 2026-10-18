@@ -88,3 +88,11 @@
   `gh_filter_match` so'z-chegarasi bilan). `rules` ustuni `GUARD_DEFAULTS` ga qo'shilgan. `/help` guruhda admin buyruqlar ro'yxatini ham chiqaradi.
   Barcha buyruqlar `/` dan tashqari `.` va `!` prefikslari bilan ham ishlaydi (Group Help uslubi): `main()` da har bir buyruq
   `CommandHandler` + `PrefixHandler([".","!"], ...)` bilan ro'yxatdan o'tadi; buyruq nomini ajratish `lstrip("/.!")`.
+- 🌐 Web App (Telegram Mini App, to'q + neon uslub): botning mavjud HTTP serveridan uzatiladi (`exchange_start_server` endi PORT bo'lsa
+  ishga tushadi; almashuv yo'llari EXCHANGE_SECRET bo'lsa). `_ExchangeHandler`: `GET /app` → `WEBAPP_HTML`, `POST /app/api/data` →
+  `webapp_fetch` (DB bot sikliga marshal qilinadi). Auth: `webapp_check_init_data` — Telegram `initData` ni bot token bilan HMAC
+  (`secret=HMAC("WebAppData", token)`), `auth_date` yangiligi tekshiriladi. `webapp_payload`: profil, hamyon, reyting (TOP 15),
+  daraja, farzand, birja, kredit; owner uchun qo'shimcha statistika. URL: `WEBAPP_URL` yoki `RAILWAY_PUBLIC_DOMAIN`. Kirish: `/app`
+  (`cmd_app`, shaxsiy chatda `WebAppInfo` tugma) + `post_init` da `set_chat_menu_button(MenuButtonWebApp)`. Yoqish/o'chirish:
+  `webapp_config` jadvali (`all`, `owner` flaglari, default 1), owner panel → 🌐 Web App (`panel:webapp*`, `panel_webapp_view/callback`):
+  hamma uchun va ownerlar uchun alohida yoqish/o'chirish. Faqat bot egalari.

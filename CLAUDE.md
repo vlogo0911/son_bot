@@ -65,3 +65,4 @@
 - Owner panel → 🔢 Ko'rsatkichlarni tahrirlash (`panel:stats_edit`, `panel:stat_*`, `panel_stats_callback`/`panel_stats_text`,
   `panel_overrides` jadvali): foydalanuvchilar/guruhlar/faol o'yinlar/jami ishtiroklar sonini qo'lda belgilash (faqat panel
   ko'rinishi, `stat_show`), "🔄 Avto" haqiqiy songa qaytaradi. Faqat bot egalari.
+  `/taxrir` — tahrirlash menyusini ochadi (`cmd_taxrir`); `/haqiqiy` — asl (override'siz) statistikani ko'rsatadi (`cmd_haqiqiy`).

@@ -67,7 +67,28 @@ MONEY_LOG_CHAT_ID = -1004430776232
 
 # Kasb almashtirish so'rovlarini qabul qiladigan ownerlar
 CAREER_OWNER_IDS = {6913838682, 1150777456, 8358319733}
-REREG_USER_IDS = {8337510055}   # profilda «🔄 Qayta ro'yxatdan o'tish» ko'rinadiganlar
+REREG_SEED_IDS = (8337510055,)   # birinchi ishga tushishda ruxsat ro'yxatiga qo'shiladi
+
+
+def init_rereg():
+    with db() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS rereg_config (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+        c.execute("CREATE TABLE IF NOT EXISTS rereg_users (user_id INTEGER PRIMARY KEY)")
+        if not c.execute("SELECT 1 FROM rereg_config WHERE key='seeded'").fetchone():
+            c.executemany("INSERT OR IGNORE INTO rereg_users(user_id) VALUES (?)", [(u,) for u in REREG_SEED_IDS])
+            c.execute("INSERT INTO rereg_config(key, value) VALUES ('seeded', 1)")
+
+
+def rereg_all_on():
+    row = db().execute("SELECT value FROM rereg_config WHERE key='all'").fetchone()
+    return bool(row and row[0])
+
+
+def rereg_allowed(uid):
+    """Qayta ro'yxatdan o'tish: ommaviy yoqilgan bo'lsa hamma, aks holda faqat ro'yxatdagilar."""
+    if rereg_all_on():
+        return True
+    return db().execute("SELECT 1 FROM rereg_users WHERE user_id=?", (int(uid),)).fetchone() is not None
 
 MIN_NUMBER = 1
 MAX_NUMBER = 100
@@ -2029,6 +2050,7 @@ def panel_keyboard(user_id=None):
         rows.append([InlineKeyboardButton("🔢 Ko‘rsatkichlarni tahrirlash", callback_data="panel:stats_edit")])
         rows.append([InlineKeyboardButton("📢 Majburiy obuna", callback_data="panel:fsub")])
         rows.append([InlineKeyboardButton("🌐 Web App", callback_data="panel:webapp")])
+        rows.append([InlineKeyboardButton("🔄 Qayta ro‘yxatdan o‘tish", callback_data="panel:rereg")])
         rows.append([InlineKeyboardButton("👶 Farzand o‘chirish", callback_data="panel:kiddel")])
         rows.append([InlineKeyboardButton("🎰 Crash sozlamalari", callback_data="panel:crash")])
         rows.append([InlineKeyboardButton("✨ Premium emoji", callback_data="panel:pemoji")])
@@ -2521,6 +2543,11 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "panel:fsub" or query.data.startswith("panel:fsub_"):
         # "fsub*" PANEL_PERMISSIONS'da yo'q → faqat bot egalari.
         await panel_fsub_callback(query, context)
+        return
+
+    if query.data == "panel:rereg" or query.data.startswith("panel:rereg_"):
+        # "rereg*" PANEL_PERMISSIONS'da yo'q → faqat bot egalari.
+        await panel_rereg_callback(query, context)
         return
 
     if query.data == "panel:webapp" or query.data.startswith("panel:webapp_"):
@@ -3403,7 +3430,7 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if gift_count > len(gift_rows):
         gift_lines.append({"uz": f"… va yana {gift_count-len(gift_rows)} ta", "eng": f"… and {gift_count-len(gift_rows)} more", "ru": f"… и ещё {gift_count-len(gift_rows)}", "kz": f"… және тағы {gift_count-len(gift_rows)}"}.get(profile_lang, f"… {gift_count-len(gift_rows)} more"))
     profile_text += "\n\n" + profile_emojify(gift_titles.get(profile_lang, gift_titles["uz"])) + ":\n" + ("\n".join(gift_lines) if gift_lines else no_gifts.get(profile_lang, no_gifts["uz"]))
-    if user.id in REREG_USER_IDS:
+    if rereg_allowed(user.id):
         profile_buttons.append([InlineKeyboardButton("🔄 Qayta ro‘yxatdan o‘tish", callback_data="career:rereg")])
     await msg.reply_text(
         profile_text,
@@ -8932,9 +8959,9 @@ async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
 
-    # 🔄 Qayta ro'yxatdan o'tish (faqat REREG_USER_IDS): jins → tug'ilgan sana → kasb
+    # 🔄 Qayta ro'yxatdan o'tish (rereg_allowed): jins → tug'ilgan sana → kasb
     if data == "career:rereg" or data.startswith("career:rgender:"):
-        if user.id not in REREG_USER_IDS:
+        if not rereg_allowed(user.id):
             await q.message.reply_text("⛔ Bu funksiya siz uchun yoqilmagan.")
             return
         if q.message.chat.type != ChatType.PRIVATE:
@@ -9675,6 +9702,10 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if user.id in CAREER_OWNER_IDS and context.user_data.get("panel_kid_state") == "waiting_id":
         await panel_kid_handle_text(update, context)
+        return
+
+    if user.id in CAREER_OWNER_IDS and context.user_data.get("panel_rereg_state"):
+        await panel_rereg_text(update, context)
         return
 
     if user.id in CAREER_OWNER_IDS and context.user_data.get("panel_fsub_state") == "waiting_channel":
@@ -17320,6 +17351,73 @@ async def panel_fsub_text(update, context):
     await msg.reply_text("✅ Kanal ulandi va majburiy obuna yoqildi.\n\n" + text, reply_markup=kb)
 
 
+# ── 👑 Owner panel: 🔄 Qayta ro'yxatdan o'tish ruxsati ──
+
+PANEL_REREG_BACK = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="panel:rereg")]])
+
+
+def panel_rereg_view():
+    on = rereg_all_on()
+    ids = [r[0] for r in db().execute("SELECT user_id FROM rereg_users ORDER BY user_id")]
+    lines = ["🔄 <b>QAYTA RO‘YXATDAN O‘TISH</b>", "",
+             "Profilda «🔄 Qayta ro‘yxatdan o‘tish» tugmasi chiqadi: jins, yosh va kasb qayta tanlanadi.", "",
+             f"👥 Hamma uchun: <b>{'✅ yoqilgan' if on else '❌ o‘chiq'}</b>",
+             f"👤 Alohida ruxsat berilganlar ({len(ids)}):"]
+    lines += [f"• {person_name(i)} — <code>{i}</code>" for i in ids[:30]] or ["—"]
+    rows = [
+        [InlineKeyboardButton("🔴 Hamma uchun o‘chirish" if on else "🟢 Hamma uchun yoqish", callback_data="panel:rereg_all")],
+        [InlineKeyboardButton("➕ Bir kishiga yoqish", callback_data="panel:rereg_add"),
+         InlineKeyboardButton("➖ Bir kishidan o‘chirish", callback_data="panel:rereg_del")],
+        [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
+    ]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def panel_rereg_callback(query, context):
+    data = query.data
+    context.user_data.pop("panel_rereg_state", None)
+    if data == "panel:rereg_all":
+        with db() as c:
+            c.execute("INSERT INTO rereg_config(key, value) VALUES ('all', ?) "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (0 if rereg_all_on() else 1,))
+    elif data in ("panel:rereg_add", "panel:rereg_del"):
+        context.user_data["panel_rereg_state"] = "add" if data.endswith("add") else "del"
+        await query.edit_message_text(
+            ("➕ Ruxsat beriladigan" if data.endswith("add") else "➖ Ruxsati olinadigan")
+            + " foydalanuvchining <b>ID</b> sini yoki <b>@username</b> ini yuboring:",
+            reply_markup=PANEL_REREG_BACK)
+        return
+    text, kb = panel_rereg_view()
+    try:
+        await query.edit_message_text(text, reply_markup=kb)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
+async def panel_rereg_text(update, context):
+    msg = update.effective_message
+    raw = (msg.text or "").strip()
+    uid = None
+    if raw.startswith("@"):
+        row = db().execute("SELECT user_id FROM users WHERE lower(username)=lower(?)", (raw[1:],)).fetchone()
+        uid = row[0] if row else None
+    elif raw.lstrip("-").isdigit():
+        uid = int(raw)
+    if not uid:
+        await msg.reply_text("❌ Foydalanuvchi topilmadi. ID (raqam) yoki @username yuboring.", reply_markup=PANEL_REREG_BACK)
+        return
+    state = context.user_data.pop("panel_rereg_state", None)
+    with db() as c:
+        if state == "add":
+            c.execute("INSERT OR IGNORE INTO rereg_users(user_id) VALUES (?)", (uid,))
+        else:
+            c.execute("DELETE FROM rereg_users WHERE user_id=?", (uid,))
+    text, kb = panel_rereg_view()
+    note = f"✅ <code>{uid}</code> ga ruxsat berildi." if state == "add" else f"✅ <code>{uid}</code> dan ruxsat olindi."
+    await msg.reply_text(note + "\n\n" + text, reply_markup=kb)
+
+
 # ── 👑 Owner panel: 🌐 Web App ──
 
 def panel_webapp_view():
@@ -18676,6 +18774,7 @@ def main():
     init_panel_overrides()
     init_forcesub()
     init_webapp()
+    init_rereg()
     load_crash_config()
 
     app = (

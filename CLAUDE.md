@@ -56,3 +56,9 @@
   (`locks` bitmaskasi: stiker/GIF/ovozli/dumaloq video/forward), 🌙 tungi rejim (`night_*` ustunlari, `night_worker` har 60 s,
   Toshkent vaqti; `set_chat_permissions` bilan yopadi, oldingi ruxsatlar `night_saved` da), 📣 `/report` va "@admin" (adminlarga
   shaxsiy xabar + 🗑/🔇/🚀 tugmalar `cb_report`), 📋 log kanal (`/setlog @kanal|off`, `mod_log`).
+- 💱 Botlar aro pul almashuvi (`cb_exchange`, `ex:<uid>:...`; owner panel → 💱 Pul almashuvi, `panel:exch*`): hamkor bot bilan
+  HMAC-imzolangan HTTP ko'prik. Env: `EXCHANGE_SECRET`, `EXCHANGE_PARTNER_URL`, `EXCHANGE_PARTNER_NAME`, `PORT`. Kiruvchi server
+  (`exchange_start_server`, stdlib http.server, alohida ip → `asyncio.run_coroutine_threadsafe`): `POST /exchange/credit`
+  (idempotent, `exchange_txns.txid`). Chiquvchi (`exchange_send` → `exchange_finalize_out`): $ 1:1 (komissiya `fee_pct`),
+  xatoda to'liq qaytadi, noaniqda pending + `exchange_retry_worker`. Kunlik limit, faol kredit bo'lsa bloklanadi.
+  Sozlamalar `exchange_config` (enabled/fee_pct/daily_limit). son_bot Railway'da public domen + PORT bilan ishlashi kerak.

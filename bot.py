@@ -8732,6 +8732,7 @@ async def post_init(application: Application):
     application.create_task(night_worker(application), name="night-worker")
     exchange_start_server(application)
     application.create_task(exchange_retry_worker(application), name="exchange-retry")
+    application.create_task(web_crash_round_worker(application), name="web-crash-rounds")
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -8801,6 +8802,10 @@ async def post_init(application: Application):
 
 
 async def post_shutdown(application: Application):
+    try:
+        web_crash_refund_open()   # web Crash: yechilmagan tikishlar qaytadi
+    except Exception:  # noqa: BLE001
+        logger.exception("Web crash tikishlarini qaytarishda xato")
     for game in list(FROG_GAMES.values()):
         try:
             frog_settle(game)   # sakragan bo'lsa — yutuq, aks holda depozit qaytadi
@@ -12567,6 +12572,44 @@ def applicant_info(uid):
     return "\n".join(lines)
 
 
+async def submit_loan_app(bot, uid, first_name, bank, amount, days, due, purpose):
+    """Ariza rejimidagi bankka kredit arizasini yaratib, bank egasiga yuboradi. True — yetkazildi."""
+    c = db()
+    with c:
+        app_id = c.execute(
+            "INSERT INTO bank_loan_apps(bank_id, user_id, amount, days, due, purpose, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (bank["id"], uid, amount, days, due, purpose, int(time.time())),
+        ).lastrowid
+    text = (
+        f"📝 <b>KREDIT ARIZASI</b> #{app_id}\n\n"
+        f"{user_mention(uid, first_name)} (<code>{uid}</code>) sizning <b>{escape(bank['name'])}</b> "
+        f"bankingizdan kredit olmoqchi.\n\n"
+        f"💵 Summa: <b>{fmt_money(amount)}$</b> · 📅 {days} kun · "
+        f"💳 qaytaradi: <b>{fmt_money(due)}$</b> ({pct(bank['loan_rate'])}% / kun)\n"
+        f"🎯 Maqsad: <i>{escape(purpose)}</i>\n\n"
+        f"<b>Ma’lumotlar:</b>\n{applicant_info(uid)}"
+    )
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"bka:{app_id}:yes"),
+        InlineKeyboardButton("❌ Rad etish", callback_data=f"bka:{app_id}:no"),
+    ]])
+    recipients = [bank["owner_id"]] + [o for o in sorted(CAREER_OWNER_IDS) if o != bank["owner_id"]]
+    delivered = 0
+    for rid in recipients:
+        try:
+            await bot.send_message(rid, text, reply_markup=kb)
+            delivered += 1
+        except TelegramError:
+            pass
+        if delivered and rid == bank["owner_id"]:
+            break   # bank egasiga yetdi — bot egalarini bezovta qilmaymiz
+    if not delivered:
+        with c:
+            c.execute("UPDATE bank_loan_apps SET status='cancelled' WHERE id=?", (app_id,))
+        return False
+    return True
+
+
 async def bank_purpose_text(update, context):
     """Shaxsiy chatda kredit maqsadini qabul qilib, arizani bank egasiga yuboradi. True — qayta ishlandi."""
     state = context.user_data.pop("bank_purpose", None)
@@ -12583,38 +12626,9 @@ async def bank_purpose_text(update, context):
     if active_loan(uid) or pending_app(uid) or wallet_balance(uid) < 0:
         await msg.reply_text(bank_t(uid, "apply_pending" if pending_app(uid) else "loan_has"))
         return True
-    c = db()
-    with c:
-        app_id = c.execute(
-            "INSERT INTO bank_loan_apps(bank_id, user_id, amount, days, due, purpose, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (bank["id"], uid, state["amount"], state["days"], state["due"], purpose, int(time.time())),
-        ).lastrowid
-    text = (
-        f"📝 <b>KREDIT ARIZASI</b> #{app_id}\n\n"
-        f"{user_mention(uid, user.first_name)} (<code>{uid}</code>) sizning <b>{escape(bank['name'])}</b> "
-        f"bankingizdan kredit olmoqchi.\n\n"
-        f"💵 Summa: <b>{fmt_money(state['amount'])}$</b> · 📅 {state['days']} kun · "
-        f"💳 qaytaradi: <b>{fmt_money(state['due'])}$</b> ({pct(bank['loan_rate'])}% / kun)\n"
-        f"🎯 Maqsad: <i>{escape(purpose)}</i>\n\n"
-        f"<b>Ma’lumotlar:</b>\n{applicant_info(uid)}"
-    )
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"bka:{app_id}:yes"),
-        InlineKeyboardButton("❌ Rad etish", callback_data=f"bka:{app_id}:no"),
-    ]])
-    recipients = [bank["owner_id"]] + [o for o in sorted(CAREER_OWNER_IDS) if o != bank["owner_id"]]
-    delivered = 0
-    for rid in recipients:
-        try:
-            await context.bot.send_message(rid, text, reply_markup=kb)
-            delivered += 1
-        except TelegramError:
-            pass
-        if delivered and rid == bank["owner_id"]:
-            break   # bank egasiga yetdi — bot egalarini bezovta qilmaymiz
-    if not delivered:
-        with c:
-            c.execute("UPDATE bank_loan_apps SET status='cancelled' WHERE id=?", (app_id,))
+    ok = await submit_loan_app(context.bot, uid, user.first_name, bank,
+                               state["amount"], state["days"], state["due"], purpose)
+    if not ok:
         await msg.reply_text(bank_t(uid, "apply_fail_owner"))
         return True
     await msg.reply_text(bank_t(uid, "purpose_sent"))
@@ -16605,8 +16619,32 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "bot": "son_bot"})
         elif path in ("", "/app"):
             self._send_html(200, WEBAPP_HTML)
+        elif path.startswith("/app/avatar/") and path.rsplit("/", 1)[1].isdigit():
+            self._avatar(int(path.rsplit("/", 1)[1]))
         else:
             self._send(404, {"ok": False})
+
+    def _avatar(self, uid):
+        """Telegram profil rasmi (faqat botni ishlatgan foydalanuvchilar uchun)."""
+        data = b""
+        if _EXCHANGE_LOOP is not None:
+            async def _get():
+                if not db().execute("SELECT 1 FROM users WHERE user_id=?", (uid,)).fetchone():
+                    return b""
+                return await web_avatar_bytes(uid)
+            try:
+                data = asyncio.run_coroutine_threadsafe(_get(), _EXCHANGE_LOOP).result(timeout=10)
+            except Exception:  # noqa: BLE001
+                data = b""
+        if not data:
+            self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _web_api(self, path):
         try:
@@ -16626,8 +16664,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         uid = int(user["id"])
         if path == "/app/api/data":
             coro = webapp_fetch(uid)
-        elif path == "/app/api/crash/start":
-            coro = web_crash_start(uid, body.get("bet"))
+        elif path in ("/app/api/crash/start", "/app/api/crash/bet"):
+            coro = web_crash_bet(uid, body.get("bet"))
+        elif path == "/app/api/crash/cancel":
+            coro = web_crash_cancel(uid)
         elif path == "/app/api/crash/state":
             coro = web_crash_state(uid)
         elif path == "/app/api/crash/cashout":
@@ -16641,7 +16681,7 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         elif path == "/app/api/shop/buy":
             coro = web_shop_buy(uid, body.get("gift"), body.get("to"))
         elif path == "/app/api/bank/loan":
-            coro = web_bank_loan(uid, body.get("bank"), body.get("amount"), body.get("days"))
+            coro = web_bank_loan(uid, body.get("bank"), body.get("amount"), body.get("days"), body.get("purpose"))
         elif path == "/app/api/bank/repay":
             coro = web_bank_repay(uid)
         elif path == "/app/api/bank/deposit":
@@ -17706,14 +17746,16 @@ async def webapp_payload(user_id):
     # 🛍 Do'kon va 🏦 bank imkoniyatlari (web app interaktiv uchun)
     shop = [{"key": k, "name": nm, "price": pr} for k, (nm, pr) in SHOP_GIFTS.items()]
     has_partner = active_pair(user_id) is not None
-    instant_banks = [{"id": b["id"], "name": b["name"],
+    # Botdagi barcha ochiq banklar (ariza rejimidagilar ham — kredit ariza orqali beriladi)
+    instant_banks = [{"id": b["id"], "name": b["name"], "apply": bool(b["apply_mode"]),
                       "loan_rate": round(b["loan_rate"] * 100, 1), "deposit_rate": round(b["deposit_rate"] * 100, 1)}
-                     for b in banks_all(only_active=True) if not b["apply_mode"]]
+                     for b in banks_all(only_active=True)]
     bank_opts = {
         "banks": instant_banks,
         "loan_amounts": ([LOAN_FIRST] if not had_loan_before(user_id) else LOAN_AMOUNTS),
         "loan_days": list(LOAN_DAYS), "dep_amounts": DEPOSIT_AMOUNTS, "dep_days": list(DEPOSIT_DAYS),
         "can_loan": not (active_loan(user_id) or pending_app(user_id) or money < 0),
+        "pending_app": bool(pending_app(user_id)),
         "can_deposit": not (active_deposit(user_id) or active_loan(user_id) or money < 0),
     }
 
@@ -17757,7 +17799,6 @@ async def webapp_fetch(user_id):
 
 
 # ── 🎮 Web app o'yinlari (xavfsiz, server tomonda, haqiqiy hamyon) ──
-WEB_CRASH: dict[int, dict] = {}     # user_id -> {bet, crash, t0, done}
 WEB_FROG: dict[int, dict] = {}      # user_id -> {bet, mode, traps, step, done}
 WEB_CRASH_HISTORY: list = []        # oxirgi crash nuqtalari (umumiy, yuqori panel uchun)
 WEB_CRASH_GROWTH = 0.12
@@ -17770,11 +17811,22 @@ def web_enabled_for(uid):
     return flags["all"] or (uid in CAREER_OWNER_IDS and flags["owner"])
 
 
+# ── 🚀 UMUMIY Crash (Aviator): hamma uchun bitta raund, bir xil koeffitsiyent ──
+# Bosqichlar: "bet" (WEB_ROUND_BET s tikish) → "fly" (koeffitsiyent o'sadi) → "crash" (WEB_ROUND_PAUSE s).
+# Crash nuqtasi faqat serverda; klient faqat portlagandan keyin biladi. Tikish "fly"/"crash" paytida
+# keyingi raundga navbatga qo'yiladi. Yechish SERVER soati bo'yicha.
+WEB_ROUND_BET = 7.0
+WEB_ROUND_PAUSE = 3.5
+WEB_CRASH_BUST = 0.07          # darhol (1.00x) portlash ehtimoli
+WEB_CRASH_RTP = 0.90           # P(crash > x) ≈ RTP / x — uy ustunligi ~10%
+WEB_ROUND = {"id": 0, "phase": "bet", "t": time.monotonic(), "crash": 1.0, "bets": {}}
+WEB_NEXT_BETS: dict[int, dict] = {}
+
+
 def _web_crash_point():
-    """Crash nuqtasi (YASHIRIN — klientga umuman berilmaydi). ~3% darhol, qolgani P(>x)≈0.97/x."""
-    if random.random() < 0.03:
+    if random.random() < WEB_CRASH_BUST:
         return 1.00
-    pt = 0.97 / (1.0 - random.random())
+    pt = WEB_CRASH_RTP / (1.0 - random.random())
     return round(min(max(pt, 1.01), WEB_CRASH_MAX), 2)
 
 
@@ -17787,7 +17839,72 @@ def _web_crash_record(pt):
     del WEB_CRASH_HISTORY[16:]
 
 
-async def web_crash_start(uid, bet):
+def _web_player_name(uid):
+    row = db().execute("SELECT first_name, username FROM users WHERE user_id=?", (uid,)).fetchone()
+    name = (row[0] if row else None) or (("@" + row[1]) if row and row[1] else None) or str(uid)
+    return name[:18]
+
+
+async def web_crash_round_worker(application):
+    """Umumiy raundlarni cheksiz aylantiradi (post_init'da ishga tushadi)."""
+    while True:
+        try:
+            WEB_ROUND.update(id=WEB_ROUND["id"] + 1, phase="bet", t=time.monotonic(),
+                             crash=_web_crash_point(), bets=dict(WEB_NEXT_BETS))
+            WEB_NEXT_BETS.clear()
+            await asyncio.sleep(WEB_ROUND_BET)
+            WEB_ROUND.update(phase="fly", t=time.monotonic())
+            crash_t = math.log(WEB_ROUND["crash"]) / WEB_CRASH_GROWTH
+            await asyncio.sleep(max(0.0, crash_t))
+            WEB_ROUND.update(phase="crash", t=time.monotonic())
+            _web_crash_record(WEB_ROUND["crash"])
+            await asyncio.sleep(WEB_ROUND_PAUSE)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("Web crash raundida xato")
+            await asyncio.sleep(2)
+
+
+def web_crash_refund_open():
+    """Restartda: yechilmagan tikishlarni qaytaradi (raund to'xtab qoladi)."""
+    for bets in (WEB_ROUND["bets"], WEB_NEXT_BETS):
+        for uid, b in list(bets.items()):
+            if b["cash"] is None:
+                wallet_change(uid, b["bet"])
+        bets.clear()
+
+
+def _web_crash_players(me=None):
+    out = []
+    for uid, b in WEB_ROUND["bets"].items():
+        out.append({"name": b["name"], "bet": b["bet"], "cash": b["cash"], "win": b["win"], "me": uid == me})
+    out.sort(key=lambda x: -x["bet"])
+    return out[:40]
+
+
+async def web_crash_state(uid):
+    r = WEB_ROUND
+    el = time.monotonic() - r["t"]
+    st = {"round": r["id"], "phase": r["phase"], "elapsed": round(el, 3), "growth": WEB_CRASH_GROWTH,
+          "history": list(WEB_CRASH_HISTORY), "players": _web_crash_players(uid),
+          "total": len(r["bets"]), "pot": sum(b["bet"] for b in r["bets"].values())}
+    if r["phase"] == "bet":
+        st["countdown"] = round(max(0.0, WEB_ROUND_BET - el), 2)
+    elif r["phase"] == "fly":
+        st["mult"] = round(min(_web_crash_mult(el), r["crash"] - 0.01) if r["crash"] > 1.0 else 1.0, 2)
+    else:
+        st["crash"] = round(r["crash"], 2)
+    me = r["bets"].get(uid)
+    if me:
+        st["me"] = {"bet": me["bet"], "cash": me["cash"], "win": me["win"]}
+    if uid in WEB_NEXT_BETS:
+        st["queued"] = WEB_NEXT_BETS[uid]["bet"]
+    st["balance"] = wallet_balance(uid)
+    return st
+
+
+async def web_crash_bet(uid, bet):
     if not web_enabled_for(uid):
         return {"error": "disabled"}
     try:
@@ -17798,53 +17915,65 @@ async def web_crash_start(uid, bet):
         return {"error": "min", "min": CRASH_MIN_BET}
     if bet > WEB_BET_MAX:
         return {"error": "max"}
-    old = WEB_CRASH.get(uid)
-    if old and not old["done"]:
-        old["done"] = True   # oldingi tugatilmagan raund — kuygan hisoblanadi (bet qaytmaydi)
+    target = WEB_ROUND["bets"] if WEB_ROUND["phase"] == "bet" else WEB_NEXT_BETS
+    if uid in target:
+        return {"error": "bet_placed"}
     c = db()
     with c:
         if not _wallet_take(c, uid, bet):
             return {"error": "funds", "balance": wallet_balance(uid)}
-    # crash nuqtasi faqat serverda saqlanadi — javobda YO'Q, shuning uchun bashorat qilib bo'lmaydi.
-    WEB_CRASH[uid] = {"bet": bet, "crash": _web_crash_point(), "t0": time.monotonic(), "done": False}
-    return {"started": True, "bet": bet, "growth": WEB_CRASH_GROWTH,
-            "balance": wallet_balance(uid), "history": list(WEB_CRASH_HISTORY)}
+    target[uid] = {"name": _web_player_name(uid), "bet": bet, "cash": None, "win": 0}
+    return {"result": "placed" if target is WEB_ROUND["bets"] else "queued", "bet": bet,
+            "balance": wallet_balance(uid)}
 
 
-async def web_crash_state(uid):
-    """Server-boshqaruvli holat: tirik bo'lsa joriy koeffitsiyent, portlagan bo'lsa — crash."""
-    g = WEB_CRASH.get(uid)
-    if not g or g["done"]:
-        return {"alive": False}
-    cur = _web_crash_mult(time.monotonic() - g["t0"])
-    if cur >= g["crash"]:
-        g["done"] = True
-        WEB_CRASH.pop(uid, None)
-        _web_crash_record(g["crash"])
-        return {"alive": False, "crashed": True, "crash": round(g["crash"], 2),
-                "history": list(WEB_CRASH_HISTORY), "balance": wallet_balance(uid)}
-    return {"alive": True, "mult": round(cur, 2)}
+async def web_crash_cancel(uid):
+    """Raund boshlanmasidan oldin tikishni bekor qilish (pul qaytadi)."""
+    for target, ok in ((WEB_NEXT_BETS, True), (WEB_ROUND["bets"], WEB_ROUND["phase"] == "bet")):
+        b = target.get(uid)
+        if b and ok and b["cash"] is None:
+            target.pop(uid)
+            wallet_change(uid, b["bet"])
+            return {"result": "cancelled", "balance": wallet_balance(uid)}
+    return {"error": "no_game"}
 
 
 async def web_crash_cashout(uid, _ignored=None):
-    """Yechish — SERVER soati bo'yicha hal qilinadi (klient koeffitsiyentiga ishonmaydi)."""
-    g = WEB_CRASH.get(uid)
-    if not g or g["done"]:
+    r = WEB_ROUND
+    b = r["bets"].get(uid)
+    if not b or b["cash"] is not None:
         return {"error": "no_game"}
-    g["done"] = True
-    WEB_CRASH.pop(uid, None)
-    crash = g["crash"]
-    cur = _web_crash_mult(time.monotonic() - g["t0"])
-    if cur >= crash:   # server soatida allaqachon portlagan
-        _web_crash_record(crash)
-        return {"result": "lose", "crash": round(crash, 2),
-                "history": list(WEB_CRASH_HISTORY), "balance": wallet_balance(uid)}
+    if r["phase"] != "fly":
+        return {"error": "not_flying"}
+    cur = _web_crash_mult(time.monotonic() - r["t"])
+    if cur >= r["crash"]:
+        return {"result": "lose", "balance": wallet_balance(uid)}
     mult = round(cur, 2)
-    win = int(g["bet"] * mult)
+    win = int(b["bet"] * mult)
+    b.update(cash=mult, win=win)
     wallet_change(uid, win)
-    _web_crash_record(crash)
-    return {"result": "win", "multiplier": mult, "crash": round(crash, 2),
-            "win": win, "history": list(WEB_CRASH_HISTORY), "balance": wallet_balance(uid)}
+    return {"result": "win", "multiplier": mult, "win": win, "balance": wallet_balance(uid)}
+
+
+# ── 🖼 Telegram profil rasmi (proksi: bot token URL'da ko'rinmasin) ──
+_AVATAR_CACHE: dict[int, tuple] = {}
+
+
+async def web_avatar_bytes(uid):
+    hit = _AVATAR_CACHE.get(uid)
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
+    data = b""
+    try:
+        photos = await _EXCHANGE_LOOP_BOT.get_user_profile_photos(uid, limit=1)
+        if photos.photos:
+            size = photos.photos[0][min(1, len(photos.photos[0]) - 1)]
+            f = await _EXCHANGE_LOOP_BOT.get_file(size.file_id)
+            data = bytes(await f.download_as_bytearray())
+    except TelegramError:
+        data = b""
+    _AVATAR_CACHE[uid] = (time.time(), data)
+    return data
 
 
 async def web_frog_start(uid, bet, mode):
@@ -17962,7 +18091,7 @@ async def web_shop_buy(uid, gift_key, recipient):
 
 # ── 🏦 Web app: Bank (kredit / omonat — faqat instant banklar) ──
 
-async def web_bank_loan(uid, bank_id, amount, days):
+async def web_bank_loan(uid, bank_id, amount, days, purpose=None):
     if not web_enabled_for(uid):
         return {"error": "disabled"}
     try:
@@ -17970,7 +18099,7 @@ async def web_bank_loan(uid, bank_id, amount, days):
         amount, days = int(amount), int(days)
     except (TypeError, ValueError):
         return {"error": "bad"}
-    if not bank or not bank["active"] or bank["apply_mode"]:
+    if not bank or not bank["active"]:
         return {"error": "bank"}
     if active_loan(uid):
         return {"error": "loan_has"}
@@ -17982,6 +18111,15 @@ async def web_bank_loan(uid, bank_id, amount, days):
     if amount not in allowed or days not in LOAN_DAYS:
         return {"error": "params"}
     due = loan_due(amount, days, bank["loan_rate"])
+    if bank["apply_mode"]:
+        # Ariza rejimi: botdagidek maqsad bilan ariza bank egasiga ketadi
+        purpose = str(purpose or "").strip()[:500]
+        if len(purpose) < 3:
+            return {"error": "purpose"}
+        row = db().execute("SELECT first_name FROM users WHERE user_id=?", (uid,)).fetchone()
+        ok = await submit_loan_app(_EXCHANGE_LOOP_BOT, uid, (row[0] if row else None) or str(uid),
+                                   bank, amount, days, due, purpose)
+        return {"result": "applied", "bank": bank["name"]} if ok else {"error": "owner_unreachable"}
     now = int(time.time())
     c = db()
     with c:
@@ -18218,6 +18356,40 @@ WEBAPP_HTML = r"""<!doctype html>
     font-weight:900;font-size:12px;letter-spacing:2px;padding:4px}
   .cstat{position:absolute;bottom:10px;left:0;right:0;text-align:center;z-index:3;font-size:13px;font-weight:700;color:#fff;opacity:.9}
   .betrow{display:flex;gap:8px;margin-top:14px;align-items:center}
+  .ava{position:relative;overflow:hidden}
+  .ava img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%}
+  .cwait{position:absolute;inset:0;z-index:4;display:none;flex-direction:column;align-items:center;justify-content:center;gap:6px;
+    background:radial-gradient(60% 60% at 50% 50%,rgba(10,7,24,.55),rgba(10,7,24,.15));pointer-events:none}
+  .cwait.on{display:flex}
+  .cw1{font-size:12px;letter-spacing:3px;text-transform:uppercase;color:#cbb8ff;font-weight:800}
+  .cw2{font-size:54px;font-weight:900;color:#fff;text-shadow:0 0 26px rgba(232,121,249,.8)}
+  .cw3{font-size:12px;color:var(--dim);font-weight:700}
+  .cbar{width:62%;height:6px;border-radius:9px;background:rgba(255,255,255,.12);overflow:hidden}
+  .cbar i{display:block;height:100%;width:100%;border-radius:9px;background:linear-gradient(90deg,var(--mag),var(--gold));
+    box-shadow:0 0 12px rgba(255,210,74,.7)}
+  .mx.fly{animation:mxp 1s ease-in-out infinite}
+  @keyframes mxp{50%{transform:scale(1.06)}}
+  .stepper button{width:40px}
+  .bigbet.stop{color:#fff;background:linear-gradient(135deg,#f43f5e,#be123c);box-shadow:0 0 26px rgba(244,63,94,.45)}
+  .bigbet.next{color:#07070d;background:linear-gradient(135deg,var(--cyan),var(--pur));box-shadow:0 0 22px rgba(34,211,238,.4)}
+  .bigbet small{display:block;font-size:11px;font-weight:800;opacity:.85;margin-top:2px}
+  .plist{margin-top:14px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,var(--card),#0d0d16);padding:12px 12px 6px}
+  .phd{display:flex;justify-content:space-between;font-size:13px;color:var(--dim);font-weight:700;margin-bottom:8px}
+  .phd b{color:var(--txt)}
+  .pcol,.prow{display:grid;grid-template-columns:1fr 70px 56px 70px;gap:6px;align-items:center}
+  .pcol{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px;padding:0 4px 6px;border-bottom:1px solid var(--line)}
+  .pcol span:not(:first-child),.prow span:not(:first-child){text-align:right}
+  .prow{padding:8px 4px;border-bottom:1px solid rgba(255,255,255,.04);font-size:13px;font-weight:700}
+  .prow:last-child{border-bottom:none}
+  .prow .pn{display:flex;align-items:center;gap:8px;min-width:0}
+  .prow .pn i{flex:none;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-style:normal;font-size:11px;font-weight:900;color:#07070d}
+  .prow .pn em{font-style:normal;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .prow.win{background:linear-gradient(90deg,rgba(163,230,53,.14),transparent);border-radius:10px}
+  .prow.lost{opacity:.55}
+  .prow.mine{outline:1px solid rgba(34,211,238,.5);border-radius:10px}
+  .kf{color:var(--lime)} .kf.l{color:#ff4d6a} .kf.w{color:var(--dim)}
+  .pempty{text-align:center;color:var(--dim);font-size:13px;padding:16px 0 12px}
   .stepper{display:flex;align-items:center;background:#0d0d16;border:1px solid var(--line);border-radius:14px;overflow:hidden}
   .stepper button{background:none;border:none;color:var(--gold);font-size:22px;font-weight:900;width:44px;height:48px;cursor:pointer}
   .quick{display:flex;gap:6px;margin-top:10px}
@@ -18321,12 +18493,15 @@ function render(res){
   const initial=(d.name||'?').trim().charAt(0).toUpperCase()||'🎮';
   app.innerHTML='';
   app.appendChild($(
-    '<div class="hdr"><div class="ava">'+esc(initial)+'</div>'+
+    '<div class="hdr"><div class="ava">'+esc(initial)+'<img id="avimg" alt="" src="/app/avatar/'+esc(d.id)+'"></div>'+
     '<div><div class="hname">'+esc(d.name)+'</div>'+
     '<div class="hsub">'+(d.username?'@'+esc(d.username):'ID '+esc(d.id))+
     (d.is_owner?' · 👑 Owner':'')+'</div></div>'+
     '<div class="bal"><div class="n" id="bal">'+esc(d.money_fmt)+'$</div><div class="l">Hamyon</div></div></div>'));
   window.BAL=d.money;
+  (function(){ const im=document.getElementById('avimg'); if(!im) return;
+    const tu=tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user&&tg.initDataUnsafe.user.photo_url;
+    im.onerror=()=>{ if(tu && im.src!==tu){ im.src=tu; } else { im.remove(); } }; })();
 
   // PROFIL
   const p=$('<div class="sec" id="s-profil"></div>');
@@ -18376,7 +18551,8 @@ function render(res){
       '<div class="hsub">Qo‘yilgan: '+esc(s.amount)+'$ · '+esc(s.days)+' kun · yechish: '+esc(s.matures_at)+'</div></div>'));
   }
   const bo=d.bank_opts||{};
-  const bankSel=(bo.banks||[]).map(b=>'<option value="'+b.id+'">'+esc(b.name)+' · '+b.loan_rate+'%</option>').join('');
+  const bankSel=(bo.banks||[]).map(b=>'<option value="'+b.id+'" data-apply="'+(b.apply?1:0)+'">'+esc(b.name)+' · '+b.loan_rate+'%'+(b.apply?' · 📝 ariza':'')+'</option>').join('');
+  if(bo.pending_app) bk.appendChild($('<div class="card full" style="margin-top:12px"><div class="center">📝 Kredit arizangiz bank egasida ko‘rib chiqilmoqda.</div></div>'));
   // Kredit to'lash
   if(d.bank && d.bank.loan){
     const rp=$('<button class="btn cash full" id="brepay">💳 Kreditni to‘lash ('+esc(d.bank.loan.due)+'$)</button>');
@@ -18390,10 +18566,15 @@ function render(res){
     const f=$('<div class="card full" style="margin-top:12px"><div class="lbl">💸 Kredit olish</div>'+
       '<div class="frow"><select class="sel" id="lbank">'+bankSel+'</select></div>'+
       '<div class="frow"><select class="sel" id="lamt">'+amtO+'</select><select class="sel" id="ldays">'+dayO+'</select></div>'+
+      '<div class="frow" id="lpw" style="display:none"><input class="bet" id="lpurpose" placeholder="🎯 Kredit maqsadi (bank egasi ko‘radi)" style="text-align:left"></div>'+
       '<button class="btn go full" id="loanbtn">💸 Kredit olish</button></div>');
+    const lb=app_q(f,'#lbank'), syncApply=()=>{ const ap=lb.selectedOptions[0]&&lb.selectedOptions[0].dataset.apply==='1';
+      app_q(f,'#lpw').style.display=ap?'':'none'; app_q(f,'#loanbtn').textContent=ap?'📝 Ariza yuborish':'💸 Kredit olish'; };
+    lb.onchange=syncApply; syncApply();
     app_q(f,'#loanbtn').onclick=()=>{ const b=app_q(f,'#loanbtn'); b.disabled=true;
-      api('/app/api/bank/loan',{bank:app_q(f,'#lbank').value,amount:app_q(f,'#lamt').value,days:app_q(f,'#ldays').value}).then(r=>{
+      api('/app/api/bank/loan',{bank:lb.value,amount:app_q(f,'#lamt').value,days:app_q(f,'#ldays').value,purpose:app_q(f,'#lpurpose').value}).then(r=>{
         if(r.result==='loan'){ setBal(r.balance); toast('✅ Kredit olindi: +'+fmtMoney(r.amount)+'$'); refresh(); }
+        else if(r.result==='applied'){ toast('📝 Ariza '+r.bank+' egasiga yuborildi'); refresh(); }
         else { toast(errText(r.error)); b.disabled=false; } }); };
     bk.appendChild(f);
   }
@@ -18508,18 +18689,23 @@ function render(res){
   sh.appendChild(gifts);
   app.appendChild(sh);
 
-  // CRASH (Aviator)
+  // CRASH (Aviator — umumiy raund)
   const cr=$('<div class="sec" id="s-crash"></div>');
   cr.innerHTML=
     '<div class="hist" id="chist"></div>'+
     '<div class="crashbox" id="cbox"><canvas id="ccanvas"></canvas>'+
-      '<div class="funmode">✦ FUN MODE ✦</div>'+
-      '<div class="mx" id="mx">1.00x</div><div class="plane" id="plane">🛩️</div>'+
-      '<div class="cstat" id="cnote">Tikib, portlashdan oldin yechib oling · qachon portlashi sir 🎯</div></div>'+
+      '<div class="funmode">✦ RAUND #<span id="cround">—</span> · <span id="conline">0</span> o‘yinchi ✦</div>'+
+      '<div class="mx" id="mx">1.00x</div>'+
+      '<div class="cwait" id="cwait"><div class="cw1">Keyingi raund</div><div class="cw2" id="ccnt">0.0</div>'+
+        '<div class="cbar"><i id="cbarf"></i></div><div class="cw3">Tikishni hozir qiling ⏳</div></div>'+
+      '<div class="cstat" id="cnote">Hamma uchun bitta raund · qachon uchib ketishi sir 🎯</div></div>'+
     '<div class="betrow">'+
-      '<div class="stepper"><button id="cminus">−</button><input class="bet" id="cbet" type="number" inputmode="numeric" value="50" style="border:none;width:90px"></div>'+
+      '<div class="stepper"><button id="cminus">−</button><input class="bet" id="cbet" type="number" inputmode="numeric" value="50" style="border:none;width:74px;padding:13px 2px"><button id="cplus">+</button></div>'+
       '<button class="bigbet" id="cbtn" style="margin-top:0;flex:1">BET · 50$</button></div>'+
-    '<div class="quick"><div class="q" data-v="50">50</div><div class="q" data-v="100">100</div><div class="q" data-v="500">500</div><div class="q" data-v="1000">1000</div></div>';
+    '<div class="quick"><div class="q" data-v="half">½</div><div class="q" data-v="dbl">×2</div><div class="q" data-v="100">100</div><div class="q" data-v="500">500</div><div class="q" data-v="1000">1K</div><div class="q" data-v="max">MAX</div></div>'+
+    '<div class="plist"><div class="phd"><span>👥 O‘yinchilar <b id="pcount">0</b></span><span>💰 Bank <b id="ppot">0</b>$</span></div>'+
+      '<div class="pcol"><span>O‘yinchi</span><span>Tikish</span><span>Kf</span><span>Yutuq</span></div>'+
+      '<div id="plist"></div></div>';
   app.appendChild(cr);
   window.CHIST=d.crash_history||[];
 
@@ -18588,117 +18774,212 @@ function haptic(t){ try{tg.HapticFeedback.notificationOccurred(t);}catch(e){} }
 function histClass(v){ return v>=10?'hi':(v>=2?'mid':'lo'); }
 function renderHist(el){ if(!el) return; el.innerHTML=(window.CHIST||[]).map(v=>'<span class="hc '+histClass(v)+'">'+v.toFixed(2)+'x</span>').join(''); }
 function initCrash(){
+  if(window.CR) window.CR.stop();
   const btn=document.getElementById('cbtn'), bet=document.getElementById('cbet'),
         mx=document.getElementById('mx'), box=document.getElementById('cbox'), cv=document.getElementById('ccanvas'),
-        plane=document.getElementById('plane'), note=document.getElementById('cnote'), chist=document.getElementById('chist'),
-        minus=document.getElementById('cminus'), cr=document.getElementById('s-crash');
+        note=document.getElementById('cnote'), chist=document.getElementById('chist'),
+        minus=document.getElementById('cminus'), plus=document.getElementById('cplus'), cr=document.getElementById('s-crash'),
+        wait=document.getElementById('cwait'), cnt=document.getElementById('ccnt'), barf=document.getElementById('cbarf'),
+        plist=document.getElementById('plist'), pcount=document.getElementById('pcount'), ppot=document.getElementById('ppot'),
+        cround=document.getElementById('cround'), conline=document.getElementById('conline');
   if(!btn) return;
   renderHist(chist);
   const ctx=cv.getContext('2d'); const dpr=window.devicePixelRatio||1;
-  let state='idle', raf=null, poll=null, t0=0, growth=0.12, cur=1, idleRaf=null;
+  // server holati (raund/bosqich/vaqt) — hamma uchun bir xil
+  const S={round:0, phase:'bet', el:0, at:performance.now(), growth:0.12, crash:null, betDur:7, me:null, queued:null, players:[], total:0, pot:0};
+  let alive=true, raf=0, timer=0, busy=false, crashAt=0, tip=[0,0,0], lastTip=null, roundSeen=0;
+  const stars=Array.from({length:80},()=>({x:Math.random(),y:Math.random(),z:.25+Math.random()*.75,tw:Math.random()*6}));
+  const puffs=[], sparks=[];
+  function phaseEl(){ return S.el+(performance.now()-S.at)/1000; }
+  function curMult(){ return S.phase==='fly'?Math.exp(S.growth*phaseEl()):1; }
   function size(){ const w=box.clientWidth,h=box.clientHeight; if(cv.width!==w*dpr||cv.height!==h*dpr){cv.width=w*dpr;cv.height=h*dpr;} }
-  function setBetLabel(){ btn.textContent='BET · '+(parseInt(bet.value)||0)+'$'; }
-  bet.oninput=()=>{ if(state==='idle') setBetLabel(); };
-  minus.onclick=()=>{ if(state!=='idle')return; bet.value=Math.max(10,(parseInt(bet.value)||0)-10); setBetLabel(); };
-  cr.querySelectorAll('.quick .q').forEach(q=>q.onclick=()=>{ if(state!=='idle')return; bet.value=q.dataset.v; setBetLabel(); });
-  // aylanadigan nurlar foni
-  function rays(W,H){
-    const ox=0,oy=H,R=Math.hypot(W,H)*1.3,rot=performance.now()/9000,n=14,span=Math.PI*0.52,lo=0.06;
-    for(let i=0;i<n;i++){
-      const a=lo+(i/n)*span+rot, a2=a+(span/n)*0.55;
-      ctx.beginPath(); ctx.moveTo(ox,oy);
-      ctx.lineTo(ox+Math.cos(a)*R, oy-Math.sin(a)*R);
-      ctx.lineTo(ox+Math.cos(a2)*R, oy-Math.sin(a2)*R); ctx.closePath();
-      ctx.fillStyle=i%2? 'rgba(150,110,235,.12)':'rgba(90,60,170,.10)'; ctx.fill();
-    }
+  function betVal(){ return Math.max(0,parseInt(bet.value)||0); }
+  function stepOf(v){ return v<100?10:v<1000?50:v<10000?500:5000; }
+  function setBet(v){ bet.value=Math.max(10,Math.min(Math.round(v),1000000)); paintBtn(); }
+  minus.onclick=()=>{ const v=betVal(); setBet(v-stepOf(v-1)); };
+  plus.onclick=()=>{ const v=betVal(); setBet(v+stepOf(v)); };
+  bet.oninput=paintBtn;
+  cr.querySelectorAll('.quick .q').forEach(q=>q.onclick=()=>{ const v=q.dataset.v, b=betVal();
+    if(v==='half') setBet(b/2); else if(v==='dbl') setBet(b*2); else if(v==='max') setBet(window.BAL||10); else setBet(+v); });
+
+  // ---- tugma holatlari ----
+  function myOpen(){ return S.me && S.me.cash==null; }
+  function paintBtn(){
+    const b=betVal(); btn.disabled=busy;
+    if(S.phase==='bet' && S.me){ btn.className='bigbet stop'; btn.innerHTML='BEKOR QILISH<small>'+fmtMoney(S.me.bet)+'$ · raund boshlanmoqda</small>'; return; }
+    if(S.phase==='fly' && myOpen()){ btn.className='bigbet cash'; btn.innerHTML='CASH OUT<small>'+fmtMoney(Math.floor(S.me.bet*curMult()))+'$</small>'; return; }
+    if(S.queued){ btn.className='bigbet stop'; btn.innerHTML='BEKOR QILISH<small>'+fmtMoney(S.queued)+'$ · keyingi raundga</small>'; return; }
+    if(S.phase==='bet'){ btn.className='bigbet'; btn.innerHTML='BET<small>'+fmtMoney(b)+'$</small>'; return; }
+    btn.className='bigbet next'; btn.innerHTML='KEYINGI RAUNDGA<small>'+fmtMoney(b)+'$</small>';
   }
-  // chiroyli qizil reaktiv samolyot (o'ngga qaragan), egri chiziq burchagiga buriladi
+  btn.onclick=()=>{
+    if(busy) return;
+    let path, body={};
+    if(S.phase==='fly' && myOpen()) path='/app/api/crash/cashout';
+    else if((S.phase==='bet' && S.me) || S.queued) path='/app/api/crash/cancel';
+    else { path='/app/api/crash/bet'; body={bet:betVal()}; }
+    busy=true; paintBtn();
+    api(path,body).then(r=>{
+      busy=false;
+      if(r.balance!=null) setBal(r.balance);
+      if(!r.ok||r.error){ toast(errText(r.error,r.min)); }
+      else if(r.result==='placed'){ S.me={bet:r.bet,cash:null,win:0}; haptic('success'); toast('✅ Tikildi: '+fmtMoney(r.bet)+'$'); }
+      else if(r.result==='queued'){ S.queued=r.bet; toast('⏳ Keyingi raundga tikildi: '+fmtMoney(r.bet)+'$'); }
+      else if(r.result==='cancelled'){ if(S.phase==='bet') S.me=null; S.queued=null; toast('↩️ Bekor qilindi, pul qaytdi'); }
+      else if(r.result==='win'){ S.me&&(S.me.cash=r.multiplier,S.me.win=r.win); haptic('success');
+        note.textContent='✅ +'+fmtMoney(r.win)+'$ · '+r.multiplier.toFixed(2)+'x da yechdingiz'; }
+      else if(r.result==='lose'){ haptic('error'); note.textContent='💥 Kech qoldingiz!'; }
+      paintBtn(); poll(true);
+    }).catch(()=>{ busy=false; paintBtn(); });
+  };
+
+  // ---- o'yinchilar ro'yxati ----
+  const COLS=['#22d3ee','#e879f9','#ffd24a','#a3e635','#fb923c','#a78bfa','#f472b6'];
+  function renderPlayers(){
+    pcount.textContent=S.total; ppot.textContent=fmtMoney(S.pot); conline.textContent=S.total;
+    if(!S.players.length){ plist._h=''; plist.innerHTML='<div class="pempty">Hali hech kim tikmadi — birinchi bo‘ling! 🚀</div>'; return; }
+    const html=S.players.map(p=>{
+      const ini=esc((p.name||'?').replace('@','').charAt(0).toUpperCase()), col=COLS[(p.name||'').length%COLS.length];
+      let kf, w, cls='';
+      if(p.cash!=null){ kf='<span class="kf">'+p.cash.toFixed(2)+'x</span>'; w='<span class="kf">+'+fmtMoney(p.win)+'$</span>'; cls='win'; }
+      else if(S.phase==='crash'){ kf='<span class="kf l">💥</span>'; w='<span class="kf l">−'+fmtMoney(p.bet)+'$</span>'; cls='lost'; }
+      else { kf='<span class="kf w">'+(S.phase==='fly'?'✈︎':'⏳')+'</span>'; w='<span class="kf w">—</span>'; }
+      return '<div class="prow '+cls+(p.me?' mine':'')+'"><span class="pn"><i style="background:'+col+'">'+ini+'</i><em>'+esc(p.name)+(p.me?' (siz)':'')+'</em></span>'+
+        '<span>'+fmtMoney(p.bet)+'$</span>'+kf+w+'</div>';
+    }).join('');
+    if(html!==plist._h){ plist._h=html; plist.innerHTML=html; }
+  }
+
+  // ---- serverdan holat (hamma uchun bir xil koeffitsiyent) ----
+  let inflight=false;
+  function poll(now){
+    clearTimeout(timer);
+    if(!alive) return;
+    if(!inflight){ inflight=true; const t0=performance.now();
+      api('/app/api/crash/state',{}).then(s=>{ inflight=false; if(!alive||!s||!s.ok) return;
+        const lat=(performance.now()-t0)/2000, prev=S.phase, prevRound=S.round;
+        S.growth=s.growth||S.growth; S.round=s.round; S.players=s.players||[]; S.total=s.total||0; S.pot=s.pot||0;
+        S.me=s.me||null; S.queued=s.queued||null;
+        if(s.history){ window.CHIST=s.history; }
+        const est=s.elapsed+lat;
+        if(s.phase!==prev || s.round!==prevRound || Math.abs(est-phaseEl())>0.12){ S.el=est; S.at=performance.now(); }
+        S.phase=s.phase;
+        if(s.phase==='bet') S.betDur=(s.countdown||0)+s.elapsed||7;
+        if(s.phase==='crash' && (prev!=='crash' || s.round!==prevRound)){ S.crash=s.crash; onCrash(prev==='fly'); }
+        if(s.phase==='fly' && prev!=='fly'){ puffs.length=0; lastTip=null; note.textContent='🚀 Uchyapti… o‘z vaqtida yeching!'; }
+        if(s.phase==='bet' && (prev!=='bet' || s.round!==prevRound)){ note.textContent='Hamma uchun bitta raund · qachon uchib ketishi sir 🎯'; }
+        if(s.balance!=null && !busy) setBal(s.balance);
+        cround.textContent=s.round; renderPlayers(); paintBtn();
+      }).catch(()=>{ inflight=false; });
+    }
+    timer=setTimeout(poll, cr.classList.contains('on')?250:2000);
+  }
+  function onCrash(seen){
+    crashAt=performance.now(); renderHist(chist);
+    if(seen) for(let i=0;i<46;i++){ const a=Math.random()*Math.PI*2, v=(1+Math.random()*4)*dpr;
+      sparks.push({x:tip[0],y:tip[1],vx:Math.cos(a)*v,vy:Math.sin(a)*v,life:1,c:i%3?'#ff4d6a':'#ffd24a'}); }
+    if(S.me && S.me.cash==null){ haptic('error'); note.textContent='💥 Uchib ketdi! −'+fmtMoney(S.me.bet)+'$'; }
+    else if(!S.me) note.textContent='💥 '+(S.crash||1).toFixed(2)+'x da uchib ketdi';
+  }
+
+  // ---- chizish ----
+  function sunburst(W,H,now,speed){
+    const ox=W*0.08,oy=H*1.05,R=Math.hypot(W,H)*1.4,rot=now/1000*speed,n=18;
+    for(let i=0;i<n;i++){ const a=rot+i*(Math.PI*2/n), a2=a+Math.PI/n*0.62;
+      ctx.beginPath(); ctx.moveTo(ox,oy); ctx.lineTo(ox+Math.cos(a)*R,oy+Math.sin(a)*R); ctx.lineTo(ox+Math.cos(a2)*R,oy+Math.sin(a2)*R); ctx.closePath();
+      ctx.fillStyle=i%2?'rgba(150,110,235,.10)':'rgba(90,60,170,.08)'; ctx.fill(); }
+  }
+  let starOff=0, gridOff=0, lastNow=performance.now();
+  function background(W,H,now,dt){
+    const fly=S.phase==='fly', sp=fly?Math.min(0.08+0.06*Math.log(curMult()+1),0.5):0.015;
+    starOff+=dt*sp; gridOff+=dt*(fly?60+40*Math.log(curMult()):6)*dpr;
+    sunburst(W,H,now,fly?0.22:0.06);
+    // parallaks yulduzlar (chapga oqadi — samolyot o'ngga uchayotgandek)
+    for(const s of stars){ const x=((s.x-starOff*s.z)%1+1)%1*W, y=s.y*H*0.85, a=.25+.5*Math.abs(Math.sin(now/700+s.tw));
+      ctx.fillStyle='rgba(255,255,255,'+(a*s.z).toFixed(3)+')';
+      if(fly && s.z>.7){ ctx.fillRect(x,y,(6+18*s.z)*dpr*Math.min(sp*6,2),1.2*dpr); } else { ctx.beginPath(); ctx.arc(x,y,s.z*1.4*dpr,0,7); ctx.fill(); } }
+    // pastki perspektiv to'r
+    ctx.strokeStyle='rgba(139,92,246,.18)'; ctx.lineWidth=1*dpr;
+    const gy=H-18*dpr, step=34*dpr;
+    for(let x=-(gridOff%step);x<W;x+=step){ ctx.beginPath(); ctx.moveTo(x,gy); ctx.lineTo(x-14*dpr,H); ctx.stroke(); }
+    ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
+  }
   function drawPlane(x,y,ang,s){
     ctx.save(); ctx.translate(x,y); ctx.rotate(ang);
-    // alanga izi (dvigatel)
-    const fl=ctx.createLinearGradient(-s*2.2,0,-s*0.9,0);
-    fl.addColorStop(0,'rgba(255,180,40,0)'); fl.addColorStop(1,'rgba(255,170,40,.8)');
-    ctx.fillStyle=fl; ctx.beginPath(); ctx.moveTo(-s*0.9,-s*0.14); ctx.lineTo(-s*2.2,0); ctx.lineTo(-s*0.9,s*0.14); ctx.closePath(); ctx.fill();
-    // orqa qanot
+    const fl=ctx.createLinearGradient(-s*2.4,0,-s*0.9,0), fk=0.75+0.25*Math.sin(performance.now()/40);
+    fl.addColorStop(0,'rgba(255,180,40,0)'); fl.addColorStop(1,'rgba(255,200,60,.9)');
+    ctx.fillStyle=fl; ctx.beginPath(); ctx.moveTo(-s*0.9,-s*0.15); ctx.lineTo(-s*(1.6+0.8*fk),0); ctx.lineTo(-s*0.9,s*0.15); ctx.closePath(); ctx.fill();
     ctx.fillStyle='#8a0c22';
     ctx.beginPath(); ctx.moveTo(-s*0.8,-s*0.08); ctx.lineTo(-s*1.25,-s*0.8); ctx.lineTo(-s*0.55,-s*0.12); ctx.closePath(); ctx.fill();
-    // pastki qanot
     ctx.beginPath(); ctx.moveTo(0,s*0.05); ctx.lineTo(-s*0.65,s*0.95); ctx.lineTo(s*0.35,s*0.18); ctx.closePath(); ctx.fill();
-    // tana (gradient + glow)
     ctx.shadowColor='rgba(255,60,90,.9)'; ctx.shadowBlur=16*dpr;
     const g=ctx.createLinearGradient(-s,-s*0.3,s,s*0.3); g.addColorStop(0,'#b11030'); g.addColorStop(.5,'#ff466a'); g.addColorStop(1,'#ff86a0');
-    ctx.fillStyle=g; ctx.beginPath();
-    ctx.moveTo(s*1.35,0);
-    ctx.quadraticCurveTo(s*0.3,-s*0.4,-s*0.95,-s*0.26);
-    ctx.quadraticCurveTo(-s*1.3,-s*0.12,-s*1.3,0);
-    ctx.quadraticCurveTo(-s*1.3,s*0.12,-s*0.95,s*0.26);
-    ctx.quadraticCurveTo(s*0.3,s*0.4,s*1.35,0); ctx.closePath(); ctx.fill();
-    ctx.shadowBlur=0;
-    // kabina oynasi
-    ctx.fillStyle='rgba(180,240,255,.9)';
+    ctx.fillStyle=g; ctx.beginPath(); ctx.moveTo(s*1.35,0);
+    ctx.quadraticCurveTo(s*0.3,-s*0.4,-s*0.95,-s*0.26); ctx.quadraticCurveTo(-s*1.3,-s*0.12,-s*1.3,0);
+    ctx.quadraticCurveTo(-s*1.3,s*0.12,-s*0.95,s*0.26); ctx.quadraticCurveTo(s*0.3,s*0.4,s*1.35,0); ctx.closePath(); ctx.fill();
+    ctx.shadowBlur=0; ctx.fillStyle='rgba(180,240,255,.9)';
     ctx.beginPath(); ctx.ellipse(s*0.5,-s*0.03,s*0.3,s*0.15,0,0,7); ctx.fill();
+    // aylanuvchi parrak
+    ctx.fillStyle='rgba(255,255,255,.55)'; ctx.beginPath(); ctx.ellipse(s*1.38,0,s*0.06,s*0.42*Math.abs(Math.sin(performance.now()/30)),0,0,7); ctx.fill();
     ctx.restore();
   }
-  function curve(W,H,t,color){
-    const maxM=Math.max(cur*1.3,2.2),N=54,px=i=>8*dpr+(W-30*dpr)*(i/N),py=m=>H-22*dpr-(H-48*dpr)*((m-1)/(maxM-1));
-    let ex=px(0),ey=py(1),px1=ex,py1=ey;
-    const line=new Path2D(); line.moveTo(px(0),py(1));
-    for(let i=0;i<=N;i++){ const m=Math.exp(growth*(t*i/N)); px1=ex; py1=ey; ex=px(i); ey=py(m); line.lineTo(ex,ey); }
-    const fill=new Path2D(line); fill.lineTo(ex,H); fill.lineTo(px(0),H); fill.closePath();
-    const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,color.f0); g.addColorStop(1,color.f1);
+  // egri chiziq: uchi chapdan o'ngga siljiydi (8 s), keyin o'ngda chayqalib turadi
+  function curve(W,H,t,now){
+    const pl=14*dpr, pr=46*dpr, base=H-22*dpr, top=40*dpr, T=Math.max(t,8), m=Math.exp(S.growth*t), maxM=Math.max(1.9,m*1.14), N=60;
+    const X=tau=>pl+(W-pl-pr)*(tau/T), Y=mm=>base-(base-top)*((mm-1)/(maxM-1));
+    const line=new Path2D(); line.moveTo(X(0),Y(1));
+    let x=X(0),y=Y(1),x0=x,y0=y;
+    for(let i=1;i<=N;i++){ const tau=t*i/N; x0=x; y0=y; x=X(tau); y=Y(Math.exp(S.growth*tau)); line.lineTo(x,y); }
+    // chalg'ituvchi chayqalish
+    const wob=Math.min(1,t/1.5), wy=(Math.sin(now/260)*5+Math.sin(now/97)*2)*dpr*wob, wx=Math.sin(now/410)*4*dpr*wob;
+    const tx=x+wx, ty=y+wy; line.lineTo(tx,ty);
+    const fill=new Path2D(line); fill.lineTo(tx,base); fill.lineTo(X(0),base); fill.closePath();
+    const g=ctx.createLinearGradient(0,top,0,base); g.addColorStop(0,'rgba(255,60,90,.5)'); g.addColorStop(1,'rgba(255,60,90,.03)');
     ctx.fillStyle=g; ctx.fill(fill);
-    ctx.strokeStyle=color.s; ctx.lineWidth=4*dpr; ctx.lineJoin='round'; ctx.shadowColor=color.s; ctx.shadowBlur=14*dpr; ctx.stroke(line); ctx.shadowBlur=0;
-    const ang=Math.atan2(ey-py1, ex-px1||1);
-    return [ex,ey,ang];
+    ctx.strokeStyle='#ff3b6b'; ctx.lineWidth=4*dpr; ctx.lineJoin='round'; ctx.shadowColor='#ff3b6b'; ctx.shadowBlur=14*dpr; ctx.stroke(line); ctx.shadowBlur=0;
+    return [tx,ty,Math.atan2(y-y0,(x-x0)||1)+Math.sin(now/330)*0.14*wob];
   }
-  function draw(){
-    size(); const W=cv.width,H=cv.height; const t=(performance.now()-t0)/1000; cur=Math.exp(growth*t);
-    mx.textContent=cur.toFixed(2)+'x';
-    ctx.clearRect(0,0,W,H); rays(W,H);
-    const [ex,ey,ang]=curve(W,H,t,{f0:'rgba(255,60,90,.55)',f1:'rgba(255,60,90,.04)',s:'#ff3b6b'});
-    window._tip=[ex,ey];
-    drawPlane(ex,ey,ang,20*dpr);
-    raf=requestAnimationFrame(draw);
+  function particles(dt){
+    for(let i=puffs.length-1;i>=0;i--){ const p=puffs[i]; p.life-=dt*1.4; p.x-=dt*40*dpr; p.r+=dt*10*dpr;
+      if(p.life<=0){ puffs.splice(i,1); continue; }
+      ctx.fillStyle='rgba(255,190,210,'+(p.life*.25).toFixed(3)+')'; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,7); ctx.fill(); }
+    for(let i=sparks.length-1;i>=0;i--){ const p=sparks[i]; p.life-=dt*1.1; p.x+=p.vx; p.y+=p.vy; p.vy+=0.05*dpr; p.vx*=.98;
+      if(p.life<=0){ sparks.splice(i,1); continue; }
+      ctx.globalAlpha=p.life; ctx.fillStyle=p.c; ctx.beginPath(); ctx.arc(p.x,p.y,2.2*dpr*p.life+0.5,0,7); ctx.fill(); ctx.globalAlpha=1; }
   }
-  function idle(){ size(); const W=cv.width,H=cv.height; ctx.clearRect(0,0,W,H); rays(W,H);
-    drawPlane(26*dpr,H-28*dpr,-0.32,20*dpr); idleRaf=requestAnimationFrame(idle); }
-  function stopLoops(){ cancelAnimationFrame(raf); clearInterval(poll); poll=null; }
-  function bust(crash){
-    stopLoops(); state='idle'; box.classList.add('bust'); mx.classList.add('bust');
-    mx.textContent=(crash||cur).toFixed(2)+'x'; note.textContent='💥 Portladi!'; haptic('error');
-    const tip=window._tip||[40,40]; plane.textContent='💥'; plane.style.display='block';
-    plane.style.left=(tip[0]/dpr-14)+'px'; plane.style.top=(tip[1]/dpr-18)+'px'; plane.style.bottom='auto';
-    renderHist(chist); resetSoon();
+  function frame(){
+    if(!alive) return;
+    raf=requestAnimationFrame(frame);
+    if(!cr.classList.contains('on')) return;
+    const now=performance.now(), dt=Math.min(0.05,(now-lastNow)/1000); lastNow=now;
+    size(); const W=cv.width,H=cv.height; ctx.clearRect(0,0,W,H);
+    background(W,H,now,dt);
+    if(S.phase==='bet'){
+      box.classList.remove('bust'); mx.classList.remove('bust','fly'); wait.classList.add('on');
+      const cd=Math.max(0,S.betDur-phaseEl());
+      cnt.textContent=cd.toFixed(1); barf.style.width=Math.min(100,cd/S.betDur*100)+'%'; mx.textContent='';
+      // kutish: samolyot pastda tebranib turadi
+      drawPlane(44*dpr+Math.sin(now/600)*3*dpr, H-42*dpr+Math.sin(now/300)*3*dpr, -0.25+Math.sin(now/500)*0.06, 18*dpr);
+    } else if(S.phase==='fly'){
+      wait.classList.remove('on'); box.classList.remove('bust'); mx.classList.remove('bust'); mx.classList.add('fly');
+      const t=phaseEl(), m=Math.exp(S.growth*t);
+      mx.textContent=m.toFixed(2)+'x';
+      tip=curve(W,H,t,now);
+      if(!lastTip || Math.hypot(tip[0]-lastTip[0],tip[1]-lastTip[1])>5*dpr){ puffs.push({x:tip[0]-18*dpr,y:tip[1]+4*dpr,r:3*dpr,life:1}); lastTip=tip.slice(); }
+      particles(dt);
+      drawPlane(tip[0],tip[1],tip[2],20*dpr);
+      if(myOpen()) btn.querySelector('small') && (btn.querySelector('small').textContent=fmtMoney(Math.floor(S.me.bet*m))+'$');
+    } else {
+      wait.classList.remove('on'); box.classList.add('bust'); mx.classList.remove('fly'); mx.classList.add('bust');
+      mx.textContent=(S.crash||1).toFixed(2)+'x';
+      particles(dt);
+      // samolyot o'ng-yuqoriga uchib ketadi
+      const k=(now-crashAt)/1000;
+      if(k<1.2 && tip[0]) drawPlane(tip[0]+k*k*W*0.9, tip[1]-k*k*H*0.8, -0.6, 20*dpr);
+    }
   }
-  function resetSoon(){ setTimeout(()=>{ box.classList.remove('bust'); mx.classList.remove('bust');
-    plane.style.display='none'; mx.textContent='1.00x';
-    note.textContent='Tikib, portlashdan oldin yechib oling · qachon portlashi sir 🎯';
-    btn.className='bigbet'; btn.style.flex='1'; btn.style.marginTop='0'; btn.disabled=false; setBetLabel(); btn.onclick=start;
-    idle(); }, 1700); }
-  function start(){
-    const b=parseInt(bet.value)||0; btn.disabled=true; cancelAnimationFrame(idleRaf);
-    api('/app/api/crash/start',{bet:b}).then(r=>{
-      if(!r.ok||r.error){ note.textContent=errText(r.error,r.min); btn.disabled=false; idle(); return; }
-      setBal(r.balance); window.CHIST=r.history||window.CHIST; growth=r.growth||0.12; t0=performance.now(); state='fly';
-      plane.style.display='none'; box.classList.remove('bust'); mx.classList.remove('bust');
-      btn.className='bigbet cash'; btn.disabled=false; btn.onclick=cash; note.textContent='🚀 Uchyapti…';
-      raf=requestAnimationFrame(draw);
-      btn.textContent='CASH OUT';
-      poll=setInterval(()=>{ api('/app/api/crash/state',{}).then(s=>{ if(!s.alive){ if(s.history) window.CHIST=s.history; bust(s.crash); }
-        else if(btn.className.indexOf('cash')>=0){ btn.textContent='CASH OUT · '+fmtMoney(Math.round(b*s.mult))+'$'; } }); }, 350);
-    }).catch(()=>{ btn.disabled=false; idle(); });
-  }
-  function cash(){
-    if(state!=='fly') return; state='idle'; stopLoops(); btn.disabled=true;
-    api('/app/api/crash/cashout',{}).then(r=>{
-      if(r.history) window.CHIST=r.history; renderHist(chist);
-      if(r.result==='win'){ setBal(r.balance); mx.textContent=r.multiplier.toFixed(2)+'x';
-        note.textContent='✅ +'+fmtMoney(r.win)+'$ ('+r.multiplier.toFixed(2)+'x)'; haptic('success'); }
-      else { box.classList.add('bust'); mx.classList.add('bust'); mx.textContent=(r.crash||cur).toFixed(2)+'x'; note.textContent='💥 Kech qoldingiz!'; haptic('error'); }
-      resetSoon();
-    }).catch(()=>{ btn.disabled=false; });
-  }
-  size(); state='idle'; plane.style.display='none'; setBetLabel(); btn.onclick=start; idle();
+  window.CR={stop(){ alive=false; cancelAnimationFrame(raf); clearTimeout(timer); }, poke(){ poll(true); }};
+  paintBtn(); renderPlayers(); poll(true); raf=requestAnimationFrame(frame);
 }
 
 // ---- FROG (Baqa) ----
@@ -18764,6 +19045,11 @@ function errText(e,min){
   if(e==='undeliverable') return 'Yetkazilmadi — u botni ochmagan. Pul qaytdi';
   if(e==='no_pair') return 'Juftingiz yo‘q';
   if(e==='self') return 'O‘zingizga yubora olmaysiz';
+  if(e==='purpose') return '🎯 Kredit maqsadini yozing';
+  if(e==='owner_unreachable') return 'Bank egasiga yetkazib bo‘lmadi';
+  if(e==='apply_pending') return '📝 Arizangiz hali ko‘rib chiqilmoqda';
+  if(e==='loan_has') return 'Sizda faol kredit bor';
+  if(e==='bet_placed') return 'Bu raundga allaqachon tikkansiz';
   return 'Xato, qayta urining';
 }
 function kidErr(e){
@@ -18777,6 +19063,7 @@ function setTab(k){
   TAB=k;
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==='s-'+k));
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===k));
+  if(k==='crash' && window.CR) window.CR.poke();
 }
 function card(lbl,val,cls,full){
   return '<div class="card '+(full||'')+'"><div class="lbl">'+lbl+'</div>'+

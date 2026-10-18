@@ -116,3 +116,15 @@
   `BIRJA_HOLD`/stale/min tekshiruvlari), 👶 Farzand boshqaruvi (`web_kid_action` — ovqat/o'yinchoq/ta'lim, `KID_ITEMS`/`KID_FEES`,
   `kid_fresh`/`kid_save`). Payloadda `birja_market`, `crash_history`, `kids_list` ichida food/toy/fee. Endpointlar yana:
   `/app/api/{crash/state,birja/buy,birja/sell,kid}`. UI: neon+oltin uslub, modal sheet, toast. Owner toggle'lari hamma o'yin/amalga amal qiladi.
+- 🚀 Web Crash endi UMUMIY raund (hamma uchun bir vaqtda bir xil koeffitsiyent): `WEB_ROUND` (id/phase bet→fly→crash/t/crash/bets),
+  `WEB_NEXT_BETS` (fly/crash paytidagi tikishlar keyingi raundga), `web_crash_round_worker` (post_init task, `WEB_ROUND_BET` 7 s
+  tikish, `WEB_ROUND_PAUSE`). Uy ustunligi: `WEB_CRASH_BUST` 7% darhol portlash + `WEB_CRASH_RTP` 0.90. API: `crash/bet`
+  (`web_crash_bet`, `/crash/start` ham shunga), `crash/cancel`, `crash/cashout` (faqat fly, server soati), `crash/state`
+  (players/total/pot/me/queued; crash nuqta faqat crash fazasida). Restartda `web_crash_refund_open` ochiq tikishlarni qaytaradi.
+  Klient: `initCrash` → `window.CR` (stop/poke, qayta renderda eski sikl to'xtaydi), samolyot chapdan o'ngga (8 s) chayqalib uchadi,
+  parallaks yulduzlar + sunburst, ± stepper va ½/×2/MAX, tagida o'yinchilar ro'yxati (tikish/kf/yutuq).
+- Web bank: payloadda botdagi BARCHA ochiq banklar (`apply` flag); ariza rejimidagi bankka web'dan maqsad bilan ariza
+  (`submit_loan_app` — bot bilan umumiy). Profil rasmi: `GET /app/avatar/<uid>` (`web_avatar_bytes`, 1 soat kesh; token oshkor bo'lmaydi),
+  xato bo'lsa `photo_url` → bosh harf.
+- Panel foydalanuvchilar soni: `bot_users_count` (botni haqiqatan ishlatganlar, `users.started`/`mark_started`); `seen_users_count` — guruhda ko'rilganlar.
+  Qayta ro'yxat: `rereg_config`/`rereg_users`, owner panel `panel:rereg`, profil tugmasi `career:rereg`.

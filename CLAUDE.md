@@ -66,3 +66,10 @@
   `panel_overrides` jadvali): foydalanuvchilar/guruhlar/faol o'yinlar/jami ishtiroklar sonini qo'lda belgilash (faqat panel
   ko'rinishi, `stat_show`), "🔄 Avto" haqiqiy songa qaytaradi. Faqat bot egalari.
   `/taxrir` — tahrirlash menyusini ochadi (`cmd_taxrir`); `/haqiqiy` — asl (override'siz) statistikani ko'rsatadi (`cmd_haqiqiy`).
+- 📢 Majburiy obuna (`forcesub` jadvali, bitta yozuv `id=1`): owner panel → 📢 Majburiy obuna (`panel:fsub*`,
+  `panel_fsub_callback`/`panel_fsub_text`, `panel_fsub_view`): kanal `@username` orqali ulanadi (`get_chat` bilan tekshiriladi;
+  bot kanalda admin bo'lishi shart — `get_chat_member` orqali tekshiriladi), yoqish/o'chirish, almashtirish, uzish. Faqat bot egalari.
+  Gate: `fsub_is_member` (owner bypass, ijobiy natija `_FSUB_CACHE`'da 5 min, API xatoda fail-open → bloklamaydi) +
+  `fsub_block_cb`(callback)/`fsub_block_msg`(matn); o'yin kirish nuqtalarida: `cb_game`, `cb_inline_game`, `cb_rsp_join`,
+  `cb_xo_join`, crash join (`crash_action`), memory `m:join`, qurbaqa join (`_frog_action`), `on_text` (son topish) va `croc_on_text`.
+  "✅ Tekshirish" tugmasi (`fsub:check`, `cb_fsub_check`) keshni tozalab qayta tekshiradi. Matnlar 4 tilda `FSUB_TEXT`/`fsub_t`.

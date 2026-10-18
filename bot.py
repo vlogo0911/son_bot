@@ -49,6 +49,7 @@ from telegram.ext import (
     Defaults,
     InlineQueryHandler,
     MessageHandler,
+    PrefixHandler,
     filters,
 )
 
@@ -14568,7 +14569,7 @@ async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         await msg.reply_text(mod_t(chat.id, "group_only"))
         return
-    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    command = msg.text.split()[0].lstrip("/.!").split("@")[0].lower()
     if not await is_moderator(context.bot, msg, user):
         await msg.reply_text(mod_t(chat.id, "not_admin"))
         return
@@ -15159,7 +15160,7 @@ async def cmd_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         await msg.reply_text(mod_t(chat.id, "group_only"))
         return
-    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    command = msg.text.split()[0].lstrip("/.!").split("@")[0].lower()
     if not user or not await can_manage_admins(context.bot, chat.id, user.id):
         await msg.reply_text(st_t(chat.id, "need_promoter"))
         return
@@ -15502,7 +15503,7 @@ async def cmd_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_moderator(context.bot, msg, update.effective_user):
         await msg.reply_text(mod_t(chat.id, "not_admin"))
         return
-    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    command = msg.text.split()[0].lstrip("/.!").split("@")[0].lower()
     word = " ".join(context.args or []).strip()
     if command == "words":
         text, _ = await settings_page(context.bot, chat.id, "words")
@@ -15845,7 +15846,7 @@ async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = await gh_admin_guard(update, context)
     if not msg:
         return
-    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    command = msg.text.split()[0].lstrip("/.!").split("@")[0].lower()
     if command == "unpin":
         try:
             if msg.reply_to_message:
@@ -15951,7 +15952,7 @@ async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = await gh_admin_guard(update, context)
     if not msg:
         return
-    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    command = msg.text.split()[0].lstrip("/.!").split("@")[0].lower()
     settings = gs_get(chat.id)
     if command == "locks":
         lines = [gh_t(chat.id, "locks_head").rstrip("\n")]
@@ -16073,7 +16074,7 @@ async def cmd_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = await gh_admin_guard(update, context)
     if not msg:
         return
-    command = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    command = msg.text.split()[0].lstrip("/.!").split("@")[0].lower()
     if command == "filters":
         f = gh_filters(chat.id)
         if not f:
@@ -17170,6 +17171,8 @@ def main():
         (["help", "yordam"], cmd_help),
         (["lang"], cmd_lang),
     ]
+    # Buyruqlar / belgisidan tashqari . va ! bilan ham ishlaydi (Group Help uslubi): .admin .del .mute ...
+    EXTRA_PREFIXES = [".", "!"]
     for names, handler in commands:
         if names in (["konkurs"], ["hadya"], ["crash"], ["scrash"]):
             # /konkurs guruhda ham, kanalda ham ishlashi uchun channel_post'larni ham qabul qilamiz
@@ -17179,6 +17182,8 @@ def main():
             ))
         else:
             app.add_handler(CommandHandler(names, handler))
+        # . va ! prefikslari (PrefixHandler komandani pastki registrsiz talab qiladi)
+        app.add_handler(PrefixHandler(EXTRA_PREFIXES, names, handler))
 
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))

@@ -81,3 +81,5 @@
   (`welcome_text`), `/setrules`+`/rules` (`group_settings.rules`; `/rules`=`cmd_grules`, qoida bo'lmasa o'yin qoidasiga tushadi,
   `/qoidalar`=o'yin qoidasi), filtrlar `/filter /filters /delfilter` (`group_filters` jadvali, `FILTERS_CACHE`, `on_text` da
   `gh_filter_match` so'z-chegarasi bilan). `rules` ustuni `GUARD_DEFAULTS` ga qo'shilgan. `/help` guruhda admin buyruqlar ro'yxatini ham chiqaradi.
+  Barcha buyruqlar `/` dan tashqari `.` va `!` prefikslari bilan ham ishlaydi (Group Help uslubi): `main()` da har bir buyruq
+  `CommandHandler` + `PrefixHandler([".","!"], ...)` bilan ro'yxatdan o'tadi; buyruq nomini ajratish `lstrip("/.!")`.

@@ -15,10 +15,15 @@ import os
 import random
 import sqlite3
 import re
+import hashlib
+import hmac
 import secrets
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
 
 from telegram import (
@@ -1845,6 +1850,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "bank": lambda: bank_banks_view(user.id, user.id),
             "birja": lambda: birja_home_view(user.id, user.id),
             "kids": lambda: kid_list_view(user.id),
+            "exch": lambda: exchange_menu_view(user.id),
         }.get(payload)
         if section:
             text, kb = section()
@@ -2014,6 +2020,7 @@ def panel_keyboard(user_id=None):
     if is_owner:
         rows.append([InlineKeyboardButton("💰 Pul statistikasi", callback_data="panel:money")])
         rows.append([InlineKeyboardButton("🏦 Banklar boshqaruvi", callback_data="panel:banks")])
+        rows.append([InlineKeyboardButton("💱 Pul almashuvi", callback_data="panel:exch")])
         rows.append([InlineKeyboardButton("👶 Farzand o‘chirish", callback_data="panel:kiddel")])
         rows.append([InlineKeyboardButton("🎰 Crash sozlamalari", callback_data="panel:crash")])
         rows.append([InlineKeyboardButton("✨ Premium emoji", callback_data="panel:pemoji")])
@@ -2477,6 +2484,10 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     elif required and not panel_has_permission(uid, required):
         await query.answer("⛔ Bu bo‘lim uchun ruxsat yo‘q.", show_alert=True)
+        return
+
+    if query.data == "panel:exch" or query.data.startswith("panel:exch_"):
+        await panel_exchange_callback(query, context)
         return
 
     await query.answer()
@@ -3327,6 +3338,10 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     profile_buttons.insert(2, [
         InlineKeyboardButton(kid_t(user.id, "oila_btn"), url=family_url(context, "kids")),
     ])
+    if exch_ready() and EXCHANGE_PARTNER_URL:
+        exch_label = {"uz": f"💱 {EXCHANGE_PARTNER_NAME} ga o‘tkazish", "eng": f"💱 Transfer to {EXCHANGE_PARTNER_NAME}",
+                      "ru": f"💱 Перевод в {EXCHANGE_PARTNER_NAME}", "kz": f"💱 {EXCHANGE_PARTNER_NAME} ішіне аудару"}.get(profile_lang)
+        profile_buttons.insert(3, [InlineKeyboardButton(exch_label, url=family_url(context, "exch"))])
     profile_text = t(
         chat.id,
         "profile",
@@ -8554,6 +8569,8 @@ async def post_init(application: Application):
     application.create_task(birja_worker(application), name="birja-worker")
     application.create_task(kid_worker(application), name="kid-worker")
     application.create_task(night_worker(application), name="night-worker")
+    exchange_start_server(application)
+    application.create_task(exchange_retry_worker(application), name="exchange-retry")
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -15577,6 +15594,519 @@ async def cb_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+# ───────────────────────────── 💱 BOTLAR ARO PUL ALMASHUVI (bridge) ─────────────────────────────
+# Ikki bot o'rtasida xavfsiz pul o'tkazish. Har bir so'rov umumiy maxfiy kalit (EXCHANGE_SECRET) bilan
+# HMAC-imzolanadi; takroriy tushishning oldini olish uchun har o'tkazmaning noyob txid'i bor (idempotent).
+#   Kiruvchi: hamkor bot bizning foydalanuvchiga $ qo'shadi (HTTP /exchange/credit).
+#   Chiquvchi: bizning foydalanuvchi $ ni hamkor botga 1:1 yuboradi (xatoda avtomatik qaytadi).
+# DB bitta ip bilan ishlagani uchun HTTP server so'rovni bot asyncio sikliga uzatadi.
+# Env: EXCHANGE_SECRET (majburiy), EXCHANGE_PARTNER_URL (hamkor bridge manzili), EXCHANGE_PARTNER_NAME,
+#      PORT (Railway bergan — kiruvchi server shunga bog'lanadi).
+
+EXCHANGE_SECRET = os.getenv("EXCHANGE_SECRET", "").strip()
+EXCHANGE_PARTNER_URL = os.getenv("EXCHANGE_PARTNER_URL", "").strip().rstrip("/")
+EXCHANGE_PARTNER_NAME = os.getenv("EXCHANGE_PARTNER_NAME", "Hamkor bot").strip()
+EXCHANGE_PORT = os.getenv("PORT", "").strip()
+EXCHANGE_TS_WINDOW = 300          # imzo yangiligi (soniya)
+EXCHANGE_HTTP_TIMEOUT = 15        # hamkorga so'rov kutish vaqti
+EXCHANGE_AMOUNTS = [100, 500, 1000, 5000, 10000]
+EXCHANGE_MIN = 10
+EXCHANGE_RETRY_TICK = 60
+EXCHANGE_MAX_RETRY = 30
+_EXCHANGE_LOOP = None             # bot asyncio sikli (post_init'da o'rnatiladi)
+_EXCHANGE_SERVER = None
+
+EXCH_TEXT = {
+    "uz": {
+        "title": "💱 <b>{partner} ga pul o‘tkazish</b>\n\n💵 Hamyon: <b>{wallet}$</b>\n💸 Komissiya: {fee}%\n📅 Bugungi limit: {left}$ qoldi\n\nMiqdorni tanlang 👇\n\n🎮 Simulator — haqiqiy pul emas",
+        "off": "💱 Pul almashuvi hozircha ulanmagan.",
+        "not_yours": "⛔ Bu menyu sizniki emas — o‘zingiz /profil yozing.",
+        "confirm": "💱 <b>Tasdiqlang</b>\n\n{amount}$ yuborasiz · komissiya {fee}$\n➡️ {partner}da hisobingizga <b>{net}$</b> tushadi.",
+        "b_confirm": "✅ Yuborish", "b_cancel": "❌ Bekor", "b_back": "⬅️ Orqaga",
+        "no_funds": "💸 Hamyonda yetarli pul yo‘q (balans: {bal}$).",
+        "loan": "⛔ Faol kreditingiz bor — avval uni to‘lang.",
+        "limit": "⛔ Bugungi almashuv limiti tugadi.",
+        "too_small": "Minimal miqdor — {min}$.",
+        "sent": "✅ <b>{net}$</b> {partner}ga yuborildi! U yerda hisobingizga tushdi.",
+        "pending": "⏳ O‘tkazma yuborildi, hamkor bot javobini kutyapmiz. Pul tez orada tushadi yoki qaytariladi.",
+        "failed": "😓 O‘tkazib bo‘lmadi — pul hamyoningizga qaytarildi.",
+        "got": "💱 {partner}dan hisobingizga <b>+{amount}$</b> tushdi!\n💰 Balans: {bal}$",
+    },
+    "eng": {
+        "title": "💱 <b>Transfer to {partner}</b>\n\n💵 Wallet: <b>{wallet}$</b>\n💸 Fee: {fee}%\n📅 Left today: {left}$\n\nChoose an amount 👇\n\n🎮 Simulator — not real money",
+        "off": "💱 Exchange is not connected yet.",
+        "not_yours": "⛔ This menu is not yours — type /profile yourself.",
+        "confirm": "💱 <b>Confirm</b>\n\nYou send {amount}$ · fee {fee}$\n➡️ <b>{net}$</b> arrives in your {partner} account.",
+        "b_confirm": "✅ Send", "b_cancel": "❌ Cancel", "b_back": "⬅️ Back",
+        "no_funds": "💸 Not enough money (balance: {bal}$).",
+        "loan": "⛔ You have an active loan — repay it first.",
+        "limit": "⛔ Today's exchange limit is reached.",
+        "too_small": "Minimum is {min}$.",
+        "sent": "✅ <b>{net}$</b> sent to {partner}! It arrived in your account there.",
+        "pending": "⏳ Sent, waiting for the partner bot. The money will arrive or be refunded soon.",
+        "failed": "😓 Couldn't transfer — the money was refunded to your wallet.",
+        "got": "💱 <b>+{amount}$</b> arrived from {partner}!\n💰 Balance: {bal}$",
+    },
+    "ru": {
+        "title": "💱 <b>Перевод в {partner}</b>\n\n💵 Кошелёк: <b>{wallet}$</b>\n💸 Комиссия: {fee}%\n📅 Остаток на сегодня: {left}$\n\nВыберите сумму 👇\n\n🎮 Симулятор — не настоящие деньги",
+        "off": "💱 Обмен пока не подключён.",
+        "not_yours": "⛔ Это не ваше меню — напишите /profil сами.",
+        "confirm": "💱 <b>Подтвердите</b>\n\nВы отправляете {amount}$ · комиссия {fee}$\n➡️ <b>{net}$</b> поступит на ваш счёт в {partner}.",
+        "b_confirm": "✅ Отправить", "b_cancel": "❌ Отмена", "b_back": "⬅️ Назад",
+        "no_funds": "💸 Недостаточно средств (баланс: {bal}$).",
+        "loan": "⛔ У вас есть активный кредит — сначала погасите.",
+        "limit": "⛔ Дневной лимит обмена исчерпан.",
+        "too_small": "Минимум — {min}$.",
+        "sent": "✅ <b>{net}$</b> отправлено в {partner}! Зачислено на ваш счёт там.",
+        "pending": "⏳ Отправлено, ждём ответа бота-партнёра. Деньги скоро поступят или вернутся.",
+        "failed": "😓 Не удалось перевести — деньги возвращены в кошелёк.",
+        "got": "💱 <b>+{amount}$</b> поступило из {partner}!\n💰 Баланс: {bal}$",
+    },
+    "kz": {
+        "title": "💱 <b>{partner} ішіне аудару</b>\n\n💵 Әмиян: <b>{wallet}$</b>\n💸 Комиссия: {fee}%\n📅 Бүгінгі қалдық: {left}$\n\nСоманы таңдаңыз 👇\n\n🎮 Симулятор — нақты ақша емес",
+        "off": "💱 Айырбас әзірге қосылмаған.",
+        "not_yours": "⛔ Бұл мәзір сіздікі емес — өзіңіз /profil жазыңыз.",
+        "confirm": "💱 <b>Растаңыз</b>\n\n{amount}$ жібересіз · комиссия {fee}$\n➡️ {partner}дегі шотыңызға <b>{net}$</b> түседі.",
+        "b_confirm": "✅ Жіберу", "b_cancel": "❌ Болдырмау", "b_back": "⬅️ Артқа",
+        "no_funds": "💸 Қаражат жеткіліксіз (баланс: {bal}$).",
+        "loan": "⛔ Белсенді несиеңіз бар — алдымен өтеңіз.",
+        "limit": "⛔ Бүгінгі айырбас лимиті бітті.",
+        "too_small": "Ең азы — {min}$.",
+        "sent": "✅ <b>{net}$</b> {partner}ға жіберілді! Ондағы шотыңызға түсті.",
+        "pending": "⏳ Жіберілді, серіктес боттың жауабын күтудеміз. Ақша жақында түседі немесе қайтарылады.",
+        "failed": "😓 Аудару мүмкін болмады — ақша әмияныңызға қайтарылды.",
+        "got": "💱 {partner}дан шотыңызға <b>+{amount}$</b> түсті!\n💰 Баланс: {bal}$",
+    },
+}
+
+
+def exch_t(uid, key, **kwargs):
+    lang = LANG_CACHE.get(uid, DEFAULT_LANG)
+    text = EXCH_TEXT.get(lang, EXCH_TEXT["uz"]).get(key) or EXCH_TEXT["uz"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def init_exchange():
+    c = db()
+    with c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS exchange_config (
+                id INTEGER PRIMARY KEY CHECK (id=1),
+                enabled INTEGER NOT NULL DEFAULT 0,
+                fee_pct REAL NOT NULL DEFAULT 5,
+                daily_limit INTEGER NOT NULL DEFAULT 50000
+            )
+        """)
+        c.execute("INSERT OR IGNORE INTO exchange_config(id) VALUES (1)")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS exchange_txns (
+                txid TEXT PRIMARY KEY,
+                direction TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                retries INTEGER NOT NULL DEFAULT 0,
+                net INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        if "net" not in {r[1] for r in c.execute("PRAGMA table_info(exchange_txns)")}:
+            c.execute("ALTER TABLE exchange_txns ADD COLUMN net INTEGER NOT NULL DEFAULT 0")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_exch_out ON exchange_txns(direction, status)")
+
+
+def exch_config():
+    row = db().execute("SELECT enabled, fee_pct, daily_limit FROM exchange_config WHERE id=1").fetchone()
+    return dict(zip(("enabled", "fee_pct", "daily_limit"), row)) if row else {"enabled": 0, "fee_pct": 5, "daily_limit": 50000}
+
+
+def exch_ready():
+    """Almashuv sozlanganmi (kalit bor + yoqilgan)."""
+    return bool(EXCHANGE_SECRET) and exch_config()["enabled"]
+
+
+def exch_sign(body: bytes) -> str:
+    return hmac.new(EXCHANGE_SECRET.encode(), body, hashlib.sha256).hexdigest()
+
+
+def exch_today_out(uid):
+    start = int(time.time()) - 86400
+    row = db().execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM exchange_txns WHERE direction='out' AND user_id=? "
+        "AND status IN ('done','pending') AND created_at>=?",
+        (uid, start),
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+# ── Kiruvchi: hamkor bot bizning foydalanuvchiga pul qo'shadi ──
+
+async def exchange_apply_incoming(txid, user_id, amount):
+    """Bot sikli ichida: idempotent kreditlash. Qaytaradi: (ok, data)."""
+    cfg = exch_config()
+    if not EXCHANGE_SECRET or not cfg["enabled"]:
+        return False, {"error": "disabled"}
+    if amount <= 0 or amount > 10 ** 9:
+        return False, {"error": "bad_amount"}
+    c = db()
+    try:
+        with c:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO exchange_txns(txid, direction, user_id, amount, status, created_at) "
+                "VALUES (?, 'in', ?, ?, 'done', ?)",
+                (txid, user_id, amount, int(time.time())),
+            )
+            fresh = cur.rowcount == 1
+            if fresh:
+                _wallet_add(c, user_id, amount)
+        balance = wallet_balance(user_id)
+    except sqlite3.Error:
+        logger.exception("Almashuv: kiruvchi kredit yozilmadi (txid %s)", txid)
+        return False, {"error": "db"}
+    if fresh:
+        try:
+            await _EXCHANGE_LOOP_BOT.send_message(
+                user_id, exch_t(user_id, "got", partner=escape(EXCHANGE_PARTNER_NAME),
+                                amount=fmt_money(amount), bal=fmt_money(balance)))
+        except TelegramError:
+            pass
+        await log_money_event(
+            _EXCHANGE_LOOP_BOT,
+            f"💱 <b>ALMASHUV (kirdi)</b> · {escape(EXCHANGE_PARTNER_NAME)}\n{person_name(user_id)}: +{amount}$ (txid {txid})",
+        )
+    return True, {"balance": balance, "duplicate": not fresh}
+
+
+# ── HTTP server (alohida ipda; so'rovni bot sikliga uzatadi) ──
+
+class _ExchangeHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):  # jim
+        pass
+
+    def _send(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/") == "/exchange/ping":
+            self._send(200, {"ok": True, "bot": "son_bot"})
+        else:
+            self._send(404, {"ok": False})
+
+    def do_POST(self):
+        if self.path.rstrip("/") != "/exchange/credit":
+            self._send(404, {"ok": False})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length else b""
+        except (ValueError, OSError):
+            self._send(400, {"ok": False, "error": "body"})
+            return
+        if not EXCHANGE_SECRET:
+            self._send(503, {"ok": False, "error": "disabled"})
+            return
+        sig = self.headers.get("X-Signature", "")
+        if not hmac.compare_digest(sig, exch_sign(raw)):
+            self._send(401, {"ok": False, "error": "bad_signature"})
+            return
+        try:
+            data = json.loads(raw.decode())
+            txid = str(data["txid"])[:80]
+            user_id = int(data["user_id"])
+            amount = int(data["amount"])
+            ts = int(data.get("ts", 0))
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            self._send(400, {"ok": False, "error": "bad_json"})
+            return
+        if abs(time.time() - ts) > EXCHANGE_TS_WINDOW:
+            self._send(401, {"ok": False, "error": "stale"})
+            return
+        if _EXCHANGE_LOOP is None:
+            self._send(503, {"ok": False, "error": "starting"})
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                exchange_apply_incoming(txid, user_id, amount), _EXCHANGE_LOOP)
+            ok, payload = fut.result(timeout=EXCHANGE_HTTP_TIMEOUT)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Almashuv: kiruvchi so'rov bajarilmadi: %s", e)
+            self._send(500, {"ok": False, "error": "internal"})
+            return
+        self._send(200 if ok else 409, {"ok": ok, **payload})
+
+
+def exchange_start_server(application):
+    """Kiruvchi HTTP serverni alohida ipda ishga tushiradi (PORT va kalit bo'lsa)."""
+    global _EXCHANGE_LOOP, _EXCHANGE_SERVER, _EXCHANGE_LOOP_BOT
+    _EXCHANGE_LOOP = asyncio.get_running_loop()
+    _EXCHANGE_LOOP_BOT = application.bot
+    if not EXCHANGE_SECRET or not EXCHANGE_PORT.isdigit():
+        logger.info("Almashuv serveri ishga tushmadi (EXCHANGE_SECRET yoki PORT yo'q).")
+        return
+    try:
+        _EXCHANGE_SERVER = ThreadingHTTPServer(("0.0.0.0", int(EXCHANGE_PORT)), _ExchangeHandler)
+    except OSError as e:
+        logger.warning("Almashuv serveri portga bog'lanmadi (%s): %s", EXCHANGE_PORT, e)
+        return
+    threading.Thread(target=_EXCHANGE_SERVER.serve_forever, name="exchange-http", daemon=True).start()
+    logger.info("Almashuv serveri ishga tushdi: port %s", EXCHANGE_PORT)
+
+
+# ── Chiquvchi: bizning foydalanuvchi hamkor botga pul yuboradi ──
+
+def _exch_post(txid, user_id, amount):
+    """Hamkorga imzolangan so'rov (alohida ipda chaqiriladi). Qaytaradi: (holat, javob)."""
+    body = json.dumps({"txid": txid, "user_id": user_id, "amount": amount, "ts": int(time.time())}).encode()
+    req = urllib.request.Request(
+        EXCHANGE_PARTNER_URL + "/exchange/credit", data=body, method="POST",
+        headers={"Content-Type": "application/json", "X-Signature": exch_sign(body)})
+    try:
+        with urllib.request.urlopen(req, timeout=EXCHANGE_HTTP_TIMEOUT) as resp:
+            return resp.status, json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode() or "{}")
+        except Exception:  # noqa: BLE001
+            return e.code, {}
+    except Exception as e:  # noqa: BLE001 — tarmoq/timeout: noaniq, qaytarmaymiz
+        return 0, {"error": str(e)[:80]}
+
+
+async def exchange_finalize_out(txid, uid):
+    """Pending 'out' o'tkazmani hamkorga yuborib yakunlaydi. True — hal bo'ldi (done/failed)."""
+    row = db().execute("SELECT amount, net FROM exchange_txns WHERE txid=? AND status='pending'", (txid,)).fetchone()
+    if not row:
+        return True
+    gross, net = row
+    status, resp = await asyncio.to_thread(_exch_post, txid, uid, net)
+    c = db()
+    if status == 200 and resp.get("ok"):
+        with c:
+            c.execute("UPDATE exchange_txns SET status='done' WHERE txid=? AND status='pending'", (txid,))
+        try:
+            await _EXCHANGE_LOOP_BOT.send_message(
+                uid, exch_t(uid, "sent", partner=escape(EXCHANGE_PARTNER_NAME), net=fmt_money(net)))
+        except TelegramError:
+            pass
+        await log_money_event(
+            _EXCHANGE_LOOP_BOT,
+            f"💱 <b>ALMASHUV (chiqdi)</b> · {escape(EXCHANGE_PARTNER_NAME)}\n{person_name(uid)}: −{gross}$ (hamkorga {net}$, txid {txid})")
+        return True
+    # Aniq rad (imzo/summа/o'chiq) — to'liq summani qaytaramiz.
+    if status in (400, 401, 403, 409, 503) and resp.get("error") != "starting":
+        with c:
+            cur = c.execute("UPDATE exchange_txns SET status='failed' WHERE txid=? AND status='pending'", (txid,))
+            if cur.rowcount == 1:
+                _wallet_add(c, uid, gross)
+        if cur.rowcount == 1:
+            try:
+                await _EXCHANGE_LOOP_BOT.send_message(uid, exch_t(uid, "failed"))
+            except TelegramError:
+                pass
+            await log_money_event(
+                _EXCHANGE_LOOP_BOT,
+                f"💱 <b>ALMASHUV QAYTDI</b>\n{person_name(uid)}: +{gross}$ (txid {txid}, sabab {resp.get('error')})")
+        return True
+    # Noaniq (timeout/5xx/tarmoq) — qaytarmaymiz, keyin qayta urinamiz.
+    with c:
+        c.execute("UPDATE exchange_txns SET retries=retries+1 WHERE txid=? AND status='pending'", (txid,))
+    return False
+
+
+async def exchange_send(uid, amount):
+    """Foydalanuvchi $ ni hamkorga yuboradi. Qaytaradi: 'done' | 'pending' | xato kaliti."""
+    cfg = exch_config()
+    if not exch_ready() or not EXCHANGE_PARTNER_URL:
+        return "off"
+    if active_loan(uid):
+        return "loan"
+    if amount < EXCHANGE_MIN:
+        return "too_small"
+    fee = round(amount * cfg["fee_pct"] / 100)
+    net = amount - fee
+    if net <= 0:
+        return "too_small"
+    if exch_today_out(uid) + amount > cfg["daily_limit"]:
+        return "limit"
+    txid = f"se-{uid}-{secrets.token_hex(8)}"
+    c = db()
+    with c:
+        if not _wallet_take(c, uid, amount):
+            return "no_funds"
+        c.execute(
+            "INSERT INTO exchange_txns(txid, direction, user_id, amount, net, status, created_at) "
+            "VALUES (?, 'out', ?, ?, ?, 'pending', ?)",
+            (txid, uid, amount, net, int(time.time())),
+        )
+    done = await exchange_finalize_out(txid, uid)
+    if not done:
+        return "pending"
+    row = db().execute("SELECT status FROM exchange_txns WHERE txid=?", (txid,)).fetchone()
+    return "done" if row and row[0] == "done" else "failed"
+
+
+async def exchange_retry_worker(application):
+    while True:
+        await asyncio.sleep(EXCHANGE_RETRY_TICK)
+        try:
+            if not EXCHANGE_PARTNER_URL:
+                continue
+            rows = db().execute(
+                "SELECT txid, user_id, amount, retries FROM exchange_txns WHERE direction='out' AND status='pending'"
+            ).fetchall()
+            for txid, uid, amount, retries in rows:
+                if retries >= EXCHANGE_MAX_RETRY:
+                    await log_money_event(
+                        application.bot,
+                        f"⚠️ <b>ALMASHUV OSILIB QOLDI</b>\n{person_name(uid)}: {amount}$ (txid {txid}) — qo‘lda tekshiring.")
+                    with db() as c:
+                        c.execute("UPDATE exchange_txns SET status='stuck' WHERE txid=?", (txid,))
+                    continue
+                await exchange_finalize_out(txid, uid)
+        except Exception:  # noqa: BLE001
+            logger.exception("Almashuv: qayta urinishda xato")
+
+
+# ── UI: foydalanuvchi menyusi ──
+
+def exchange_menu_view(uid):
+    cfg = exch_config()
+    if not exch_ready() or not EXCHANGE_PARTNER_URL:
+        return exch_t(uid, "off"), None
+    left = max(0, cfg["daily_limit"] - exch_today_out(uid))
+    text = exch_t(uid, "title", partner=escape(EXCHANGE_PARTNER_NAME), wallet=fmt_money(wallet_balance(uid)),
+                  fee=f"{cfg['fee_pct']:g}", left=fmt_money(left))
+    buttons = [InlineKeyboardButton(f"{fmt_money(a)}$", callback_data=f"ex:{uid}:a:{a}") for a in EXCHANGE_AMOUNTS]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def cb_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split(":")
+    uid = int(parts[1])
+    action = parts[2]
+    if q.from_user.id != uid:
+        await q.answer(exch_t(uid, "not_yours"), show_alert=True)
+        return
+    chat_id = q.message.chat.id
+    if not exch_ready() or not EXCHANGE_PARTNER_URL:
+        await q.answer(exch_t(uid, "off"), show_alert=True)
+        return
+    cfg = exch_config()
+
+    if action == "menu":
+        await q.answer()
+        text, kb = exchange_menu_view(uid)
+        await edit(context.bot, chat_id, q.message.message_id, text, kb)
+        return
+
+    amount = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+    if amount not in EXCHANGE_AMOUNTS:
+        await q.answer()
+        return
+
+    if action == "a":
+        if wallet_balance(uid) < amount:
+            await q.answer(exch_t(uid, "no_funds", bal=fmt_money(wallet_balance(uid))), show_alert=True)
+            return
+        fee = round(amount * cfg["fee_pct"] / 100)
+        await q.answer()
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(exch_t(uid, "b_confirm"), callback_data=f"ex:{uid}:go:{amount}"),
+            InlineKeyboardButton(exch_t(uid, "b_cancel"), callback_data=f"ex:{uid}:menu"),
+        ]])
+        await edit(context.bot, chat_id, q.message.message_id, exch_t(
+            uid, "confirm", amount=fmt_money(amount), fee=fmt_money(fee),
+            net=fmt_money(amount - fee), partner=escape(EXCHANGE_PARTNER_NAME)), kb)
+        return
+
+    if action == "go":
+        await q.answer()
+        result = await exchange_send(uid, amount)
+        keys = {"no_funds": ("no_funds", {"bal": fmt_money(wallet_balance(uid))}), "loan": ("loan", {}),
+                "limit": ("limit", {}), "too_small": ("too_small", {"min": EXCHANGE_MIN}), "off": ("off", {})}
+        if result == "done":
+            fee = round(amount * cfg["fee_pct"] / 100)
+            msg = exch_t(uid, "sent", partner=escape(EXCHANGE_PARTNER_NAME), net=fmt_money(amount - fee))
+        elif result == "pending":
+            msg = exch_t(uid, "pending")
+        elif result == "failed":
+            msg = exch_t(uid, "failed")
+        else:
+            key, kw = keys.get(result, ("off", {}))
+            msg = exch_t(uid, key, **kw)
+        text, kb = exchange_menu_view(uid)
+        await edit(context.bot, chat_id, q.message.message_id, msg + "\n\n" + (text or ""), kb)
+        return
+
+    await q.answer()
+
+
+# ── 👑 Owner panel: almashuv sozlamalari ──
+
+def panel_exchange_view():
+    cfg = exch_config()
+    on = "✅ yoqilgan" if cfg["enabled"] else "❌ o‘chiq"
+    text = (
+        "💱 <b>PUL ALMASHUVI</b>\n\n"
+        f"Holat: <b>{on}</b>\n"
+        f"🤝 Hamkor: <b>{escape(EXCHANGE_PARTNER_NAME)}</b>\n"
+        f"🔑 Maxfiy kalit: {'✅ o‘rnatilgan' if EXCHANGE_SECRET else '❌ yo‘q (EXCHANGE_SECRET env)'}\n"
+        f"🔗 Hamkor manzili: {'✅ o‘rnatilgan' if EXCHANGE_PARTNER_URL else '❌ yo‘q (EXCHANGE_PARTNER_URL env)'}\n"
+        f"🖧 Kiruvchi server: {'✅ port ' + EXCHANGE_PORT if (EXCHANGE_SECRET and EXCHANGE_PORT.isdigit()) else '❌ ishlamayapti (PORT env + domen kerak)'}\n\n"
+        f"💸 Komissiya: <b>{cfg['fee_pct']:g}%</b>\n"
+        f"📅 Kunlik limit: <b>{fmt_money(cfg['daily_limit'])}$</b>\n\n"
+        "ℹ️ Kalit va manzil Railway Variables orqali o‘rnatiladi."
+    )
+    rows = [
+        [InlineKeyboardButton("🔴 O‘chirish" if cfg["enabled"] else "🟢 Yoqish", callback_data="panel:exch_toggle")],
+        [InlineKeyboardButton("➖ Komissiya", callback_data="panel:exch_fee:down"),
+         InlineKeyboardButton("➕ Komissiya", callback_data="panel:exch_fee:up")],
+        [InlineKeyboardButton("➖ Limit", callback_data="panel:exch_lim:down"),
+         InlineKeyboardButton("➕ Limit", callback_data="panel:exch_lim:up")],
+        [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
+    ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def panel_exchange_callback(query, context):
+    parts = query.data.split(":")
+    action = parts[1]
+    c = db()
+    cfg = exch_config()
+    if action == "exch_toggle":
+        if not EXCHANGE_SECRET or not EXCHANGE_PARTNER_URL:
+            await query.answer("Avval EXCHANGE_SECRET va EXCHANGE_PARTNER_URL ni Railway'da o‘rnating.", show_alert=True)
+        else:
+            with c:
+                c.execute("UPDATE exchange_config SET enabled=1-enabled WHERE id=1")
+            await query.answer()
+    elif action == "exch_fee":
+        val = min(50.0, max(0.0, cfg["fee_pct"] + (1 if parts[2] == "up" else -1)))
+        with c:
+            c.execute("UPDATE exchange_config SET fee_pct=? WHERE id=1", (val,))
+        await query.answer()
+    elif action == "exch_lim":
+        val = max(1000, cfg["daily_limit"] + (10000 if parts[2] == "up" else -10000))
+        with c:
+            c.execute("UPDATE exchange_config SET daily_limit=? WHERE id=1", (val,))
+        await query.answer()
+    else:
+        await query.answer()
+    text, kb = panel_exchange_view()
+    try:
+        await query.edit_message_text(text, reply_markup=kb)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == "BU_YERGA_BOT_TOKEN":
         print(
@@ -15594,6 +16124,7 @@ def main():
     init_kids()
     init_guard()
     init_guard2()
+    init_exchange()
     load_crash_config()
 
     app = (
@@ -15664,6 +16195,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_frog, pattern=r"^fr:"))
     app.add_handler(CallbackQueryHandler(cb_bank, pattern=r"^bk:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_bank_app, pattern=r"^bka:\d+:(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(cb_exchange, pattern=r"^ex:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_birja, pattern=r"^bx:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_kid, pattern=r"^kid:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_captcha, pattern=r"^cap:\d+:\d+$"))

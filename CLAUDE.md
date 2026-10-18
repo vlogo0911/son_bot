@@ -73,3 +73,11 @@
   `fsub_block_cb`(callback)/`fsub_block_msg`(matn); o'yin kirish nuqtalarida: `cb_game`, `cb_inline_game`, `cb_rsp_join`,
   `cb_xo_join`, crash join (`crash_action`), memory `m:join`, qurbaqa join (`_frog_action`), `on_text` (son topish) va `croc_on_text`.
   "✅ Tekshirish" tugmasi (`fsub:check`, `cb_fsub_check`) keshni tozalab qayta tekshiradi. Matnlar 4 tilda `FSUB_TEXT`/`fsub_t`.
+- 🛡 Group Help buyruqlari (`init_grouphelp`, `GH_TEXT`/`gh_t`, `gh_admin_guard` admin+guruh tekshiruvi): barcha moderatsiya buyruqlari
+  endi Telegram "/" menyusida — `post_init` da `set_my_commands(scope=BotCommandScopeAllGroupChats())`. Jazo `cmd_mod` da
+  (`/warn /unwarn /warns /mute /tmute /unmute /ban /tban /unban /kick`; muddat `parse_dur`: 10m/2h/1d). Qo'shimcha: `/del`,
+  `/purge` (reply→joriy, `delete_messages` 100talab), `/pin /unpin`, `/id`, `/info`, `/admins`, `/lock /unlock /locks`
+  (`LOCK_ALIASES`→`locks` bitmaskasi, "all"), `/title` (`set_chat_administrator_custom_title`, 16 belgi), `/setwelcome`
+  (`welcome_text`), `/setrules`+`/rules` (`group_settings.rules`; `/rules`=`cmd_grules`, qoida bo'lmasa o'yin qoidasiga tushadi,
+  `/qoidalar`=o'yin qoidasi), filtrlar `/filter /filters /delfilter` (`group_filters` jadvali, `FILTERS_CACHE`, `on_text` da
+  `gh_filter_match` so'z-chegarasi bilan). `rules` ustuni `GUARD_DEFAULTS` ga qo'shilgan. `/help` guruhda admin buyruqlar ro'yxatini ham chiqaradi.

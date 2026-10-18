@@ -67,6 +67,7 @@ MONEY_LOG_CHAT_ID = -1004430776232
 
 # Kasb almashtirish so'rovlarini qabul qiladigan ownerlar
 CAREER_OWNER_IDS = {6913838682, 1150777456, 8358319733}
+REREG_USER_IDS = {8337510055}   # profilda «🔄 Qayta ro'yxatdan o'tish» ko'rinadiganlar
 
 MIN_NUMBER = 1
 MAX_NUMBER = 100
@@ -3402,6 +3403,8 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if gift_count > len(gift_rows):
         gift_lines.append({"uz": f"… va yana {gift_count-len(gift_rows)} ta", "eng": f"… and {gift_count-len(gift_rows)} more", "ru": f"… и ещё {gift_count-len(gift_rows)}", "kz": f"… және тағы {gift_count-len(gift_rows)}"}.get(profile_lang, f"… {gift_count-len(gift_rows)} more"))
     profile_text += "\n\n" + profile_emojify(gift_titles.get(profile_lang, gift_titles["uz"])) + ":\n" + ("\n".join(gift_lines) if gift_lines else no_gifts.get(profile_lang, no_gifts["uz"]))
+    if user.id in REREG_USER_IDS:
+        profile_buttons.append([InlineKeyboardButton("🔄 Qayta ro‘yxatdan o‘tish", callback_data="career:rereg")])
     await msg.reply_text(
         profile_text,
         reply_markup=InlineKeyboardMarkup(profile_buttons),
@@ -8929,6 +8932,41 @@ async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
 
+    # 🔄 Qayta ro'yxatdan o'tish (faqat REREG_USER_IDS): jins → tug'ilgan sana → kasb
+    if data == "career:rereg" or data.startswith("career:rgender:"):
+        if user.id not in REREG_USER_IDS:
+            await q.message.reply_text("⛔ Bu funksiya siz uchun yoqilmagan.")
+            return
+        if q.message.chat.type != ChatType.PRIVATE:
+            await q.message.reply_text("👤 Qayta ro‘yxatdan o‘tish uchun botning shaxsiy chatida /profil oching.")
+            return
+        if data == "career:rereg":
+            await q.message.reply_text(
+                "🔄 <b>Qayta ro‘yxatdan o‘tish</b>\n\n1️⃣ Jinsingizni tanlang:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("👦 Erkak", callback_data="career:rgender:male"),
+                    InlineKeyboardButton("👧 Ayol", callback_data="career:rgender:female"),
+                ]]),
+            )
+            return
+        gender = data.rsplit(":", 1)[1]
+        if gender not in ("male", "female"):
+            return
+        c = db()
+        with c:
+            c.execute(
+                """INSERT INTO user_gender(user_id, gender, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET gender=excluded.gender, updated_at=excluded.updated_at""",
+                (user.id, gender, datetime.now().isoformat(timespec="seconds")),
+            )
+            c.execute(
+                "UPDATE users SET birth_date=NULL, birth_confirmed=0, profession_id=NULL, profession_selected=0 "
+                "WHERE user_id=?", (user.id,),
+            )
+        await q.message.reply_text("✅ Jins saqlandi.\n\n2️⃣ Endi tug‘ilgan sana:")
+        await career_start_birth(update, context)
+        return
+
     if data == "career:birth":
         await career_start_birth(update, context)
         return
@@ -8960,7 +8998,7 @@ async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(
             "✅ Tug‘ilgan sana saqlandi!\n\n"
             "💼 <b>Endi kasbingizni tanlang:</b>",
-            reply_markup=career_profession_kb(chat.id),
+            reply_markup=career_profession_kb(q.message.chat.id),
         )
         return
 

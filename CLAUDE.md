@@ -109,3 +109,10 @@
   `web_bank_loan`/`web_bank_repay`/`web_bank_deposit` — botdagi bir xil qoidalar (birinchi kredit 1000, `LOAN_AMOUNTS`/`LOAN_DAYS`,
   `DEPOSIT_AMOUNTS`/`DEPOSIT_DAYS`, `loan_due`/`deposit_payout`, faol kredit/omonat tekshiruvi). Payloadda `shop`, `has_partner`,
   `bank_opts` (banklar, summalar, kunlar, can_loan/can_deposit). Endpointlar: `/app/api/{shop/buy,bank/loan,bank/repay,bank/deposit}`.
+  🚀 Crash YANGILANDI — bashorat qilib bo'lmaydi: crash nuqtasi klientga umuman berilmaydi (`web_crash_start` javobida yo'q).
+  Klient jonli animatsiya (canvas Aviator egri chizig'i + samolyot) qiladi va `/app/api/crash/state` (`web_crash_state`) ni ~350ms
+  da so'rab turadi; portlash va yechish SERVER soati bo'yicha hal qilinadi (`web_crash_cashout` klient koeffitsiyentiga ishonmaydi).
+  Oxirgi natijalar `WEB_CRASH_HISTORY` (yuqori panel). 📈 Birja savdosi (`web_birja_buy`/`web_birja_sell` — `birja_buy`/`birja_sell`,
+  `BIRJA_HOLD`/stale/min tekshiruvlari), 👶 Farzand boshqaruvi (`web_kid_action` — ovqat/o'yinchoq/ta'lim, `KID_ITEMS`/`KID_FEES`,
+  `kid_fresh`/`kid_save`). Payloadda `birja_market`, `crash_history`, `kids_list` ichida food/toy/fee. Endpointlar yana:
+  `/app/api/{crash/state,birja/buy,birja/sell,kid}`. UI: neon+oltin uslub, modal sheet, toast. Owner toggle'lari hamma o'yin/amalga amal qiladi.

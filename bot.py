@@ -16525,8 +16525,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = webapp_fetch(uid)
         elif path == "/app/api/crash/start":
             coro = web_crash_start(uid, body.get("bet"))
+        elif path == "/app/api/crash/state":
+            coro = web_crash_state(uid)
         elif path == "/app/api/crash/cashout":
-            coro = web_crash_cashout(uid, body.get("mult"))
+            coro = web_crash_cashout(uid)
         elif path == "/app/api/frog/start":
             coro = web_frog_start(uid, body.get("bet"), body.get("mode"))
         elif path == "/app/api/frog/step":
@@ -16541,6 +16543,12 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_bank_repay(uid)
         elif path == "/app/api/bank/deposit":
             coro = web_bank_deposit(uid, body.get("bank"), body.get("amount"), body.get("days"))
+        elif path == "/app/api/birja/buy":
+            coro = web_birja_buy(uid, body.get("asset"), body.get("usd"))
+        elif path == "/app/api/birja/sell":
+            coro = web_birja_sell(uid, body.get("asset"), body.get("pct"))
+        elif path == "/app/api/kid":
+            coro = web_kid_action(uid, body.get("kid"), body.get("act"), body.get("item"))
         else:
             self._send(404, {"ok": False})
             return
@@ -17486,16 +17494,41 @@ async def webapp_payload(user_id):
             "profit": round(value - cost, 2),
         })
 
-    # 👶 Farzandlar
+    # 📈 Birja bozori (narx, o'zgarish, ushlab turilgan miqdor)
+    held = {a: (q, lb) for a, q, _c, lb in (
+        (r[0], r[1], r[2], r[3]) for r in c.execute(
+            "SELECT asset, qty, cost, last_buy FROM birja_holdings WHERE user_id=? AND qty>0", (user_id,)))}
+    birja_market = []
+    now_ts = int(time.time())
+    for a, (nm, icon, _sym, _cg) in BIRJA_ASSETS.items():
+        pinfo = BIRJA_PRICES.get(a) or {}
+        price = pinfo.get("price")
+        q, lb = held.get(a, (0, 0))
+        birja_market.append({
+            "asset": a, "name": nm, "icon": icon,
+            "price": round(price, 2) if price else None,
+            "change": round(pinfo.get("change", 0.0), 2),
+            "qty": round(q, 8), "value_fmt": fmt_money(round(q * price)) if (q and price) else "0",
+            "lock": max(0, BIRJA_HOLD - (now_ts - lb)) if q else 0,
+        })
+
+    # 👶 Farzandlar (boshqaruv uchun: ovqat/o'yinchoq ro'yxati, ta'lim to'lovi)
     _stage_uz = {"baby": "👶 Chaqaloq", "kinder": "🧒 Bog‘cha", "school": "🎒 Maktab",
                  "college": "🏫 Kollej", "uni": "🎓 Universitet", "work": "💼 Ishchi"}
     kid_list = []
     for kid in kids_of(user_id):
         st = kid_stage(kid)
+        def _items(kind):
+            return [{"key": k, "name": v[5].get("uz", k), "price": v[3]}
+                    for k, v in KID_ITEMS.items() if v[0] == kind and v[1] <= kid["age"] <= v[2]]
+        fee_due = 0
+        if not kid["working"] and st in KID_FEES and kid["fee_age"] < kid["age"]:
+            fee_due = KID_FEES[st]
         kid_list.append({
-            "name": kid["child_name"] or "—", "age": kid["age"], "stage": _stage_uz.get(st, st),
-            "working": bool(kid["working"]),
+            "id": kid["id"], "name": kid["child_name"] or "—", "age": kid["age"],
+            "stage": _stage_uz.get(st, st), "working": bool(kid["working"]),
             "hunger": round(kid["hunger"]), "happy": round(kid["happy"]),
+            "food": _items("food"), "toy": _items("toy"), "fee": fee_due,
         })
 
     # 🛍 Do'kon va 🏦 bank imkoniyatlari (web app interaktiv uchun)
@@ -17520,6 +17553,9 @@ async def webapp_payload(user_id):
         "loan": bool(lo), "birja": round(birja_val, 2),
         "bank": bank, "birja_list": birja_rows, "kids_list": kid_list,
         "shop": shop, "has_partner": has_partner, "bank_opts": bank_opts,
+        "birja_market": birja_market, "birja_buy_fixed": BIRJA_BUY_FIXED,
+        "birja_pcts": BIRJA_PCTS, "birja_min": BIRJA_MIN_ORDER,
+        "crash_history": list(WEB_CRASH_HISTORY),
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -17551,8 +17587,9 @@ async def webapp_fetch(user_id):
 # ── 🎮 Web app o'yinlari (xavfsiz, server tomonda, haqiqiy hamyon) ──
 WEB_CRASH: dict[int, dict] = {}     # user_id -> {bet, crash, t0, done}
 WEB_FROG: dict[int, dict] = {}      # user_id -> {bet, mode, traps, step, done}
+WEB_CRASH_HISTORY: list = []        # oxirgi crash nuqtalari (umumiy, yuqori panel uchun)
 WEB_CRASH_GROWTH = 0.12
-WEB_CRASH_MAX = 100.0
+WEB_CRASH_MAX = 1000.0
 WEB_BET_MAX = 10_000_000
 
 
@@ -17562,11 +17599,20 @@ def web_enabled_for(uid):
 
 
 def _web_crash_point():
-    """Crash nuqtasi (yashirin). ~3% darhol portlash, qolgani P(>x)≈0.97/x taqsimot."""
+    """Crash nuqtasi (YASHIRIN — klientga umuman berilmaydi). ~3% darhol, qolgani P(>x)≈0.97/x."""
     if random.random() < 0.03:
         return 1.00
     pt = 0.97 / (1.0 - random.random())
     return round(min(max(pt, 1.01), WEB_CRASH_MAX), 2)
+
+
+def _web_crash_mult(elapsed):
+    return math.exp(WEB_CRASH_GROWTH * max(0.0, elapsed))
+
+
+def _web_crash_record(pt):
+    WEB_CRASH_HISTORY.insert(0, round(pt, 2))
+    del WEB_CRASH_HISTORY[16:]
 
 
 async def web_crash_start(uid, bet):
@@ -17587,29 +17633,46 @@ async def web_crash_start(uid, bet):
     with c:
         if not _wallet_take(c, uid, bet):
             return {"error": "funds", "balance": wallet_balance(uid)}
+    # crash nuqtasi faqat serverda saqlanadi — javobda YO'Q, shuning uchun bashorat qilib bo'lmaydi.
     WEB_CRASH[uid] = {"bet": bet, "crash": _web_crash_point(), "t0": time.monotonic(), "done": False}
-    return {"started": True, "bet": bet, "crash": WEB_CRASH[uid]["crash"],
-            "growth": WEB_CRASH_GROWTH, "balance": wallet_balance(uid)}
+    return {"started": True, "bet": bet, "growth": WEB_CRASH_GROWTH,
+            "balance": wallet_balance(uid), "history": list(WEB_CRASH_HISTORY)}
 
 
-async def web_crash_cashout(uid, mult):
+async def web_crash_state(uid):
+    """Server-boshqaruvli holat: tirik bo'lsa joriy koeffitsiyent, portlagan bo'lsa — crash."""
+    g = WEB_CRASH.get(uid)
+    if not g or g["done"]:
+        return {"alive": False}
+    cur = _web_crash_mult(time.monotonic() - g["t0"])
+    if cur >= g["crash"]:
+        g["done"] = True
+        WEB_CRASH.pop(uid, None)
+        _web_crash_record(g["crash"])
+        return {"alive": False, "crashed": True, "crash": round(g["crash"], 2),
+                "history": list(WEB_CRASH_HISTORY), "balance": wallet_balance(uid)}
+    return {"alive": True, "mult": round(cur, 2)}
+
+
+async def web_crash_cashout(uid, _ignored=None):
+    """Yechish — SERVER soati bo'yicha hal qilinadi (klient koeffitsiyentiga ishonmaydi)."""
     g = WEB_CRASH.get(uid)
     if not g or g["done"]:
         return {"error": "no_game"}
     g["done"] = True
     WEB_CRASH.pop(uid, None)
     crash = g["crash"]
-    try:
-        mult = float(mult)
-    except (TypeError, ValueError):
-        mult = crash
-    mult = max(1.0, mult)
-    if mult >= crash:   # crash vaqtida yoki keyin bosilgan — yutqazdi
-        return {"result": "lose", "crash": round(crash, 2), "balance": wallet_balance(uid)}
+    cur = _web_crash_mult(time.monotonic() - g["t0"])
+    if cur >= crash:   # server soatida allaqachon portlagan
+        _web_crash_record(crash)
+        return {"result": "lose", "crash": round(crash, 2),
+                "history": list(WEB_CRASH_HISTORY), "balance": wallet_balance(uid)}
+    mult = round(cur, 2)
     win = int(g["bet"] * mult)
     wallet_change(uid, win)
-    return {"result": "win", "multiplier": round(mult, 2), "crash": round(crash, 2),
-            "win": win, "balance": wallet_balance(uid)}
+    _web_crash_record(crash)
+    return {"result": "win", "multiplier": mult, "crash": round(crash, 2),
+            "win": win, "history": list(WEB_CRASH_HISTORY), "balance": wallet_balance(uid)}
 
 
 async def web_frog_start(uid, bet, mode):
@@ -17801,6 +17864,109 @@ async def web_bank_deposit(uid, bank_id, amount, days):
     return {"result": "deposit", "amount": amount, "days": days, "payout": payout, "balance": wallet_balance(uid)}
 
 
+# ── 📈 Web app: Birja (sotib olish / sotish) ──
+
+async def web_birja_buy(uid, asset, usd):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    if asset not in BIRJA_ASSETS:
+        return {"error": "asset"}
+    price = birja_price(asset)
+    if price is None:
+        return {"error": "stale"}
+    try:
+        usd = int(usd)
+    except (TypeError, ValueError):
+        return {"error": "bad"}
+    if usd < BIRJA_MIN_ORDER:
+        return {"error": "min", "min": BIRJA_MIN_ORDER}
+    if usd > BIRJA_MAX_ORDER:
+        return {"error": "max", "max": BIRJA_MAX_ORDER}
+    if usd > wallet_balance(uid):
+        return {"error": "funds", "balance": wallet_balance(uid)}
+    res = birja_buy(uid, asset, usd, price)
+    if not res:
+        return {"error": "funds", "balance": wallet_balance(uid)}
+    qty, fee = res
+    return {"result": "bought", "asset": asset, "qty": round(qty, 8), "usd": usd, "fee": fee,
+            "balance": wallet_balance(uid)}
+
+
+async def web_birja_sell(uid, asset, pct):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    if asset not in BIRJA_ASSETS:
+        return {"error": "asset"}
+    price = birja_price(asset)
+    if price is None:
+        return {"error": "stale"}
+    try:
+        pct = int(pct)
+    except (TypeError, ValueError):
+        return {"error": "bad"}
+    if pct not in BIRJA_PCTS:
+        return {"error": "pct"}
+    qty_have, _, last_buy = birja_holding(uid, asset)
+    if qty_have <= 0:
+        return {"error": "nothing"}
+    wait = BIRJA_HOLD - (int(time.time()) - last_buy)
+    if wait > 0:
+        return {"error": "hold", "min": max(1, math.ceil(wait / 60))}
+    if qty_have * price * pct / 100 < BIRJA_MIN_ORDER and pct < 100:
+        return {"error": "min", "min": BIRJA_MIN_ORDER}
+    res = birja_sell(uid, asset, pct, price)
+    if not res:
+        return {"error": "nothing"}
+    qty, usd, fee = res
+    return {"result": "sold", "asset": asset, "qty": round(qty, 8), "usd": usd, "fee": fee,
+            "balance": wallet_balance(uid)}
+
+
+# ── 👶 Web app: Farzand boshqaruvi (ovqat / o'yinchoq / ta'lim to'lovi) ──
+
+async def web_kid_action(uid, kid_id, act, item):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    try:
+        kid = kid_fresh(int(kid_id))
+    except (TypeError, ValueError):
+        return {"error": "kid"}
+    if not kid or uid not in (kid["parent1_id"], kid["parent2_id"]):
+        return {"error": "not_parent"}
+    if kid["working"]:
+        return {"error": "working"}
+    c = db()
+    if act in ("feed", "toy"):
+        it = KID_ITEMS.get(item)
+        kind = "food" if act == "feed" else "toy"
+        if not it or it[0] != kind or not it[1] <= kid["age"] <= it[2]:
+            return {"error": "item"}
+        price, eff = it[3], it[4]
+        stat = "hunger" if kind == "food" else "happy"
+        if kid[stat] >= 100:
+            return {"error": "full"}
+        kid[stat] = min(100.0, kid[stat] + eff)
+        kid["alerts"] &= ~(KID_ALERT_HUNGRY if kind == "food" else KID_ALERT_SAD)
+        with c:
+            if not _wallet_take(c, uid, price):
+                return {"error": "funds", "balance": wallet_balance(uid)}
+            kid_save(c, kid)
+        return {"result": "ok", "stat": stat, "value": round(kid[stat]), "balance": wallet_balance(uid)}
+    if act == "fee":
+        stage = kid_stage(kid)
+        if stage not in KID_FEES or kid["fee_age"] >= kid["age"]:
+            return {"error": "no_fee"}
+        fee = KID_FEES[stage]
+        kid["fee_age"] = kid["age"]
+        kid["alerts"] &= ~KID_ALERT_FEE
+        with c:
+            if not _wallet_take(c, uid, fee):
+                return {"error": "funds", "balance": wallet_balance(uid)}
+            kid_save(c, kid)
+        return {"result": "fee", "fee": fee, "balance": wallet_balance(uid)}
+    return {"error": "act"}
+
+
 WEBAPP_HTML = r"""<!doctype html>
 <html lang="uz">
 <head>
@@ -17810,21 +17976,23 @@ WEBAPP_HTML = r"""<!doctype html>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root{
-    --bg:#07070d; --card:#11111c; --line:#23233a;
+    --bg:#07060d; --card:#12101e; --line:#2a2440;
     --cyan:#22d3ee; --mag:#e879f9; --pur:#8b5cf6; --lime:#a3e635;
-    --txt:#e7e7f5; --dim:#8a8ab0;
+    --gold:#ffd24a; --gold2:#ffb020;
+    --txt:#f3eede; --dim:#9a93b8;
   }
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
   body{margin:0; background:var(--bg); color:var(--txt);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    background-image:radial-gradient(1200px 500px at 50% -10%, rgba(139,92,246,.18), transparent),
-                     radial-gradient(900px 400px at 100% 0, rgba(34,211,238,.12), transparent);
+    background-image:radial-gradient(1200px 500px at 50% -10%, rgba(139,92,246,.2), transparent),
+                     radial-gradient(900px 400px at 100% 0, rgba(255,210,74,.1), transparent),
+                     radial-gradient(900px 400px at 0 10%, rgba(34,211,238,.1), transparent);
     min-height:100vh; padding:16px 16px 92px;}
   .hdr{display:flex; align-items:center; gap:14px; margin:6px 0 18px}
   .ava{width:58px;height:58px;border-radius:50%;display:flex;align-items:center;justify-content:center;
     font-size:26px;font-weight:800;color:#07070d;
-    background:linear-gradient(135deg,var(--cyan),var(--mag));
-    box-shadow:0 0 22px rgba(34,211,238,.5), 0 0 40px rgba(232,121,249,.3)}
+    background:linear-gradient(135deg,var(--gold),var(--mag));
+    box-shadow:0 0 22px rgba(255,210,74,.45), 0 0 40px rgba(232,121,249,.3)}
   .hname{font-size:20px;font-weight:800;letter-spacing:.3px}
   .hsub{color:var(--dim);font-size:13px;margin-top:2px}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -17904,6 +18072,44 @@ WEBAPP_HTML = r"""<!doctype html>
     font-weight:700;font-size:14px;max-width:88%;text-align:center;transition:.25s;pointer-events:none;z-index:99;
     box-shadow:0 0 24px rgba(139,92,246,.4)}
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  /* oltin urg'u */
+  h2{background:linear-gradient(90deg,var(--gold),var(--cyan));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .val.gold{color:var(--gold);text-shadow:0 0 14px rgba(255,210,74,.5)}
+  /* crash tarix paneli */
+  .hist{display:flex;gap:6px;overflow-x:auto;padding:4px 0 10px;-webkit-overflow-scrolling:touch}
+  .hist::-webkit-scrollbar{display:none}
+  .hc{flex:none;font-size:12px;font-weight:800;padding:4px 9px;border-radius:999px;border:1px solid var(--line)}
+  .hc.lo{color:#7bdfff}.hc.mid{color:var(--mag)}.hc.hi{color:var(--gold)}
+  #ccanvas{width:100%;height:100%;display:block}
+  .mx{position:absolute;z-index:2}
+  /* savdo tugmalari */
+  .mkt{display:flex;align-items:center;gap:10px;padding:12px 6px;border-bottom:1px solid var(--line)}
+  .mkt:last-child{border-bottom:none}
+  .mkt .ic{font-size:22px;width:30px;text-align:center}
+  .mkt .nm{font-weight:700}.mkt .pr{font-size:12px;color:var(--dim)}
+  .up{color:var(--lime)}.down{color:#ff6b6b}
+  .mkt .act{margin-left:auto;display:flex;gap:6px}
+  .mini{border:none;border-radius:10px;padding:8px 12px;font-weight:800;font-size:13px;color:#07070d;cursor:pointer}
+  .mini.buy{background:linear-gradient(135deg,var(--lime),var(--cyan))}
+  .mini.sell{background:linear-gradient(135deg,var(--gold),#ff6b6b)}
+  /* modal */
+  .ov{position:fixed;inset:0;background:rgba(5,5,12,.72);backdrop-filter:blur(4px);z-index:50;
+    display:flex;align-items:flex-end;justify-content:center;opacity:0;pointer-events:none;transition:.2s}
+  .ov.show{opacity:1;pointer-events:auto}
+  .sheet{width:100%;max-width:520px;background:linear-gradient(180deg,#15121f,#0c0b14);
+    border:1px solid var(--line);border-radius:22px 22px 0 0;padding:18px 16px 24px;transform:translateY(30px);transition:.2s}
+  .ov.show .sheet{transform:none}
+  .opts{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+  .opt{flex:1 1 30%;text-align:center;padding:12px;border-radius:12px;border:1px solid var(--line);font-weight:800;cursor:pointer}
+  .opt.on{background:linear-gradient(135deg,rgba(255,210,74,.2),rgba(34,211,238,.18));border-color:var(--gold)}
+  /* farzand karta */
+  .kid{border:1px solid var(--line);border-radius:16px;padding:14px;margin-top:12px;background:#0f0d18}
+  .bars{display:flex;gap:10px;margin:8px 0}
+  .bar{flex:1}.bar .t{font-size:11px;color:var(--dim)}
+  .bar .track{height:7px;border-radius:5px;background:#201b33;overflow:hidden;margin-top:3px}
+  .bar .fill{height:100%;border-radius:5px}
+  .kbtns{display:flex;gap:8px;margin-top:10px}
+  .kbtn{flex:1;text-align:center;padding:10px;border-radius:12px;border:1px solid var(--line);font-weight:700;font-size:13px;cursor:pointer}
 </style>
 </head>
 <body>
@@ -18026,31 +18232,65 @@ function render(res){
     bk.appendChild($('<div class="card full"><div class="center">Bank mavjud emas.</div></div>'));
   app.appendChild(bk);
 
-  // BIRJA
+  // BIRJA — savdo
   const bx=$('<div class="sec" id="s-birja"></div>');
-  bx.appendChild($('<h2>📈 Birja</h2>'));
+  bx.appendChild($('<h2>📈 Birja — savdo</h2>'));
   const bl=$('<div class="card full"></div>');
-  (d.birja_list||[]).forEach(it=>{
-    const up=it.profit>=0;
-    bl.appendChild($('<div class="row"><div><b>'+esc(it.asset)+'</b> <span class="hsub">'+esc(it.qty)+'</span></div>'+
-      '<div style="text-align:right"><b class="val neon" style="font-size:15px">'+esc(it.value_fmt)+'$</b>'+
-      '<div class="hsub" style="color:'+(up?'var(--lime)':'#ff6b6b')+'">'+(up?'▲ +':'▼ ')+esc(it.profit)+'$</div></div></div>'));
+  (d.birja_market||[]).forEach(it=>{
+    const up=(it.change||0)>=0;
+    const row=$('<div class="mkt"><div class="ic">'+esc(it.icon)+'</div>'+
+      '<div><div class="nm">'+esc(it.asset)+'</div>'+
+      '<div class="pr">'+(it.price?fmtMoney(it.price)+'$ <span class="'+(up?'up':'down')+'">'+(up?'▲':'▼')+Math.abs(it.change)+'%</span>':'—')+
+      (it.qty>0?' · 💼 '+esc(it.value_fmt)+'$':'')+'</div></div>'+
+      '<div class="act"></div></div>');
+    const act=app_q(row,'.act');
+    const buy=$('<button class="mini buy">Olish</button>');
+    buy.onclick=()=>{ sheet('🟢 '+esc(it.name)+' — olish',(d.birja_buy_fixed||[]).map(a=>({label:fmtMoney(a)+'$',value:a})),
+      (usd)=>api('/app/api/birja/buy',{asset:it.asset,usd:usd}).then(r=>{
+        if(r.result==='bought'){ setBal(r.balance); toast('🟢 '+r.asset+' olindi'); refresh(); } else toast(errText(r.error,r.min)); })); };
+    act.appendChild(buy);
+    if(it.qty>0){
+      const sell=$('<button class="mini sell">Sotish</button>');
+      sell.onclick=()=>{ if(it.lock>0){ toast('⏳ '+Math.ceil(it.lock/60)+' daqiqadan keyin sotasiz'); return; }
+        sheet('🔴 '+esc(it.name)+' — sotish',(d.birja_pcts||[]).map(p=>({label:p+'%',value:p})),
+          (pct)=>api('/app/api/birja/sell',{asset:it.asset,pct:pct}).then(r=>{
+            if(r.result==='sold'){ setBal(r.balance); toast('🔴 +'+fmtMoney(r.usd)+'$'); refresh(); } else toast(errText(r.error,r.min)); })); };
+      act.appendChild(sell);
+    }
+    bl.appendChild(row);
   });
-  if(!(d.birja_list||[]).length) bl.appendChild($('<div class="center">Aktivlar yo‘q.<br><span class="hsub">Botda /profil → 📈 Birja</span></div>'));
+  if(!(d.birja_market||[]).length) bl.appendChild($('<div class="center">Narxlar yuklanmoqda…</div>'));
   bx.appendChild(bl);
   app.appendChild(bx);
 
-  // FARZAND
+  // FARZAND — boshqaruv
   const fz=$('<div class="sec" id="s-farzand"></div>');
   fz.appendChild($('<h2>👶 Farzandlar</h2>'));
-  const fl=$('<div class="card full"></div>');
   (d.kids_list||[]).forEach(k=>{
-    fl.appendChild($('<div class="row"><div><b>'+esc(k.name)+'</b> <span class="hsub">'+esc(k.age)+' yosh</span>'+
-      '<div class="hsub">'+esc(k.stage)+(k.working?' · 💼':'')+'</div></div>'+
-      '<div style="text-align:right" class="hsub">🍔 '+esc(k.hunger)+'% · 😊 '+esc(k.happy)+'%</div></div>'));
+    const hc=k.hunger<30?'#ff6b6b':(k.hunger<60?'var(--gold)':'var(--lime)');
+    const pc=k.happy<30?'#ff6b6b':(k.happy<60?'var(--gold)':'var(--lime)');
+    const card=$('<div class="kid"><div style="display:flex;justify-content:space-between">'+
+      '<b>'+esc(k.name)+'</b><span class="hsub">'+esc(k.age)+' yosh · '+esc(k.stage)+(k.working?' 💼':'')+'</span></div>'+
+      '<div class="bars"><div class="bar"><div class="t">🍔 To‘qlik</div><div class="track"><div class="fill" style="width:'+k.hunger+'%;background:'+hc+'"></div></div></div>'+
+      '<div class="bar"><div class="t">😊 Kayfiyat</div><div class="track"><div class="fill" style="width:'+k.happy+'%;background:'+pc+'"></div></div></div></div>'+
+      '<div class="kbtns"></div></div>');
+    const btns=app_q(card,'.kbtns');
+    if(!k.working){
+      if((k.food||[]).length){ const fb=$('<div class="kbtn">🍔 Ovqat</div>');
+        fb.onclick=()=>sheet('🍔 '+esc(k.name)+' — ovqat',k.food.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
+          (item)=>api('/app/api/kid',{kid:k.id,act:'feed',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('🍔 To‘qlik '+r.value+'%'); refresh(); } else toast(kidErr(r.error)); }));
+        btns.appendChild(fb); }
+      if((k.toy||[]).length){ const tb=$('<div class="kbtn">🧸 O‘yinchoq</div>');
+        tb.onclick=()=>sheet('🧸 '+esc(k.name)+' — o‘yinchoq',k.toy.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
+          (item)=>api('/app/api/kid',{kid:k.id,act:'toy',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('😊 Kayfiyat '+r.value+'%'); refresh(); } else toast(kidErr(r.error)); }));
+        btns.appendChild(tb); }
+      if(k.fee>0){ const feb=$('<div class="kbtn" style="color:var(--gold)">🎓 Ta‘lim '+k.fee+'$</div>');
+        feb.onclick=()=>api('/app/api/kid',{kid:k.id,act:'fee'}).then(r=>{ if(r.result==='fee'){ setBal(r.balance); toast('🎓 To‘lov qilindi'); refresh(); } else toast(kidErr(r.error)); });
+        btns.appendChild(feb); }
+    }
+    fz.appendChild(card);
   });
-  if(!(d.kids_list||[]).length) fl.appendChild($('<div class="center">Farzandlar yo‘q.<br><span class="hsub">Botda /oila</span></div>'));
-  fz.appendChild(fl);
+  if(!(d.kids_list||[]).length) fz.appendChild($('<div class="card full"><div class="center">Farzandlar yo‘q.<br><span class="hsub">Botda /oila</span></div></div>'));
   app.appendChild(fz);
 
   // SHOP
@@ -18088,11 +18328,13 @@ function render(res){
   const cr=$('<div class="sec" id="s-crash"></div>');
   cr.innerHTML=
     '<h2>🚀 Crash — Aviator</h2>'+
-    '<div class="crashbox" id="cbox"><div class="mx" id="mx">1.00x</div><div class="plane" id="plane">🚀</div></div>'+
-    '<div class="note" id="cnote">Tikib, portlashdan oldin yechib oling!</div>'+
+    '<div class="hist" id="chist"></div>'+
+    '<div class="crashbox" id="cbox"><canvas id="ccanvas"></canvas><div class="mx" id="mx">1.00x</div><div class="plane" id="plane">🛩️</div></div>'+
+    '<div class="note" id="cnote">Tikib, portlashdan oldin yechib oling! 🎯 Qachon portlashi — sir.</div>'+
     '<div class="betrow"><input class="bet" id="cbet" type="number" inputmode="numeric" value="50"></div>'+
     '<button class="btn go full" id="cbtn">🚀 Tikish (50$)</button>';
   app.appendChild(cr);
+  window.CHIST=d.crash_history||[];
 
   // FROG (Baqa)
   const fr=$('<div class="sec" id="s-frog"></div>');
@@ -18140,58 +18382,85 @@ function app_q(el,sel){ return el.querySelector(sel); }
 function toast(m){ let t=document.getElementById('toast'); if(!t){ t=document.createElement('div'); t.id='toast'; document.body.appendChild(t);}
   t.textContent=m; t.className='show'; clearTimeout(window._tt); window._tt=setTimeout(()=>t.className='',2200); }
 function refresh(){ api('/app/api/data',{}).then(r=>{ if(r&&r.ok&&r.enabled) render(r); }); }
+function sheet(title, opts, onPick){
+  let ov=document.getElementById('ov'); if(!ov){ ov=document.createElement('div'); ov.id='ov'; ov.className='ov'; document.body.appendChild(ov); }
+  ov.innerHTML='<div class="sheet"><div style="font-weight:800;font-size:16px;margin-bottom:4px">'+title+'</div>'+
+    '<div class="opts">'+opts.map((o,i)=>'<div class="opt" data-i="'+i+'">'+o.label+'</div>').join('')+'</div>'+
+    '<button class="btn full" id="ovx" style="background:#1c1830;color:var(--txt)">Yopish</button></div>';
+  ov.className='ov show';
+  const close=()=>{ ov.className='ov'; };
+  ov.querySelector('#ovx').onclick=close;
+  ov.onclick=(e)=>{ if(e.target===ov) close(); };
+  ov.querySelectorAll('.opt').forEach(el=>el.onclick=()=>{ close(); onPick(opts[+el.dataset.i].value); });
+}
 function api(path,body){ return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(Object.assign({initData:tg?tg.initData:''},body||{}))}).then(r=>r.json()); }
 function haptic(t){ try{tg.HapticFeedback.notificationOccurred(t);}catch(e){} }
 
-// ---- CRASH (Aviator) ----
+// ---- CRASH (Aviator — bashorat qilib bo'lmaydi) ----
+function histClass(v){ return v>=10?'hi':(v>=2?'mid':'lo'); }
+function renderHist(el){ if(!el) return; el.innerHTML=(window.CHIST||[]).map(v=>'<span class="hc '+histClass(v)+'">'+v.toFixed(2)+'x</span>').join(''); }
 function initCrash(){
   const btn=document.getElementById('cbtn'), bet=document.getElementById('cbet'),
-        mx=document.getElementById('mx'), box=document.getElementById('cbox'),
-        plane=document.getElementById('plane'), note=document.getElementById('cnote');
+        mx=document.getElementById('mx'), box=document.getElementById('cbox'), cv=document.getElementById('ccanvas'),
+        plane=document.getElementById('plane'), note=document.getElementById('cnote'), chist=document.getElementById('chist');
   if(!btn) return;
-  let state='idle', raf=null, t0=0, crash=1, growth=0.12, cur=1, b=50;
+  renderHist(chist);
+  const ctx=cv.getContext('2d'); const dpr=window.devicePixelRatio||1;
+  let state='idle', raf=null, poll=null, t0=0, growth=0.12, cur=1;
+  function size(){ cv.width=box.clientWidth*dpr; cv.height=box.clientHeight*dpr; }
   bet.oninput=()=>{ if(state==='idle') btn.textContent='🚀 Tikish ('+(parseInt(bet.value)||0)+'$)'; };
-  function frame(){
-    const t=(performance.now()-t0)/1000;
-    cur=Math.exp(growth*t);
-    if(cur>=crash){ bust(); return; }
+  function draw(){
+    const t=(performance.now()-t0)/1000; cur=Math.exp(growth*t);
     mx.textContent=cur.toFixed(2)+'x';
-    const p=Math.min(1,Math.log(cur)/Math.log(Math.max(crash,1.5)));
-    plane.style.left=(14+p*(box.clientWidth-56))+'px';
-    plane.style.bottom=(14+p*(box.clientHeight-56))+'px';
-    raf=requestAnimationFrame(frame);
+    const W=cv.width,H=cv.height,maxM=Math.max(cur*1.25,2.2),N=48; size();
+    ctx.clearRect(0,0,W,H);
+    const px=i=>W*(i/N), py=m=>H-(H-8*dpr)*((m-1)/(maxM-1));
+    let ex=0,ey=py(1);
+    ctx.beginPath(); ctx.moveTo(0,py(1));
+    for(let i=0;i<=N;i++){ const m=Math.exp(growth*(t*i/N)); ex=px(i); ey=py(m); ctx.lineTo(ex,ey); }
+    const line=new Path2D(); line.moveTo(0,py(1));
+    for(let i=0;i<=N;i++){ line.lineTo(px(i),py(Math.exp(growth*(t*i/N)))); }
+    ctx.lineTo(ex,H); ctx.lineTo(0,H); ctx.closePath();
+    const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'rgba(255,70,90,.5)'); g.addColorStop(1,'rgba(255,70,90,.04)');
+    ctx.fillStyle=g; ctx.fill();
+    ctx.strokeStyle='#ff4d6a'; ctx.lineWidth=3*dpr; ctx.shadowColor='rgba(255,77,106,.8)'; ctx.shadowBlur=12*dpr; ctx.stroke(line); ctx.shadowBlur=0;
+    plane.style.left=(ex/dpr-12)+'px'; plane.style.top=(ey/dpr-14)+'px';
+    raf=requestAnimationFrame(draw);
   }
-  function bust(){
-    cancelAnimationFrame(raf); state='idle';
-    box.classList.add('bust'); mx.classList.add('bust'); mx.textContent=crash.toFixed(2)+'x 💥'; plane.textContent='💥';
-    note.textContent='💥 Portladi! Yutqazdingiz.'; haptic('error');
-    api('/app/api/crash/cashout',{mult:crash+1}); // server tomonda yopamiz
-    resetSoon();
+  function stopLoops(){ cancelAnimationFrame(raf); clearInterval(poll); poll=null; }
+  function bust(crash){
+    stopLoops(); state='idle'; box.classList.add('bust'); mx.classList.add('bust');
+    mx.textContent=(crash||cur).toFixed(2)+'x 💥'; plane.textContent='💥'; note.textContent='💥 Portladi! Yutqazdingiz.'; haptic('error');
+    renderHist(chist); resetSoon();
   }
-  function resetSoon(){ setTimeout(()=>{ box.classList.remove('bust'); mx.classList.remove('bust'); plane.textContent='🚀';
-    plane.style.left='14px'; plane.style.bottom='14px'; mx.textContent='1.00x';
-    note.textContent='Tikib, portlashdan oldin yechib oling!'; btn.className='btn go full'; btn.disabled=false;
-    btn.textContent='🚀 Tikish ('+(parseInt(bet.value)||0)+'$)'; btn.onclick=start; }, 1600); }
+  function resetSoon(){ setTimeout(()=>{ box.classList.remove('bust'); mx.classList.remove('bust'); plane.textContent='🛩️';
+    plane.style.left='10px'; plane.style.top='auto'; plane.style.bottom='12px'; mx.textContent='1.00x'; ctx.clearRect(0,0,cv.width,cv.height);
+    note.textContent='Tikib, portlashdan oldin yechib oling! 🎯 Qachon portlashi — sir.'; btn.className='btn go full'; btn.disabled=false;
+    btn.textContent='🚀 Tikish ('+(parseInt(bet.value)||0)+'$)'; btn.onclick=start; }, 1700); }
   function start(){
-    b=parseInt(bet.value)||0; btn.disabled=true;
+    const b=parseInt(bet.value)||0; btn.disabled=true;
     api('/app/api/crash/start',{bet:b}).then(r=>{
       if(!r.ok||r.error){ note.textContent=errText(r.error,r.min); btn.disabled=false; return; }
-      setBal(r.balance); crash=r.crash; growth=r.growth||0.12; t0=performance.now(); state='fly';
+      setBal(r.balance); window.CHIST=r.history||window.CHIST; growth=r.growth||0.12; t0=performance.now(); state='fly';
+      plane.style.bottom='auto'; box.classList.remove('bust'); mx.classList.remove('bust');
       btn.className='btn cash full'; btn.textContent='💰 Yechib olish'; btn.disabled=false; btn.onclick=cash;
-      note.textContent='🚀 Uchyapti…'; raf=requestAnimationFrame(frame);
+      note.textContent='🚀 Uchyapti…'; raf=requestAnimationFrame(draw);
+      poll=setInterval(()=>{ api('/app/api/crash/state',{}).then(s=>{
+        if(!s.alive){ if(s.history) window.CHIST=s.history; bust(s.crash); } }); }, 350);
     }).catch(()=>{ btn.disabled=false; });
   }
   function cash(){
-    if(state!=='fly') return; state='idle'; cancelAnimationFrame(raf); btn.disabled=true;
-    api('/app/api/crash/cashout',{mult:cur}).then(r=>{
+    if(state!=='fly') return; state='idle'; stopLoops(); btn.disabled=true;
+    api('/app/api/crash/cashout',{}).then(r=>{
+      if(r.history) window.CHIST=r.history; renderHist(chist);
       if(r.result==='win'){ setBal(r.balance); mx.textContent=r.multiplier.toFixed(2)+'x';
         note.textContent='✅ +'+fmtMoney(r.win)+'$ ('+r.multiplier.toFixed(2)+'x)'; haptic('success'); }
-      else { mx.classList.add('bust'); mx.textContent=(r.crash||crash).toFixed(2)+'x 💥'; note.textContent='💥 Kech qoldingiz!'; haptic('error'); }
+      else { box.classList.add('bust'); mx.classList.add('bust'); mx.textContent=(r.crash||cur).toFixed(2)+'x 💥'; note.textContent='💥 Kech qoldingiz!'; haptic('error'); }
       resetSoon();
     }).catch(()=>{ btn.disabled=false; });
   }
-  state='idle'; btn.onclick=start;
+  size(); state='idle'; btn.onclick=start;
 }
 
 // ---- FROG (Baqa) ----
@@ -18246,11 +18515,25 @@ function initFrog(){
   btn.onclick=start; cash.onclick=doCash;
 }
 function errText(e,min){
-  if(e==='min') return 'Minimal tikim: '+min+'$';
+  if(e==='min') return 'Minimal: '+min+'$';
   if(e==='funds') return '💸 Hamyonda pul yetarli emas';
   if(e==='disabled') return '🌐 Web app o‘chirilgan';
-  if(e==='max') return 'Juda katta tikim';
+  if(e==='max') return 'Juda katta miqdor';
+  if(e==='stale') return '⏳ Narx yangilanmoqda, qayta urining';
+  if(e==='hold') return '⏳ Hali sotib bo‘lmaydi';
+  if(e==='nothing') return 'Sizda bu aktiv yo‘q';
+  if(e==='recipient') return 'Qabul qiluvchi topilmadi';
+  if(e==='undeliverable') return 'Yetkazilmadi — u botni ochmagan. Pul qaytdi';
+  if(e==='no_pair') return 'Juftingiz yo‘q';
+  if(e==='self') return 'O‘zingizga yubora olmaysiz';
   return 'Xato, qayta urining';
+}
+function kidErr(e){
+  if(e==='full') return 'To‘la — hozircha kerak emas';
+  if(e==='no_fee') return 'Hozir to‘lov kerak emas';
+  if(e==='working') return 'Bu farzand ishlaydi';
+  if(e==='funds') return '💸 Pul yetarli emas';
+  return errText(e);
 }
 function setTab(k){
   TAB=k;

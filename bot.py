@@ -14037,6 +14037,7 @@ GUARD_DEFAULTS = {"captcha": 0, "welcome": 1, "antilink": 0, "antiflood": 0, "wa
 CAPTCHA_TTL = 120               # captcha uchun vaqt (soniya)
 FLOOD_COUNT, FLOOD_WINDOW = 7, 5   # 5 soniyada 7 ta xabar — flood
 FLOOD_MUTE = 300                # flood uchun jim qilish (soniya)
+BADWORD_MUTE = 1800             # taqiqlangan so'z → 30 daqiqa jim
 WARN_MUTE = 86400               # ogohlantirish limiti → 1 kun jim
 NOTICE_TTL = 20                 # anti-reklama/flood xabarlari shuncha soniyadan keyin o'chadi
 ADMIN_CACHE_TTL = 300
@@ -14528,9 +14529,29 @@ async def guard_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.delete()
         except TelegramError:
             return
-        sent = await context.bot.send_message(chat_id, g2_t(chat_id, "badword", name=name))
-        await delete_later(context.bot, chat_id, sent.message_id, NOTICE_TTL)
-        await mod_log(context.bot, chat_id, f"🧼 Taqiqlangan so‘z «{escape(word)}» — {name}")
+        # Empire Security uslubi: xabarni o'chirib, a'zoni 30 daqiqa jim qilamiz va
+        # «✅ Bekor qilish» tugmasi bilan muddatni ko'rsatamiz.
+        until = int(time.time()) + BADWORD_MUTE
+        muted = False
+        try:
+            await mod_mute(context.bot, chat_id, user.id, BADWORD_MUTE)
+            muted = True
+        except TelegramError as e:
+            logger.warning("Taqiqlangan so'z: jim qilib bo'lmadi: %s", e)
+        if muted:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                g2_t(chat_id, "bw_undo"), callback_data=f"bw:{chat_id}:{user.id}")]])
+            await context.bot.send_message(
+                chat_id,
+                g2_t(chat_id, "bw_mute", name=name, id=user.id, until=tashkent_dt(until)),
+                reply_markup=kb,
+            )
+        else:
+            sent = await context.bot.send_message(chat_id, g2_t(chat_id, "badword", name=name))
+            await delete_later(context.bot, chat_id, sent.message_id, NOTICE_TTL)
+        await mod_log(context.bot, chat_id,
+                      f"🧼 Taqiqlangan so‘z «{escape(word)}» — {name}"
+                      + (f" · 🔇 {tashkent_dt(until)} gacha" if muted else ""))
         raise ApplicationHandlerStop
 
 
@@ -15257,6 +15278,10 @@ G2_TEXT = {
         "word_missing": "🤷 «{word}» ro‘yxatda yo‘q.", "word_need": "✍️ So‘zni yozing: /addword so‘z",
         "badword": ["🧼 {name}, og‘zingni sovun bilan yuvdik! Bu so‘z taqiqlangan 🙊",
                     "🙊 {name}, voy-voy-voy! Bunday so‘zlar bizda ishlatilmaydi 🚫"],
+        "bw_mute": "🚫 {name} [{id}] taqiqlangan so‘zdan foydalandi.\nHolati: <b>Mute holatida</b> 🔇\nMuddat: <b>{until}</b> gacha",
+        "bw_undo": "✅ Bekor qilish",
+        "bw_undone": "\n\n♻️ {admin} tomonidan bekor qilindi — {name} yana yoza oladi.",
+        "bw_only_admin": "⛔ Buni faqat adminlar bosa oladi.",
         "locks": "🔒 <b>CHEKLOVLAR</b>\n\n❌ — shu turdagi xabarlar oddiy a’zolardan o‘chiriladi.",
         "lock_names": {"sticker": "🎭 Stikerlar", "animation": "🎞 GIF", "voice": "🎤 Ovozli xabar",
                        "video_note": "⭕ Dumaloq video", "forward": "↪️ Forward"},
@@ -15546,6 +15571,11 @@ def tashkent_hour():
     return time.gmtime(time.time() + TASHKENT_OFFSET).tm_hour
 
 
+def tashkent_dt(ts):
+    """Epoch → Toshkent vaqti 'KK.OO.YY SS:DD' ko'rinishida."""
+    return time.strftime("%d.%m.%y %H:%M", time.gmtime(ts + TASHKENT_OFFSET))
+
+
 async def night_close(bot, chat_id):
     try:
         chat = await bot.get_chat(chat_id)
@@ -15694,6 +15724,35 @@ async def cb_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     await mod_log(context.bot, chat_id,
                   f"{done} — {user_mention(uid, uid)} ({user_mention(q.from_user.id, q.from_user.first_name)})")
+
+
+async def cb_badword_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Taqiqlangan so'z uchun qo'yilgan mute'ni «✅ Bekor qilish» tugmasi bilan olib tashlaydi (faqat admin)."""
+    q = update.callback_query
+    try:
+        _, chat_s, uid_s = q.data.split(":")
+        chat_id, uid = int(chat_s), int(uid_s)
+    except ValueError:
+        await q.answer()
+        return
+    if not await user_is_chat_admin(context.bot, chat_id, q.from_user.id):
+        await q.answer(g2_t(chat_id, "bw_only_admin"), show_alert=True)
+        return
+    try:
+        await mod_unmute(context.bot, chat_id, uid)
+    except TelegramError:
+        await q.answer(g2_t(chat_id, "r_fail"), show_alert=True)
+        return
+    admin = user_mention(q.from_user.id, q.from_user.first_name)
+    await q.answer("✅")
+    try:
+        await q.edit_message_text(
+            q.message.text_html + g2_t(chat_id, "bw_undone", admin=admin, name=user_mention(uid, uid)),
+            reply_markup=None,
+        )
+    except TelegramError:
+        pass
+    await mod_log(context.bot, chat_id, f"♻️ Taqiqlangan so‘z mute bekor qilindi — {user_mention(uid, uid)} ({admin})")
 
 
 # ───────────────────────────── 🛡 GROUP HELP QO'SHIMCHA BUYRUQLARI ─────────────────────────────
@@ -17208,6 +17267,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_settings, pattern=r"^gs:-?\d+:\w+$"))
     app.add_handler(CallbackQueryHandler(cb_admin, pattern=r"^ga:-?\d+:\d+(:\w+)?$"))
     app.add_handler(CallbackQueryHandler(cb_report, pattern=r"^rp:-?\d+:\d+:\d+:(del|mute|ban)$"))
+    app.add_handler(CallbackQueryHandler(cb_badword_undo, pattern=r"^bw:-?\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_fsub_check, pattern=r"^fsub:check$"))
     app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash|memory):\d+:(uz|eng|ru|kz)$"))
     app.add_handler(InlineQueryHandler(secret_inline))

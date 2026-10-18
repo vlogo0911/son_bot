@@ -18440,34 +18440,66 @@ function initCrash(){
       ctx.fillStyle=i%2? 'rgba(150,110,235,.12)':'rgba(90,60,170,.10)'; ctx.fill();
     }
   }
+  // chiroyli qizil reaktiv samolyot (o'ngga qaragan), egri chiziq burchagiga buriladi
+  function drawPlane(x,y,ang,s){
+    ctx.save(); ctx.translate(x,y); ctx.rotate(ang);
+    // alanga izi (dvigatel)
+    const fl=ctx.createLinearGradient(-s*2.2,0,-s*0.9,0);
+    fl.addColorStop(0,'rgba(255,180,40,0)'); fl.addColorStop(1,'rgba(255,170,40,.8)');
+    ctx.fillStyle=fl; ctx.beginPath(); ctx.moveTo(-s*0.9,-s*0.14); ctx.lineTo(-s*2.2,0); ctx.lineTo(-s*0.9,s*0.14); ctx.closePath(); ctx.fill();
+    // orqa qanot
+    ctx.fillStyle='#8a0c22';
+    ctx.beginPath(); ctx.moveTo(-s*0.8,-s*0.08); ctx.lineTo(-s*1.25,-s*0.8); ctx.lineTo(-s*0.55,-s*0.12); ctx.closePath(); ctx.fill();
+    // pastki qanot
+    ctx.beginPath(); ctx.moveTo(0,s*0.05); ctx.lineTo(-s*0.65,s*0.95); ctx.lineTo(s*0.35,s*0.18); ctx.closePath(); ctx.fill();
+    // tana (gradient + glow)
+    ctx.shadowColor='rgba(255,60,90,.9)'; ctx.shadowBlur=16*dpr;
+    const g=ctx.createLinearGradient(-s,-s*0.3,s,s*0.3); g.addColorStop(0,'#b11030'); g.addColorStop(.5,'#ff466a'); g.addColorStop(1,'#ff86a0');
+    ctx.fillStyle=g; ctx.beginPath();
+    ctx.moveTo(s*1.35,0);
+    ctx.quadraticCurveTo(s*0.3,-s*0.4,-s*0.95,-s*0.26);
+    ctx.quadraticCurveTo(-s*1.3,-s*0.12,-s*1.3,0);
+    ctx.quadraticCurveTo(-s*1.3,s*0.12,-s*0.95,s*0.26);
+    ctx.quadraticCurveTo(s*0.3,s*0.4,s*1.35,0); ctx.closePath(); ctx.fill();
+    ctx.shadowBlur=0;
+    // kabina oynasi
+    ctx.fillStyle='rgba(180,240,255,.9)';
+    ctx.beginPath(); ctx.ellipse(s*0.5,-s*0.03,s*0.3,s*0.15,0,0,7); ctx.fill();
+    ctx.restore();
+  }
   function curve(W,H,t,color){
-    const maxM=Math.max(cur*1.3,2.2),N=54,px=i=>8*dpr+(W-16*dpr)*(i/N),py=m=>H-18*dpr-(H-40*dpr)*((m-1)/(maxM-1));
-    let ex=px(0),ey=py(1);
+    const maxM=Math.max(cur*1.3,2.2),N=54,px=i=>8*dpr+(W-30*dpr)*(i/N),py=m=>H-22*dpr-(H-48*dpr)*((m-1)/(maxM-1));
+    let ex=px(0),ey=py(1),px1=ex,py1=ey;
     const line=new Path2D(); line.moveTo(px(0),py(1));
-    for(let i=0;i<=N;i++){ const m=Math.exp(growth*(t*i/N)); ex=px(i); ey=py(m); line.lineTo(ex,ey); }
+    for(let i=0;i<=N;i++){ const m=Math.exp(growth*(t*i/N)); px1=ex; py1=ey; ex=px(i); ey=py(m); line.lineTo(ex,ey); }
     const fill=new Path2D(line); fill.lineTo(ex,H); fill.lineTo(px(0),H); fill.closePath();
     const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,color.f0); g.addColorStop(1,color.f1);
     ctx.fillStyle=g; ctx.fill(fill);
     ctx.strokeStyle=color.s; ctx.lineWidth=4*dpr; ctx.lineJoin='round'; ctx.shadowColor=color.s; ctx.shadowBlur=14*dpr; ctx.stroke(line); ctx.shadowBlur=0;
-    return [ex,ey];
+    const ang=Math.atan2(ey-py1, ex-px1||1);
+    return [ex,ey,ang];
   }
   function draw(){
     size(); const W=cv.width,H=cv.height; const t=(performance.now()-t0)/1000; cur=Math.exp(growth*t);
     mx.textContent=cur.toFixed(2)+'x';
     ctx.clearRect(0,0,W,H); rays(W,H);
-    const [ex,ey]=curve(W,H,t,{f0:'rgba(255,60,90,.55)',f1:'rgba(255,60,90,.04)',s:'#ff3b6b'});
-    plane.style.left=(ex/dpr-14)+'px'; plane.style.top=(ey/dpr-16)+'px'; plane.style.bottom='auto';
+    const [ex,ey,ang]=curve(W,H,t,{f0:'rgba(255,60,90,.55)',f1:'rgba(255,60,90,.04)',s:'#ff3b6b'});
+    window._tip=[ex,ey];
+    drawPlane(ex,ey,ang,20*dpr);
     raf=requestAnimationFrame(draw);
   }
-  function idle(){ size(); const W=cv.width,H=cv.height; ctx.clearRect(0,0,W,H); rays(W,H); idleRaf=requestAnimationFrame(idle); }
+  function idle(){ size(); const W=cv.width,H=cv.height; ctx.clearRect(0,0,W,H); rays(W,H);
+    drawPlane(26*dpr,H-28*dpr,-0.32,20*dpr); idleRaf=requestAnimationFrame(idle); }
   function stopLoops(){ cancelAnimationFrame(raf); clearInterval(poll); poll=null; }
   function bust(crash){
     stopLoops(); state='idle'; box.classList.add('bust'); mx.classList.add('bust');
-    mx.textContent=(crash||cur).toFixed(2)+'x'; plane.textContent='💥'; note.textContent='💥 Portladi!'; haptic('error');
+    mx.textContent=(crash||cur).toFixed(2)+'x'; note.textContent='💥 Portladi!'; haptic('error');
+    const tip=window._tip||[40,40]; plane.textContent='💥'; plane.style.display='block';
+    plane.style.left=(tip[0]/dpr-14)+'px'; plane.style.top=(tip[1]/dpr-18)+'px'; plane.style.bottom='auto';
     renderHist(chist); resetSoon();
   }
-  function resetSoon(){ setTimeout(()=>{ box.classList.remove('bust'); mx.classList.remove('bust'); plane.textContent='🛩️';
-    plane.style.left='10px'; plane.style.top='auto'; plane.style.bottom='14px'; mx.textContent='1.00x';
+  function resetSoon(){ setTimeout(()=>{ box.classList.remove('bust'); mx.classList.remove('bust');
+    plane.style.display='none'; mx.textContent='1.00x';
     note.textContent='Tikib, portlashdan oldin yechib oling · qachon portlashi sir 🎯';
     btn.className='bigbet'; btn.style.flex='1'; btn.style.marginTop='0'; btn.disabled=false; setBetLabel(); btn.onclick=start;
     idle(); }, 1700); }
@@ -18476,7 +18508,7 @@ function initCrash(){
     api('/app/api/crash/start',{bet:b}).then(r=>{
       if(!r.ok||r.error){ note.textContent=errText(r.error,r.min); btn.disabled=false; idle(); return; }
       setBal(r.balance); window.CHIST=r.history||window.CHIST; growth=r.growth||0.12; t0=performance.now(); state='fly';
-      plane.style.bottom='auto'; box.classList.remove('bust'); mx.classList.remove('bust');
+      plane.style.display='none'; box.classList.remove('bust'); mx.classList.remove('bust');
       btn.className='bigbet cash'; btn.disabled=false; btn.onclick=cash; note.textContent='🚀 Uchyapti…';
       raf=requestAnimationFrame(draw);
       btn.textContent='CASH OUT';
@@ -18494,7 +18526,7 @@ function initCrash(){
       resetSoon();
     }).catch(()=>{ btn.disabled=false; });
   }
-  size(); state='idle'; setBetLabel(); btn.onclick=start; idle();
+  size(); state='idle'; plane.style.display='none'; setBetLabel(); btn.onclick=start; idle();
 }
 
 // ---- FROG (Baqa) ----

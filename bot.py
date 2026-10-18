@@ -79,6 +79,33 @@ def init_rereg():
             c.execute("INSERT INTO rereg_config(key, value) VALUES ('seeded', 1)")
 
 
+def init_bot_users():
+    """users.started — botni shaxsiy chatda ishlatgan (start bosgan) odamlar belgisi."""
+    with db() as c:
+        if "started" not in {r[1] for r in c.execute("PRAGMA table_info(users)")}:
+            c.execute("ALTER TABLE users ADD COLUMN started INTEGER NOT NULL DEFAULT 0")
+
+
+def mark_started(user_id):
+    with db() as c:
+        c.execute("UPDATE users SET started=1 WHERE user_id=? AND started=0", (user_id,))
+
+
+def bot_users_count(c):
+    """Botdan haqiqatan foydalanganlar: start bosgan, o'yin o'ynagan, hamyon/jins/ro'yxatdan o'tgan.
+    `users` jadvalida guruhlarda shunchaki ko'rilgan a'zolar ham bor (member_seen) — ular sanalmaydi."""
+    return c.execute("""
+        SELECT COUNT(*) FROM users u WHERE u.started=1 OR u.birth_confirmed=1
+           OR EXISTS (SELECT 1 FROM chat_stats s WHERE s.user_id=u.user_id AND s.games>0)
+           OR EXISTS (SELECT 1 FROM user_wallet w WHERE w.user_id=u.user_id)
+           OR EXISTS (SELECT 1 FROM user_gender g WHERE g.user_id=u.user_id)
+    """).fetchone()[0]
+
+
+def seen_users_count(c):
+    return c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+
 def rereg_all_on():
     row = db().execute("SELECT value FROM rereg_config WHERE key='all'").fetchone()
     return bool(row and row[0])
@@ -1858,6 +1885,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chat.type == ChatType.PRIVATE:
         user = update.effective_user
+        if user and not user.is_bot:
+            save_user(user)
+            mark_started(user.id)
         if not user:
             return
 
@@ -2275,9 +2305,8 @@ async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     c = db()
-    users_count = c.execute(
-        "SELECT COUNT(*) FROM users"
-    ).fetchone()[0]
+    users_count = bot_users_count(c)
+    seen_count = seen_users_count(c)
     group_ids = panel_group_ids(c)
     total_games = c.execute(
         "SELECT COALESCE(SUM(games), 0) FROM chat_stats"
@@ -2287,6 +2316,7 @@ async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛠 <b>BOT EGASI PANELI</b>\n\n"
         "Kerakli bo'limni tugma orqali tanlang.\n\n"
         f"👤 Foydalanuvchilar: <b>{stat_show('users', users_count)}</b>\n"
+            f"👥 Guruhlarda ko‘rilgan: <b>{seen_count}</b>\n"
         f"🏘 Guruhlar: <b>{stat_show('groups', len(group_ids))}</b>\n"
         f"🎮 Faol o'yinlar: <b>{stat_show('active', len(GAMES))}</b>"
     )
@@ -2961,9 +2991,8 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     c = db()
-    users_count = c.execute(
-        "SELECT COUNT(*) FROM users"
-    ).fetchone()[0]
+    users_count = bot_users_count(c)
+    seen_count = seen_users_count(c)
 
     group_ids = panel_group_ids(c)
     total_games = c.execute(
@@ -3118,6 +3147,7 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "📊 <b>UMUMIY STATISTIKA</b>\n\n"
             f"👤 Foydalanuvchilar: <b>{stat_show('users', users_count)}</b>\n"
+            f"👥 Guruhlarda ko‘rilgan: <b>{seen_count}</b>\n"
             f"🏘 Qayd etilgan guruhlar: <b>{stat_show('groups', len(group_ids))}</b>\n"
             f"🎮 Faol o'yinlar: <b>{stat_show('active', len(GAMES))}</b>\n"
             f"📈 Jami o'yin ishtiroklari: <b>{stat_show('games_total', total_games)}</b>\n\n"
@@ -3159,6 +3189,7 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🛠 <b>BOT EGASI PANELI</b>\n\n"
             "Kerakli bo'limni tugma orqali tanlang.\n\n"
             f"👤 Foydalanuvchilar: <b>{stat_show('users', users_count)}</b>\n"
+            f"👥 Guruhlarda ko‘rilgan: <b>{seen_count}</b>\n"
             f"🏘 Guruhlar: <b>{stat_show('groups', len(group_ids))}</b>\n"
             f"🎮 Faol o'yinlar: <b>{stat_show('active', len(GAMES))}</b>"
         )
@@ -9596,6 +9627,9 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.effective_message
     if not user or not msg or not msg.text:
         return
+    if not user.is_bot:
+        save_user(user)
+        mark_started(user.id)
 
     raw = msg.text.strip()
     if context.user_data.get("bank_purpose") and await bank_purpose_text(update, context):
@@ -16976,7 +17010,8 @@ async def cmd_haqiqiy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("⛔ Bu buyruq faqat bot egalari uchun.")
         return
     c = db()
-    users_count = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    users_count = bot_users_count(c)
+    seen_count = seen_users_count(c)
     groups = len(panel_group_ids(c))
     total_games = c.execute("SELECT COALESCE(SUM(games), 0) FROM chat_stats").fetchone()[0]
     over = {k: v for k, v in c.execute("SELECT key, value FROM panel_overrides")}
@@ -16984,6 +17019,7 @@ async def cmd_haqiqiy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(
         "📊 <b>HAQIQIY STATISTIKA</b>\n\n"
         f"👤 Foydalanuvchilar: <b>{users_count}</b>\n"
+        f"👥 Guruhlarda ko‘rilgan: <b>{seen_count}</b>\n"
         f"🏘 Guruhlar: <b>{groups}</b>\n"
         f"🎮 Faol o‘yinlar: <b>{len(GAMES)}</b>\n"
         f"📈 Jami ishtiroklar: <b>{total_games}</b>" + note
@@ -17700,7 +17736,7 @@ async def webapp_payload(user_id):
     }
     if is_owner:
         total = c.execute("SELECT COALESCE(SUM(money),0) FROM user_wallet").fetchone()[0]
-        users_count = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        users_count = bot_users_count(c)
         data["owner"] = {
             "users": stat_show("users", users_count),
             "groups": stat_show("groups", len(panel_group_ids(c))),
@@ -18775,6 +18811,7 @@ def main():
     init_forcesub()
     init_webapp()
     init_rereg()
+    init_bot_users()
     load_crash_config()
 
     app = (

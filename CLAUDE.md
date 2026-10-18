@@ -62,3 +62,6 @@
   (idempotent, `exchange_txns.txid`). Chiquvchi (`exchange_send` → `exchange_finalize_out`): $ 1:1 (komissiya `fee_pct`),
   xatoda to'liq qaytadi, noaniqda pending + `exchange_retry_worker`. Kunlik limit, faol kredit bo'lsa bloklanadi.
   Sozlamalar `exchange_config` (enabled/fee_pct/daily_limit). son_bot Railway'da public domen + PORT bilan ishlashi kerak.
+- Owner panel → 🔢 Ko'rsatkichlarni tahrirlash (`panel:stats_edit`, `panel:stat_*`, `panel_stats_callback`/`panel_stats_text`,
+  `panel_overrides` jadvali): foydalanuvchilar/guruhlar/faol o'yinlar/jami ishtiroklar sonini qo'lda belgilash (faqat panel
+  ko'rinishi, `stat_show`), "🔄 Avto" haqiqiy songa qaytaradi. Faqat bot egalari.

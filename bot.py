@@ -2021,6 +2021,7 @@ def panel_keyboard(user_id=None):
         rows.append([InlineKeyboardButton("💰 Pul statistikasi", callback_data="panel:money")])
         rows.append([InlineKeyboardButton("🏦 Banklar boshqaruvi", callback_data="panel:banks")])
         rows.append([InlineKeyboardButton("💱 Pul almashuvi", callback_data="panel:exch")])
+        rows.append([InlineKeyboardButton("🔢 Ko‘rsatkichlarni tahrirlash", callback_data="panel:stats_edit")])
         rows.append([InlineKeyboardButton("👶 Farzand o‘chirish", callback_data="panel:kiddel")])
         rows.append([InlineKeyboardButton("🎰 Crash sozlamalari", callback_data="panel:crash")])
         rows.append([InlineKeyboardButton("✨ Premium emoji", callback_data="panel:pemoji")])
@@ -2256,9 +2257,9 @@ async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🛠 <b>BOT EGASI PANELI</b>\n\n"
         "Kerakli bo'limni tugma orqali tanlang.\n\n"
-        f"👤 Foydalanuvchilar: <b>{users_count}</b>\n"
-        f"🏘 Guruhlar: <b>{len(group_ids)}</b>\n"
-        f"🎮 Faol o'yinlar: <b>{len(GAMES)}</b>"
+        f"👤 Foydalanuvchilar: <b>{stat_show('users', users_count)}</b>\n"
+        f"🏘 Guruhlar: <b>{stat_show('groups', len(group_ids))}</b>\n"
+        f"🎮 Faol o'yinlar: <b>{stat_show('active', len(GAMES))}</b>"
     )
 
     await msg.reply_text(text, reply_markup=panel_keyboard(user.id))
@@ -2488,6 +2489,10 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "panel:exch" or query.data.startswith("panel:exch_"):
         await panel_exchange_callback(query, context)
+        return
+
+    if query.data == "panel:stats_edit" or query.data.startswith("panel:stat_"):
+        await panel_stats_callback(query, context)
         return
 
     await query.answer()
@@ -3064,10 +3069,10 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "stats":
         text = (
             "📊 <b>UMUMIY STATISTIKA</b>\n\n"
-            f"👤 Foydalanuvchilar: <b>{users_count}</b>\n"
-            f"🏘 Qayd etilgan guruhlar: <b>{len(group_ids)}</b>\n"
-            f"🎮 Faol o'yinlar: <b>{len(GAMES)}</b>\n"
-            f"📈 Jami o'yin ishtiroklari: <b>{total_games}</b>\n\n"
+            f"👤 Foydalanuvchilar: <b>{stat_show('users', users_count)}</b>\n"
+            f"🏘 Qayd etilgan guruhlar: <b>{stat_show('groups', len(group_ids))}</b>\n"
+            f"🎮 Faol o'yinlar: <b>{stat_show('active', len(GAMES))}</b>\n"
+            f"📈 Jami o'yin ishtiroklari: <b>{stat_show('games_total', total_games)}</b>\n\n"
             "ℹ️ Ishtiroklar chat statistikasi asosida hisoblanadi."
         )
 
@@ -3105,9 +3110,9 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "🛠 <b>BOT EGASI PANELI</b>\n\n"
             "Kerakli bo'limni tugma orqali tanlang.\n\n"
-            f"👤 Foydalanuvchilar: <b>{users_count}</b>\n"
-            f"🏘 Guruhlar: <b>{len(group_ids)}</b>\n"
-            f"🎮 Faol o'yinlar: <b>{len(GAMES)}</b>"
+            f"👤 Foydalanuvchilar: <b>{stat_show('users', users_count)}</b>\n"
+            f"🏘 Guruhlar: <b>{stat_show('groups', len(group_ids))}</b>\n"
+            f"🎮 Faol o'yinlar: <b>{stat_show('active', len(GAMES))}</b>"
         )
 
         await query.edit_message_text(
@@ -9484,6 +9489,10 @@ async def career_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
                     InlineKeyboardButton("🛡 Admin boshqaruvi", callback_data="panel:admins")
                 ]]),
             )
+        return
+
+    if user.id in CAREER_OWNER_IDS and context.user_data.get("panel_stat_state"):
+        await panel_stats_text(update, context)
         return
 
     if user.id in CAREER_OWNER_IDS and context.user_data.get("panel_bank_state"):
@@ -16048,6 +16057,88 @@ async def cb_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 
+# ── 👑 Owner panel: ko'rsatkichlarni tahrirlash (faqat ko'rinish) ──
+
+PANEL_STAT_KEYS = [
+    ("users", "👤 Foydalanuvchilar"), ("groups", "🏘 Guruhlar"),
+    ("active", "🎮 Faol o‘yinlar"), ("games_total", "📈 Jami ishtiroklar"),
+]
+PANEL_STAT_CANCEL = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor qilish", callback_data="panel:stats_edit")]])
+
+
+def init_panel_overrides():
+    with db() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS panel_overrides (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+
+
+def stat_show(key, real):
+    """Owner panel ko'rsatkichi: qo'lda belgilangani bo'lsa — o'sha, bo'lmasa haqiqiy son."""
+    row = db().execute("SELECT value FROM panel_overrides WHERE key=?", (key,)).fetchone()
+    return row[0] if row else real
+
+
+def set_override(key, value):
+    with db() as c:
+        if value is None:
+            c.execute("DELETE FROM panel_overrides WHERE key=?", (key,))
+        else:
+            c.execute(
+                "INSERT INTO panel_overrides(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, int(value)))
+
+
+def panel_stats_edit_view():
+    lines = [
+        "🔢 <b>KO‘RSATKICHLARNI TAHRIRLASH</b>", "",
+        "Bu faqat <b>panel ko‘rinishiga</b> ta’sir qiladi — haqiqiy bazaga tegmaydi.", "",
+    ]
+    rows = []
+    c = db()
+    for key, label in PANEL_STAT_KEYS:
+        row = c.execute("SELECT value FROM panel_overrides WHERE key=?", (key,)).fetchone()
+        lines.append(f"{label}: <b>{'✍️ ' + fmt_money(row[0]) if row else '🔄 avto'}</b>")
+        rows.append([
+            InlineKeyboardButton(f"✍️ {label}", callback_data=f"panel:stat_set:{key}"),
+            InlineKeyboardButton("🔄 Avto", callback_data=f"panel:stat_auto:{key}"),
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def panel_stats_callback(query, context):
+    parts = query.data.split(":")
+    action = parts[1]
+    context.user_data.pop("panel_stat_state", None)
+    if action == "stat_set" and len(parts) > 2 and parts[2] in dict(PANEL_STAT_KEYS):
+        context.user_data["panel_stat_state"] = parts[2]
+        label = dict(PANEL_STAT_KEYS)[parts[2]]
+        await query.edit_message_text(
+            f"✍️ <b>{label}</b> uchun ko‘rsatiladigan sonni yuboring (0 dan katta butun son):",
+            reply_markup=PANEL_STAT_CANCEL)
+        return
+    if action == "stat_auto" and len(parts) > 2:
+        set_override(parts[2], None)
+    text, kb = panel_stats_edit_view()
+    try:
+        await query.edit_message_text(text, reply_markup=kb)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
+async def panel_stats_text(update, context):
+    key = context.user_data.get("panel_stat_state")
+    msg = update.effective_message
+    raw = (msg.text or "").strip().replace(" ", "")
+    if not raw.isdigit() or len(raw) > 15:
+        await msg.reply_text("❌ Faqat musbat butun son yuboring:", reply_markup=PANEL_STAT_CANCEL)
+        return
+    set_override(key, int(raw))
+    context.user_data.pop("panel_stat_state", None)
+    text, kb = panel_stats_edit_view()
+    await msg.reply_text("✅ Saqlandi.\n\n" + text, reply_markup=kb)
+
+
 # ── 👑 Owner panel: almashuv sozlamalari ──
 
 def panel_exchange_view():
@@ -16125,6 +16216,7 @@ def main():
     init_guard()
     init_guard2()
     init_exchange()
+    init_panel_overrides()
     load_crash_config()
 
     app = (

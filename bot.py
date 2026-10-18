@@ -16505,33 +16505,49 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         else:
             self._send(404, {"ok": False})
 
-    def _web_data(self):
+    def _web_api(self, path):
         try:
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length) if length else b""
-            init = (json.loads(raw.decode()) if raw else {}).get("initData", "")
+            body = json.loads(raw.decode()) if raw else {}
         except (ValueError, OSError, json.JSONDecodeError):
-            init = ""
-        user = webapp_check_init_data(init)
+            self._send(400, {"ok": False, "error": "body"})
+            return
+        user = webapp_check_init_data(body.get("initData", ""))
         if not user:
             self._send(401, {"ok": False, "error": "auth"})
             return
         if _EXCHANGE_LOOP is None:
             self._send(503, {"ok": False, "error": "starting"})
             return
+        uid = int(user["id"])
+        if path == "/app/api/data":
+            coro = webapp_fetch(uid)
+        elif path == "/app/api/crash/start":
+            coro = web_crash_start(uid, body.get("bet"))
+        elif path == "/app/api/crash/cashout":
+            coro = web_crash_cashout(uid, body.get("mult"))
+        elif path == "/app/api/frog/start":
+            coro = web_frog_start(uid, body.get("bet"), body.get("mode"))
+        elif path == "/app/api/frog/step":
+            coro = web_frog_step(uid, body.get("col"))
+        elif path == "/app/api/frog/cashout":
+            coro = web_frog_cashout(uid)
+        else:
+            self._send(404, {"ok": False})
+            return
         try:
-            fut = asyncio.run_coroutine_threadsafe(webapp_fetch(int(user["id"])), _EXCHANGE_LOOP)
-            res = fut.result(timeout=10)
+            res = asyncio.run_coroutine_threadsafe(coro, _EXCHANGE_LOOP).result(timeout=10)
         except Exception as e:  # noqa: BLE001
-            logger.warning("WebApp: ma'lumot olinmadi: %s", e)
+            logger.warning("WebApp API %s xato: %s", path, e)
             self._send(500, {"ok": False, "error": "internal"})
             return
         self._send(200, {"ok": True, **res})
 
     def do_POST(self):
         path = self.path.split("?", 1)[0].rstrip("/")
-        if path == "/app/api/data":
-            self._web_data()
+        if path.startswith("/app/api/"):
+            self._web_api(path)
             return
         if path != "/exchange/credit":
             self._send(404, {"ok": False})
@@ -17509,6 +17525,136 @@ async def webapp_fetch(user_id):
     return {"enabled": True, "owner": is_owner, "data": await webapp_payload(user_id)}
 
 
+# ── 🎮 Web app o'yinlari (xavfsiz, server tomonda, haqiqiy hamyon) ──
+WEB_CRASH: dict[int, dict] = {}     # user_id -> {bet, crash, t0, done}
+WEB_FROG: dict[int, dict] = {}      # user_id -> {bet, mode, traps, step, done}
+WEB_CRASH_GROWTH = 0.12
+WEB_CRASH_MAX = 100.0
+WEB_BET_MAX = 10_000_000
+
+
+def web_enabled_for(uid):
+    flags = webapp_flags()
+    return flags["all"] or (uid in CAREER_OWNER_IDS and flags["owner"])
+
+
+def _web_crash_point():
+    """Crash nuqtasi (yashirin). ~3% darhol portlash, qolgani P(>x)≈0.97/x taqsimot."""
+    if random.random() < 0.03:
+        return 1.00
+    pt = 0.97 / (1.0 - random.random())
+    return round(min(max(pt, 1.01), WEB_CRASH_MAX), 2)
+
+
+async def web_crash_start(uid, bet):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    try:
+        bet = int(bet)
+    except (TypeError, ValueError):
+        return {"error": "bet"}
+    if bet < CRASH_MIN_BET:
+        return {"error": "min", "min": CRASH_MIN_BET}
+    if bet > WEB_BET_MAX:
+        return {"error": "max"}
+    old = WEB_CRASH.get(uid)
+    if old and not old["done"]:
+        old["done"] = True   # oldingi tugatilmagan raund — kuygan hisoblanadi (bet qaytmaydi)
+    c = db()
+    with c:
+        if not _wallet_take(c, uid, bet):
+            return {"error": "funds", "balance": wallet_balance(uid)}
+    WEB_CRASH[uid] = {"bet": bet, "crash": _web_crash_point(), "t0": time.monotonic(), "done": False}
+    return {"started": True, "bet": bet, "crash": WEB_CRASH[uid]["crash"],
+            "growth": WEB_CRASH_GROWTH, "balance": wallet_balance(uid)}
+
+
+async def web_crash_cashout(uid, mult):
+    g = WEB_CRASH.get(uid)
+    if not g or g["done"]:
+        return {"error": "no_game"}
+    g["done"] = True
+    WEB_CRASH.pop(uid, None)
+    crash = g["crash"]
+    try:
+        mult = float(mult)
+    except (TypeError, ValueError):
+        mult = crash
+    mult = max(1.0, mult)
+    if mult >= crash:   # crash vaqtida yoki keyin bosilgan — yutqazdi
+        return {"result": "lose", "crash": round(crash, 2), "balance": wallet_balance(uid)}
+    win = int(g["bet"] * mult)
+    wallet_change(uid, win)
+    return {"result": "win", "multiplier": round(mult, 2), "crash": round(crash, 2),
+            "win": win, "balance": wallet_balance(uid)}
+
+
+async def web_frog_start(uid, bet, mode):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    if mode not in FROG_MODES:
+        mode = "easy"
+    try:
+        bet = int(bet)
+    except (TypeError, ValueError):
+        return {"error": "bet"}
+    if bet < FROG_MIN_BET:
+        return {"error": "min", "min": FROG_MIN_BET}
+    if bet > WEB_BET_MAX:
+        return {"error": "max"}
+    c = db()
+    with c:
+        if not _wallet_take(c, uid, bet):
+            return {"error": "funds", "balance": wallet_balance(uid)}
+    traps = [set(random.sample(range(FROG_COLS), FROG_MODES[mode])) for _ in range(FROG_ROWS)]
+    WEB_FROG[uid] = {"bet": bet, "mode": mode, "traps": traps, "step": 0, "done": False}
+    return {"started": True, "rows": FROG_ROWS, "cols": FROG_COLS, "mode": mode, "bet": bet,
+            "next_mult": frog_mult(mode, 1), "balance": wallet_balance(uid)}
+
+
+async def web_frog_step(uid, col):
+    g = WEB_FROG.get(uid)
+    if not g or g["done"]:
+        return {"error": "no_game"}
+    try:
+        col = int(col)
+    except (TypeError, ValueError):
+        return {"error": "col"}
+    r = g["step"]
+    if not 0 <= col < FROG_COLS:
+        return {"error": "col"}
+    if col in g["traps"][r]:
+        g["done"] = True
+        WEB_FROG.pop(uid, None)
+        return {"result": "lose", "row": r, "col": col, "traps": sorted(g["traps"][r]),
+                "balance": wallet_balance(uid)}
+    g["step"] += 1
+    mult = frog_mult(g["mode"], g["step"])
+    if g["step"] >= FROG_ROWS:
+        g["done"] = True
+        WEB_FROG.pop(uid, None)
+        win = int(g["bet"] * mult)
+        wallet_change(uid, win)
+        return {"result": "win_full", "row": r, "col": col, "multiplier": mult,
+                "win": win, "balance": wallet_balance(uid)}
+    return {"result": "safe", "row": r, "col": col, "step": g["step"], "multiplier": mult,
+            "next_mult": frog_mult(g["mode"], g["step"] + 1), "balance": wallet_balance(uid)}
+
+
+async def web_frog_cashout(uid):
+    g = WEB_FROG.get(uid)
+    if not g or g["done"]:
+        return {"error": "no_game"}
+    if g["step"] <= 0:
+        return {"error": "no_step"}
+    g["done"] = True
+    WEB_FROG.pop(uid, None)
+    mult = frog_mult(g["mode"], g["step"])
+    win = int(g["bet"] * mult)
+    wallet_change(uid, win)
+    return {"result": "cashed", "multiplier": mult, "win": win, "balance": wallet_balance(uid)}
+
+
 WEBAPP_HTML = r"""<!doctype html>
 <html lang="uz">
 <head>
@@ -17568,6 +17714,40 @@ WEBAPP_HTML = r"""<!doctype html>
     border:1px solid rgba(34,211,238,.4);border-radius:999px;padding:4px 10px;margin-top:8px}
   .center{text-align:center;color:var(--dim);padding:60px 20px}
   .big{font-size:40px;margin-bottom:12px}
+  /* balans pill */
+  .bal{margin-left:auto;text-align:right}
+  .bal .n{font-size:18px;font-weight:800;color:var(--lime);text-shadow:0 0 12px rgba(163,230,53,.5)}
+  .bal .l{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  /* o'yin */
+  .crashbox{height:220px;border-radius:20px;border:1px solid var(--line);position:relative;overflow:hidden;
+    background:radial-gradient(120% 120% at 50% 120%, rgba(139,92,246,.22), rgba(7,7,13,.4));
+    display:flex;align-items:center;justify-content:center}
+  .crashbox.bust{background:radial-gradient(120% 120% at 50% 120%, rgba(255,80,80,.3), rgba(7,7,13,.4))}
+  .mx{font-size:56px;font-weight:900;letter-spacing:1px;color:var(--cyan);
+    text-shadow:0 0 24px rgba(34,211,238,.7)}
+  .mx.bust{color:#ff6b6b;text-shadow:0 0 24px rgba(255,80,80,.7)}
+  .plane{position:absolute;font-size:30px;transition:none;bottom:14px;left:14px}
+  .betrow{display:flex;gap:8px;margin-top:14px;align-items:center}
+  input.bet{flex:1;background:#0d0d16;border:1px solid var(--line);border-radius:14px;color:var(--txt);
+    padding:13px;font-size:16px;font-weight:700;text-align:center;outline:none}
+  .btn{border:none;border-radius:14px;padding:14px 18px;font-size:15px;font-weight:800;color:#07070d;cursor:pointer}
+  .btn.go{background:linear-gradient(135deg,var(--cyan),var(--pur));box-shadow:0 0 20px rgba(34,211,238,.4)}
+  .btn.cash{background:linear-gradient(135deg,var(--lime),#22d3ee);box-shadow:0 0 20px rgba(163,230,53,.4)}
+  .btn.full{width:100%;margin-top:12px}
+  .btn:disabled{opacity:.4;filter:grayscale(.5)}
+  .seg{display:flex;gap:6px;margin-top:12px}
+  .seg .s{flex:1;text-align:center;padding:9px;border-radius:12px;border:1px solid var(--line);
+    font-size:13px;font-weight:700;color:var(--dim)}
+  .seg .s.on{color:var(--txt);background:linear-gradient(135deg,rgba(34,211,238,.16),rgba(232,121,249,.16))}
+  .note{text-align:center;margin-top:12px;font-size:15px;font-weight:700;min-height:22px}
+  .pond{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:14px}
+  .pad{aspect-ratio:1;border-radius:14px;border:1px solid var(--line);background:#0d0d16;
+    display:flex;align-items:center;justify-content:center;font-size:26px}
+  .pad.active{border-color:var(--cyan);box-shadow:0 0 16px rgba(34,211,238,.35);cursor:pointer;
+    background:linear-gradient(180deg,rgba(34,211,238,.1),#0d0d16)}
+  .pad.safe{border-color:var(--lime);color:var(--lime)}
+  .pad.bad{border-color:#ff6b6b;color:#ff6b6b}
+  .pad.dim{opacity:.35}
 </style>
 </head>
 <body>
@@ -17598,7 +17778,9 @@ function render(res){
     '<div class="hdr"><div class="ava">'+esc(initial)+'</div>'+
     '<div><div class="hname">'+esc(d.name)+'</div>'+
     '<div class="hsub">'+(d.username?'@'+esc(d.username):'ID '+esc(d.id))+
-    (d.is_owner?' · 👑 Owner':'')+'</div></div></div>'));
+    (d.is_owner?' · 👑 Owner':'')+'</div></div>'+
+    '<div class="bal"><div class="n" id="bal">'+esc(d.money_fmt)+'$</div><div class="l">Hamyon</div></div></div>'));
+  window.BAL=d.money;
 
   // PROFIL
   const p=$('<div class="sec" id="s-profil"></div>');
@@ -17678,6 +17860,29 @@ function render(res){
   fz.appendChild(fl);
   app.appendChild(fz);
 
+  // CRASH (Aviator)
+  const cr=$('<div class="sec" id="s-crash"></div>');
+  cr.innerHTML=
+    '<h2>🚀 Crash — Aviator</h2>'+
+    '<div class="crashbox" id="cbox"><div class="mx" id="mx">1.00x</div><div class="plane" id="plane">🚀</div></div>'+
+    '<div class="note" id="cnote">Tikib, portlashdan oldin yechib oling!</div>'+
+    '<div class="betrow"><input class="bet" id="cbet" type="number" inputmode="numeric" value="50"></div>'+
+    '<button class="btn go full" id="cbtn">🚀 Tikish (50$)</button>';
+  app.appendChild(cr);
+
+  // FROG (Baqa)
+  const fr=$('<div class="sec" id="s-frog"></div>');
+  fr.innerHTML=
+    '<h2>🐸 Baqa</h2>'+
+    '<div class="seg" id="fmode">'+
+      '<div class="s on" data-m="easy">🟢 Oson</div><div class="s" data-m="medium">🟡 O‘rta</div><div class="s" data-m="hard">🔴 Qiyin</div></div>'+
+    '<div class="pond" id="pond"></div>'+
+    '<div class="note" id="fnote">Rejim tanlab, tikib boshlang 🪷</div>'+
+    '<div class="betrow"><input class="bet" id="fbet" type="number" inputmode="numeric" value="50"></div>'+
+    '<button class="btn go full" id="fbtn">🐸 Tikish (50$)</button>'+
+    '<button class="btn cash full" id="fcash" style="display:none">💰 Yechib olish</button>';
+  app.appendChild(fr);
+
   // OWNER
   if(d.is_owner && d.owner){
     const o=$('<div class="sec" id="s-owner"></div>');
@@ -17694,7 +17899,7 @@ function render(res){
 
   // TABS
   const tabs=$('<div class="tabs"></div>');
-  const defs=[['profil','👤'],['reyting','💎'],['bank','🏦'],['birja','📈'],['farzand','👶']];
+  const defs=[['profil','👤'],['reyting','💎'],['bank','🏦'],['birja','📈'],['farzand','👶'],['crash','🚀'],['frog','🐸']];
   if(d.is_owner&&d.owner) defs.push(['owner','👑']);
   defs.forEach(([k,t])=>{
     const el=$('<div class="tab" data-k="'+k+'">'+t+'</div>');
@@ -17703,6 +17908,121 @@ function render(res){
   });
   app.appendChild(tabs);
   setTab(defs.some(x=>x[0]===TAB)?TAB:'profil');
+  initCrash(); initFrog();
+}
+function setBal(v){ window.BAL=v; const b=document.getElementById('bal'); if(b) b.textContent=fmtMoney(v)+'$'; }
+function fmtMoney(n){ return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g,' '); }
+function api(path,body){ return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify(Object.assign({initData:tg?tg.initData:''},body||{}))}).then(r=>r.json()); }
+function haptic(t){ try{tg.HapticFeedback.notificationOccurred(t);}catch(e){} }
+
+// ---- CRASH (Aviator) ----
+function initCrash(){
+  const btn=document.getElementById('cbtn'), bet=document.getElementById('cbet'),
+        mx=document.getElementById('mx'), box=document.getElementById('cbox'),
+        plane=document.getElementById('plane'), note=document.getElementById('cnote');
+  if(!btn) return;
+  let state='idle', raf=null, t0=0, crash=1, growth=0.12, cur=1, b=50;
+  bet.oninput=()=>{ if(state==='idle') btn.textContent='🚀 Tikish ('+(parseInt(bet.value)||0)+'$)'; };
+  function frame(){
+    const t=(performance.now()-t0)/1000;
+    cur=Math.exp(growth*t);
+    if(cur>=crash){ bust(); return; }
+    mx.textContent=cur.toFixed(2)+'x';
+    const p=Math.min(1,Math.log(cur)/Math.log(Math.max(crash,1.5)));
+    plane.style.left=(14+p*(box.clientWidth-56))+'px';
+    plane.style.bottom=(14+p*(box.clientHeight-56))+'px';
+    raf=requestAnimationFrame(frame);
+  }
+  function bust(){
+    cancelAnimationFrame(raf); state='idle';
+    box.classList.add('bust'); mx.classList.add('bust'); mx.textContent=crash.toFixed(2)+'x 💥'; plane.textContent='💥';
+    note.textContent='💥 Portladi! Yutqazdingiz.'; haptic('error');
+    api('/app/api/crash/cashout',{mult:crash+1}); // server tomonda yopamiz
+    resetSoon();
+  }
+  function resetSoon(){ setTimeout(()=>{ box.classList.remove('bust'); mx.classList.remove('bust'); plane.textContent='🚀';
+    plane.style.left='14px'; plane.style.bottom='14px'; mx.textContent='1.00x';
+    note.textContent='Tikib, portlashdan oldin yechib oling!'; btn.className='btn go full'; btn.disabled=false;
+    btn.textContent='🚀 Tikish ('+(parseInt(bet.value)||0)+'$)'; btn.onclick=start; }, 1600); }
+  function start(){
+    b=parseInt(bet.value)||0; btn.disabled=true;
+    api('/app/api/crash/start',{bet:b}).then(r=>{
+      if(!r.ok||r.error){ note.textContent=errText(r.error,r.min); btn.disabled=false; return; }
+      setBal(r.balance); crash=r.crash; growth=r.growth||0.12; t0=performance.now(); state='fly';
+      btn.className='btn cash full'; btn.textContent='💰 Yechib olish'; btn.disabled=false; btn.onclick=cash;
+      note.textContent='🚀 Uchyapti…'; raf=requestAnimationFrame(frame);
+    }).catch(()=>{ btn.disabled=false; });
+  }
+  function cash(){
+    if(state!=='fly') return; state='idle'; cancelAnimationFrame(raf); btn.disabled=true;
+    api('/app/api/crash/cashout',{mult:cur}).then(r=>{
+      if(r.result==='win'){ setBal(r.balance); mx.textContent=r.multiplier.toFixed(2)+'x';
+        note.textContent='✅ +'+fmtMoney(r.win)+'$ ('+r.multiplier.toFixed(2)+'x)'; haptic('success'); }
+      else { mx.classList.add('bust'); mx.textContent=(r.crash||crash).toFixed(2)+'x 💥'; note.textContent='💥 Kech qoldingiz!'; haptic('error'); }
+      resetSoon();
+    }).catch(()=>{ btn.disabled=false; });
+  }
+  state='idle'; btn.onclick=start;
+}
+
+// ---- FROG (Baqa) ----
+function initFrog(){
+  const btn=document.getElementById('fbtn'), cash=document.getElementById('fcash'),
+        bet=document.getElementById('fbet'), pond=document.getElementById('pond'),
+        note=document.getElementById('fnote'), seg=document.getElementById('fmode');
+  if(!btn) return;
+  let mode='easy', rows=5, cols=4, step=0, playing=false;
+  seg.querySelectorAll('.s').forEach(s=>s.onclick=()=>{ if(playing) return;
+    seg.querySelectorAll('.s').forEach(x=>x.classList.remove('on')); s.classList.add('on'); mode=s.dataset.m; });
+  bet.oninput=()=>{ if(!playing) btn.textContent='🐸 Tikish ('+(parseInt(bet.value)||0)+'$)'; };
+  function grid(active){
+    pond.innerHTML='';
+    for(let r=rows-1;r>=0;r--) for(let c=0;c<cols;c++){
+      const cell=document.createElement('div');
+      cell.className='pad'+(r===active?' active':(r<active?' dim':''));
+      cell.textContent=r===active?'🪷':(r<active?'✅':'🌿');
+      if(r===active&&playing){ cell.onclick=()=>stepTo(c,cell); }
+      pond.appendChild(cell);
+    }
+  }
+  function start(){
+    const b=parseInt(bet.value)||0; btn.disabled=true;
+    api('/app/api/frog/start',{bet:b,mode:mode}).then(r=>{
+      if(!r.ok||r.error){ note.textContent=errText(r.error,r.min); btn.disabled=false; return; }
+      setBal(r.balance); rows=r.rows; cols=r.cols; step=0; playing=true;
+      btn.style.display='none'; cash.style.display='block'; cash.disabled=true;
+      note.textContent='🪷 Keyingi: '+r.next_mult+'x'; grid(0);
+    }).catch(()=>{ btn.disabled=false; });
+  }
+  function stepTo(c,cell){
+    pond.querySelectorAll('.pad').forEach(p=>p.onclick=null);
+    api('/app/api/frog/step',{col:c}).then(r=>{
+      if(r.result==='lose'){ cell.className='pad bad'; cell.textContent='🐸'; playing=false;
+        note.textContent='🐸 Baqa! Yutqazdingiz.'; haptic('error'); endGame(); }
+      else if(r.result==='win_full'){ cell.className='pad safe'; cell.textContent='✅'; setBal(r.balance); playing=false;
+        note.textContent='🏆 Yakun! +'+fmtMoney(r.win)+'$ ('+r.multiplier+'x)'; haptic('success'); endGame(); }
+      else { cell.className='pad safe'; cell.textContent='✅'; step=r.step; cash.disabled=false;
+        cash.textContent='💰 Yechib olish ('+r.multiplier+'x)';
+        note.textContent='✅ '+r.multiplier+'x · keyingi: '+r.next_mult+'x'; haptic('success'); grid(step); }
+    });
+  }
+  function doCash(){
+    if(!playing||step<=0) return; cash.disabled=true;
+    api('/app/api/frog/cashout',{}).then(r=>{
+      if(r.result==='cashed'){ setBal(r.balance); playing=false; note.textContent='✅ +'+fmtMoney(r.win)+'$ ('+r.multiplier+'x)'; haptic('success'); endGame(); }
+    });
+  }
+  function endGame(){ setTimeout(()=>{ playing=false; btn.style.display='block'; btn.disabled=false; cash.style.display='none';
+    btn.textContent='🐸 Tikish ('+(parseInt(bet.value)||0)+'$)'; pond.innerHTML=''; note.textContent='Rejim tanlab, tikib boshlang 🪷'; },1800); }
+  btn.onclick=start; cash.onclick=doCash;
+}
+function errText(e,min){
+  if(e==='min') return 'Minimal tikim: '+min+'$';
+  if(e==='funds') return '💸 Hamyonda pul yetarli emas';
+  if(e==='disabled') return '🌐 Web app o‘chirilgan';
+  if(e==='max') return 'Juda katta tikim';
+  return 'Xato, qayta urining';
 }
 function setTab(k){
   TAB=k;

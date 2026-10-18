@@ -96,5 +96,11 @@
   (`cmd_app`, shaxsiy chatda `WebAppInfo` tugma) + `post_init` da `set_chat_menu_button(MenuButtonWebApp)`. Yoqish/o'chirish:
   `webapp_config` jadvali (`all`, `owner` flaglari, default 1), owner panel → 🌐 Web App (`panel:webapp*`, `panel_webapp_view/callback`):
   hamma uchun va ownerlar uchun alohida yoqish/o'chirish. Faqat bot egalari.
-  Web app bo'limlari: Profil / Reyting (TOP-15) / Bank (faol kredit+omonat) / Birja (aktivlar+foyda) / Farzandlar / Owner.
+  Web app bo'limlari: Profil / Reyting (TOP-15) / Bank (faol kredit+omonat) / Birja (aktivlar+foyda) / Farzandlar / 🚀 Crash / 🐸 Baqa / Owner.
   `webapp_payload` da `bank`, `birja_list`, `kids_list` ham bor.
+  Web o'yinlari (haqiqiy hamyon, server tomonda xavfsiz): `_web_api` dispatcher `POST /app/api/{crash,frog}/{start,step,cashout}`.
+  🚀 Crash — Aviator uslubi: `web_crash_start` betni `_wallet_take` bilan yechadi, yashirin `_web_crash_point()` (RTP ~0.97, ~3% darhol
+  portlash) tanlaydi; klient `exp(WEB_CRASH_GROWTH·t)` bilan animatsiya qiladi; `web_crash_cashout(uid, mult)` — mult<crash bo'lsa
+  `bet·mult` yutuq, aks holda yutqazish. 🐸 Baqa — `web_frog_start` (rejim easy/medium/hard → qatordagi tuzoqlar soni, `frog_mult`
+  bilan bir xil RTP), `web_frog_step(col)` qadam/tuzoq, `web_frog_cashout`. Holat `WEB_CRASH`/`WEB_FROG` (bot siklida, bitta o'yin
+  har foydalanuvchi). Faqat web app yoqilgan bo'lsa (`web_enabled_for`).

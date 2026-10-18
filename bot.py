@@ -17976,6 +17976,19 @@ async def web_avatar_bytes(uid):
     return data
 
 
+WEB_FROG_EXTRA = 0.08     # har qatorda qo'shimcha (yashirin) tuzoq ehtimoli — web Baqa yutish imkonini kamaytiradi
+_FROG_RNG = random.SystemRandom()
+
+
+def _web_frog_traps(mode):
+    """Har o'yinda tuzoqlar yangidan, kriptografik tasodif bilan joylashadi."""
+    rows = []
+    for _ in range(FROG_ROWS):
+        n = FROG_MODES[mode] + (1 if _FROG_RNG.random() < WEB_FROG_EXTRA else 0)
+        rows.append(set(_FROG_RNG.sample(range(FROG_COLS), min(n, FROG_COLS - 1))))
+    return rows
+
+
 async def web_frog_start(uid, bet, mode):
     if not web_enabled_for(uid):
         return {"error": "disabled"}
@@ -17993,8 +18006,7 @@ async def web_frog_start(uid, bet, mode):
     with c:
         if not _wallet_take(c, uid, bet):
             return {"error": "funds", "balance": wallet_balance(uid)}
-    traps = [set(random.sample(range(FROG_COLS), FROG_MODES[mode])) for _ in range(FROG_ROWS)]
-    WEB_FROG[uid] = {"bet": bet, "mode": mode, "traps": traps, "step": 0, "done": False}
+    WEB_FROG[uid] = {"bet": bet, "mode": mode, "traps": _web_frog_traps(mode), "step": 0, "done": False}
     return {"started": True, "rows": FROG_ROWS, "cols": FROG_COLS, "mode": mode, "bet": bet,
             "next_mult": frog_mult(mode, 1), "balance": wallet_balance(uid)}
 
@@ -18284,6 +18296,8 @@ WEBAPP_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Empire Stats</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;900&display=swap" rel="stylesheet">
 <style>
   :root{
     --bg:#07060d; --card:#12101e; --line:#2a2440;
@@ -18466,6 +18480,128 @@ WEBAPP_HTML = r"""<!doctype html>
   .bar .fill{height:100%;border-radius:5px}
   .kbtns{display:flex;gap:8px;margin-top:10px}
   .kbtn{flex:1;text-align:center;padding:10px;border-radius:12px;border:1px solid var(--line);font-weight:700;font-size:13px;cursor:pointer}
+  /* ═════════ 👑 QIROLLIK OLTIN MAVZUSI (Crash'dan tashqari hammasi) ═════════ */
+  :root{
+    --bg:#0a0705; --card:#17110a; --line:#4a3714;
+    --cyan:#ffd77a; --mag:#f5c451; --pur:#b8862b; --lime:#ffe9a8;
+    --gold:#ffd24a; --gold2:#d99a1e; --txt:#fbf1d6; --dim:#c2a96e;
+    --g-metal:linear-gradient(135deg,#7a5410 0%,#f7d774 22%,#fff6c9 38%,#e2ad35 55%,#8c5e0e 78%,#f2cf6b 100%);
+    --g-text:linear-gradient(180deg,#fff7d1 0%,#ffd86b 45%,#c98d18 70%,#ffe39a 100%);
+    --g-border:linear-gradient(135deg,#fff1b8,#c48a1a 30%,#ffe08a 55%,#8a5b0c 80%,#ffd56a);
+  }
+  /* crash o'z neon ranglarini saqlaydi */
+  #s-crash{--card:#12101e;--line:#2a2440;--cyan:#22d3ee;--mag:#e879f9;--pur:#8b5cf6;--lime:#a3e635;
+    --gold:#ffd24a;--gold2:#ffb020;--txt:#f3eede;--dim:#9a93b8}
+  body{background-color:var(--bg);
+    background-image:
+      radial-gradient(900px 420px at 50% -8%, rgba(255,200,80,.22), transparent 70%),
+      radial-gradient(600px 380px at 110% 30%, rgba(160,40,40,.16), transparent 70%),
+      radial-gradient(600px 380px at -10% 60%, rgba(120,70,10,.18), transparent 70%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56'%3E%3Cpath d='M28 4l6 10-6 10-6-10zM28 32l6 10-6 10-6-10zM4 28l10-6 10 6-10 6zM32 28l10-6 10 6-10 6z' fill='none' stroke='%23d4a23a' stroke-opacity='.07'/%3E%3C/svg%3E");
+    padding-bottom:110px; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  .royal,h2,.hname{font-family:"Cinzel","Trajan Pro",Georgia,serif}
+  /* sarlavha */
+  .hdr{position:relative;padding:14px 14px;border-radius:22px;margin:4px 0 18px;
+    background:linear-gradient(180deg,rgba(40,28,10,.85),rgba(18,12,6,.9));box-shadow:0 10px 30px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,230,160,.25)}
+  .hdr::before{content:"";position:absolute;inset:0;border-radius:22px;padding:1.5px;background:var(--g-border);
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
+  .ava{width:62px;height:62px;color:#2a1a02;background:var(--g-metal);overflow:visible;
+    box-shadow:0 0 0 3px #1a1206,0 0 0 5px #e6b84a,0 0 26px rgba(255,200,70,.55)}
+  .ava img{border-radius:50%}
+  .ava::after{content:"👑";position:absolute;top:-17px;left:50%;transform:translateX(-50%) rotate(-8deg);font-size:20px;
+    filter:drop-shadow(0 2px 4px rgba(0,0,0,.6));animation:crown 3s ease-in-out infinite}
+  @keyframes crown{50%{transform:translateX(-50%) rotate(8deg) translateY(-2px)}}
+  .hname{font-size:19px;font-weight:700;letter-spacing:1px;background:var(--g-text);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hsub{color:var(--dim)}
+  .bal .n{background:var(--g-text);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:none;
+    filter:drop-shadow(0 0 8px rgba(255,200,70,.45));font-size:20px}
+  .bal .l{color:var(--dim);letter-spacing:2px}
+  /* sarlavhalar */
+  h2{font-size:16px;letter-spacing:2.5px;text-align:center;margin:6px 0 14px;font-weight:700;
+    background:var(--g-text);-webkit-background-clip:text;background-clip:text;color:transparent;position:relative}
+  h2::before,h2::after{content:"";display:inline-block;width:42px;height:1px;vertical-align:middle;margin:0 10px;
+    background:linear-gradient(90deg,transparent,#e2b04a)}
+  h2::after{background:linear-gradient(90deg,#e2b04a,transparent)}
+  /* kartalar: oltin hoshiya + yaltiroq nur */
+  .sec:not(#s-crash) .card,.kid{background:linear-gradient(160deg,#21180b 0%,#120d07 60%,#1a1209 100%);border:none;
+    box-shadow:0 8px 24px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,232,170,.18)}
+  .sec:not(#s-crash) .card::before,.kid::before{background:var(--g-border);opacity:.9}
+  .kid{position:relative;border-radius:16px}
+  .kid::before{content:"";position:absolute;inset:0;border-radius:16px;padding:1px;
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
+  .sec:not(#s-crash) .card::after{content:"";position:absolute;top:0;bottom:0;left:-60%;width:40%;pointer-events:none;
+    background:linear-gradient(105deg,transparent,rgba(255,240,190,.10),transparent);transform:skewX(-18deg);animation:shine 6s ease-in-out infinite}
+  .sec:not(#s-crash) .grid .card:nth-child(2n)::after{animation-delay:1.5s}
+  .sec:not(#s-crash) .grid .card:nth-child(3n)::after{animation-delay:3s}
+  @keyframes shine{0%,60%{left:-60%}100%{left:130%}}
+  .lbl{color:var(--dim);letter-spacing:1.2px}
+  .sec:not(#s-crash) .val,.val.neon,.val.mag,.val.lime,.val.gold{background:var(--g-text);-webkit-background-clip:text;background-clip:text;
+    color:transparent;text-shadow:none;filter:drop-shadow(0 0 6px rgba(255,190,60,.35))}
+  .chip{color:var(--gold);border-color:rgba(255,210,74,.45);background:rgba(255,210,74,.06)}
+  /* reyting */
+  .row{border-bottom-color:rgba(226,176,74,.16)}
+  .rk{color:var(--dim);font-family:"Cinzel",Georgia,serif}
+  .rk.g1,.rk.g2,.rk.g3{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;color:#2a1a02;font-size:13px;text-shadow:none}
+  .rk.g1{background:var(--g-metal);box-shadow:0 0 14px rgba(255,210,74,.7)}
+  .rk.g2{background:linear-gradient(135deg,#8d969f,#f1f4f7,#9aa3ab)}
+  .rk.g3{background:linear-gradient(135deg,#8a4d1c,#f0b07a,#9a5a26)}
+  .me{background:rgba(255,210,74,.09)}
+  /* tugmalar: metall oltin + yaltirash */
+  .btn,.mini,.kbtn{position:relative;overflow:hidden;transition:transform .12s,filter .12s}
+  .btn.go,.btn.cash,.mini.buy{color:#2b1b02;background:var(--g-metal);background-size:200% 200%;
+    box-shadow:0 6px 18px rgba(200,140,30,.35),inset 0 1px 0 rgba(255,255,255,.6),inset 0 -2px 0 rgba(90,55,5,.5);
+    text-shadow:0 1px 0 rgba(255,240,190,.6);animation:metal 5s ease-in-out infinite}
+  .btn.cash{background:linear-gradient(135deg,#5b0f14,#b3242c 40%,#e0484f 55%,#7a1218);color:#ffe9b0;text-shadow:0 1px 1px rgba(0,0,0,.5);
+    box-shadow:0 6px 18px rgba(160,30,40,.4),inset 0 0 0 1.5px #e6b84a}
+  .mini.sell{color:#ffe9b0;background:linear-gradient(135deg,#5b0f14,#c0303a,#7a1218);box-shadow:inset 0 0 0 1px #e6b84a}
+  @keyframes metal{50%{background-position:100% 100%}}
+  .btn::after,.mini::after{content:"";position:absolute;top:0;bottom:0;left:-70%;width:45%;
+    background:linear-gradient(105deg,transparent,rgba(255,255,255,.55),transparent);transform:skewX(-20deg);animation:shine 3.8s ease-in-out infinite}
+  .btn:active,.mini:active,.kbtn:active,.opt:active{transform:scale(.96);filter:brightness(1.15)}
+  .kbtn{border:1px solid #6b4f1c;background:linear-gradient(180deg,#2a1f0e,#160f07);color:var(--txt)}
+  .kbtn:active{border-color:var(--gold)}
+  /* tanlovlar */
+  .sec:not(#s-crash) input.bet{background:#140e07;}
+  select.sel,.sec:not(#s-crash) input.bet{border:1px solid #6b4f1c;color:var(--txt);box-shadow:inset 0 2px 6px rgba(0,0,0,.5)}
+  select.sel{background-color:#140e07;background-image:linear-gradient(45deg,transparent 50%,var(--gold) 50%),linear-gradient(135deg,var(--gold) 50%,transparent 50%);
+    background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+  select.sel:focus,.sec:not(#s-crash) input.bet:focus{border-color:var(--gold);box-shadow:0 0 0 2px rgba(255,210,74,.25)}
+  .seg .s{border-color:#6b4f1c;background:#140e07}
+  .seg .s.on{color:#2b1b02;background:var(--g-metal);border-color:#ffe08a;box-shadow:0 0 14px rgba(255,200,70,.4)}
+  .opt{border-color:#6b4f1c;background:#140e07}
+  .opt.on{background:var(--g-metal);color:#2b1b02;border-color:#ffe08a}
+  .sheet{background:linear-gradient(180deg,#22180b,#0f0a05);border-color:#8a6420;box-shadow:0 -10px 40px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,230,160,.3)}
+  #toast{background:linear-gradient(180deg,#2a1e0c,#140e07);border:1px solid #c79a3a;box-shadow:0 0 24px rgba(255,190,60,.35)}
+  .bar .track{background:#2a1f0e}
+  .up{color:#9be36b}.down{color:#ff7a6b}
+  .mkt{border-bottom-color:rgba(226,176,74,.16)}
+  .mkt .ic{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;
+    background:radial-gradient(circle at 35% 30%,#3a2a10,#140e07);box-shadow:inset 0 0 0 1.5px #c9993a}
+  /* baqa: oltin nilufarlar */
+  .pad{border:1px solid #5a421a;background:radial-gradient(circle at 50% 40%,#1f170b,#100b06)}
+  .pad.active{border-color:#ffd24a;background:radial-gradient(circle at 50% 40%,rgba(255,210,74,.22),#140e07);
+    box-shadow:0 0 16px rgba(255,200,70,.45);animation:padglow 1.6s ease-in-out infinite}
+  @keyframes padglow{50%{box-shadow:0 0 26px rgba(255,210,74,.75)}}
+  .pad.safe{border-color:#ffe08a;color:#ffe08a;background:radial-gradient(circle,rgba(255,210,74,.3),#140e07)}
+  .pad.bad{border-color:#e04b4b;background:radial-gradient(circle,rgba(224,75,75,.3),#140e07)}
+  /* ───── pastki tugmalar: kattaroq, nomli, oltin ───── */
+  .tabs{gap:4px;padding:8px 8px calc(10px + env(safe-area-inset-bottom));overflow-x:auto;scrollbar-width:none;
+    background:linear-gradient(180deg,rgba(28,20,8,.96),rgba(10,7,4,.98));border-top:none;
+    box-shadow:0 -8px 30px rgba(0,0,0,.6)}
+  .tabs::-webkit-scrollbar{display:none}
+  .tabs::before{content:"";position:absolute;left:0;right:0;top:0;height:1.5px;background:var(--g-border)}
+  .tab{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;padding:9px 2px 7px;border-radius:16px;
+    color:var(--dim);border:1px solid transparent;transition:transform .18s,background .18s}
+  .tab .ti{font-size:25px;line-height:1;filter:drop-shadow(0 2px 3px rgba(0,0,0,.6));transition:transform .18s}
+  .tab .tl{font-size:9.5px;font-weight:800;letter-spacing:.3px;white-space:nowrap}
+  .tab.on{color:#2b1b02;background:var(--g-metal);border-color:#ffe08a;transform:translateY(-4px);
+    box-shadow:0 8px 20px rgba(200,140,30,.45),inset 0 1px 0 rgba(255,255,255,.6)}
+  .tab.on .ti{transform:scale(1.12)}
+  .tab:active .ti{transform:scale(.9)}
+  /* tegilganda oltin uchqunlar */
+  .spark{position:fixed;width:6px;height:6px;border-radius:50%;pointer-events:none;z-index:200;
+    background:radial-gradient(circle,#fff8d6,#ffd24a 50%,rgba(255,180,30,0) 70%);animation:spark .6s ease-out forwards}
+  @keyframes spark{to{transform:translate(var(--dx),var(--dy)) scale(.2);opacity:0}}
 </style>
 </head>
 <body>
@@ -18738,10 +18874,10 @@ function render(res){
 
   // TABS
   const tabs=$('<div class="tabs"></div>');
-  const defs=[['profil','👤'],['reyting','💎'],['shop','🛍'],['bank','🏦'],['birja','📈'],['farzand','👶'],['crash','🚀'],['frog','🐸']];
-  if(d.is_owner&&d.owner) defs.push(['owner','👑']);
-  defs.forEach(([k,t])=>{
-    const el=$('<div class="tab" data-k="'+k+'">'+t+'</div>');
+  const defs=[['profil','👤','Profil'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['bank','🏦','Bank'],['birja','📈','Birja'],['farzand','👶','Oila'],['crash','🚀','Crash'],['frog','🐸','Baqa']];
+  if(d.is_owner&&d.owner) defs.push(['owner','👑','Owner']);
+  defs.forEach(([k,t,l])=>{
+    const el=$('<div class="tab" data-k="'+k+'"><span class="ti">'+t+'</span><span class="tl">'+l+'</span></div>');
     el.onclick=()=>{setTab(k);};
     tabs.appendChild(el);
   });
@@ -18749,6 +18885,16 @@ function render(res){
   setTab(defs.some(x=>x[0]===TAB)?TAB:'profil');
   initCrash(); initFrog();
 }
+// tegilganda oltin uchqunlar (Crash'dan tashqari)
+document.addEventListener('pointerdown',e=>{
+  const t=e.target.closest('.btn,.mini,.kbtn,.opt,.tab,.pad.active,.seg .s');
+  if(!t || t.closest('#s-crash')) return;
+  for(let i=0;i<10;i++){ const sp=document.createElement('i'); sp.className='spark';
+    const a=Math.random()*Math.PI*2, r=24+Math.random()*34;
+    sp.style.left=(e.clientX-3)+'px'; sp.style.top=(e.clientY-3)+'px';
+    sp.style.setProperty('--dx',Math.cos(a)*r+'px'); sp.style.setProperty('--dy',Math.sin(a)*r+'px');
+    document.body.appendChild(sp); setTimeout(()=>sp.remove(),650); }
+},{passive:true});
 function setBal(v){ window.BAL=v; const b=document.getElementById('bal'); if(b) b.textContent=fmtMoney(v)+'$'; }
 function fmtMoney(n){ return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g,' '); }
 function app_q(el,sel){ return el.querySelector(sel); }
@@ -18904,24 +19050,89 @@ function initCrash(){
     for(let x=-(gridOff%step);x<W;x+=step){ ctx.beginPath(); ctx.moveTo(x,gy); ctx.lineTo(x-14*dpr,H); ctx.stroke(); }
     ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
   }
-  function drawPlane(x,y,ang,s){
-    ctx.save(); ctx.translate(x,y); ctx.rotate(ang);
-    const fl=ctx.createLinearGradient(-s*2.4,0,-s*0.9,0), fk=0.75+0.25*Math.sin(performance.now()/40);
-    fl.addColorStop(0,'rgba(255,180,40,0)'); fl.addColorStop(1,'rgba(255,200,60,.9)');
-    ctx.fillStyle=fl; ctx.beginPath(); ctx.moveTo(-s*0.9,-s*0.15); ctx.lineTo(-s*(1.6+0.8*fk),0); ctx.lineTo(-s*0.9,s*0.15); ctx.closePath(); ctx.fill();
-    ctx.fillStyle='#8a0c22';
-    ctx.beginPath(); ctx.moveTo(-s*0.8,-s*0.08); ctx.lineTo(-s*1.25,-s*0.8); ctx.lineTo(-s*0.55,-s*0.12); ctx.closePath(); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(0,s*0.05); ctx.lineTo(-s*0.65,s*0.95); ctx.lineTo(s*0.35,s*0.18); ctx.closePath(); ctx.fill();
-    ctx.shadowColor='rgba(255,60,90,.9)'; ctx.shadowBlur=16*dpr;
-    const g=ctx.createLinearGradient(-s,-s*0.3,s,s*0.3); g.addColorStop(0,'#b11030'); g.addColorStop(.5,'#ff466a'); g.addColorStop(1,'#ff86a0');
-    ctx.fillStyle=g; ctx.beginPath(); ctx.moveTo(s*1.35,0);
-    ctx.quadraticCurveTo(s*0.3,-s*0.4,-s*0.95,-s*0.26); ctx.quadraticCurveTo(-s*1.3,-s*0.12,-s*1.3,0);
-    ctx.quadraticCurveTo(-s*1.3,s*0.12,-s*0.95,s*0.26); ctx.quadraticCurveTo(s*0.3,s*0.4,s*1.35,0); ctx.closePath(); ctx.fill();
-    ctx.shadowBlur=0; ctx.fillStyle='rgba(180,240,255,.9)';
-    ctx.beginPath(); ctx.ellipse(s*0.5,-s*0.03,s*0.3,s*0.15,0,0,7); ctx.fill();
-    // aylanuvchi parrak
-    ctx.fillStyle='rgba(255,255,255,.55)'; ctx.beginPath(); ctx.ellipse(s*1.38,0,s*0.06,s*0.42*Math.abs(Math.sin(performance.now()/30)),0,0,7); ctx.fill();
+  // ---- 3D samolyot: kichik mesh + perspektiva + yoritish (flat shading) ----
+  const P3=(function(){
+    const F=[], W=[];   // F — fuselaj (yopiq, orqa yuzalar kesiladi), W — ikki tomonlama yuzalar
+    const rings=[[1.45,0,0],[1.15,.17,.02],[.75,.27,.03],[.1,.3,.02],[-.6,.22,.05],[-1.25,.09,.14]], N=10;
+    const ring=r=>Array.from({length:N},(_,i)=>{ const a=i/N*Math.PI*2; return [r[0],Math.cos(a)*r[1]+r[2],Math.sin(a)*r[1]]; });
+    const R=rings.map(ring);
+    for(let k=0;k<R.length-1;k++) for(let i=0;i<N;i++){ const j=(i+1)%N;
+      F.push({v:[R[k][i],R[k+1][i],R[k+1][j],R[k][j]],c:k===0?[255,235,240]:[236,40,72],sp:1}); }
+    F.push({v:R[R.length-1].slice().reverse(),c:[120,10,30]});
+    // kabina (shisha)
+    W.push({v:[[.95,.2,0],[.55,.36,-.13],[.2,.31,-.16],[.2,.31,.16],[.55,.36,.13]],c:[150,230,255],sp:2,glass:1});
+    // asosiy qanotlar (dihedral bilan)
+    const wing=(z)=>[[.35,.0,0],[-.25,.0,0],[-.5,.1,z],[-.2,.1,z]];
+    W.push({v:wing(1.75),c:[200,22,52]}); W.push({v:wing(-1.75),c:[200,22,52]});
+    // qanot uchidagi oltin chiziq
+    W.push({v:[[-.2,.1,1.75],[-.5,.1,1.75],[-.46,.098,1.55],[-.18,.098,1.55]],c:[255,210,74],sp:1});
+    W.push({v:[[-.2,.1,-1.75],[-.5,.1,-1.75],[-.46,.098,-1.55],[-.18,.098,-1.55]],c:[255,210,74],sp:1});
+    // dum stabilizatorlari va vertikal qanot
+    W.push({v:[[-.95,.08,0],[-1.3,.1,0],[-1.42,.14,.7],[-1.2,.13,.7]],c:[190,20,48]});
+    W.push({v:[[-.95,.08,0],[-1.3,.1,0],[-1.42,.14,-.7],[-1.2,.13,-.7]],c:[190,20,48]});
+    W.push({v:[[-.85,.15,0],[-1.32,.18,0],[-1.45,.78,0],[-1.22,.76,0]],c:[220,30,60]});
+    return {F,W};
+  })();
+  const LIGHT=(()=>{ const l=[-.35,.75,.55], n=Math.hypot(...l); return l.map(x=>x/n); })();
+  function rot(v,roll,pitch,yaw,tilt){
+    let [x,y,z]=v, c,s,t;
+    c=Math.cos(roll); s=Math.sin(roll); t=y*c-z*s; z=y*s+z*c; y=t;          // x o'qi atrofida (krен)
+    c=Math.cos(pitch); s=Math.sin(pitch); t=x*c-y*s; y=x*s+y*c; x=t;        // z o'qi atrofida (burun yuqoriga)
+    c=Math.cos(yaw); s=Math.sin(yaw); t=x*c+z*s; z=-x*s+z*c; x=t;           // y o'qi atrofida
+    c=Math.cos(tilt); s=Math.sin(tilt); t=y*c-z*s; z=y*s+z*c; y=t;          // kamera biroz yuqoridan
+    return [x,y,z];
+  }
+  function drawPlane(x,y,ang,s,roll){
+    roll=roll||0; const now=performance.now();
+    const pitch=-ang, yaw=0.5, tilt=0.32, D=6;
+    const proj=p=>{ const f=D/(D-p[2]); return [x+p[0]*s*f, y-p[1]*s*f, p[2]]; };
+    const polys=[];
+    const add=(f,two)=>{
+      const vv=f.v.map(v=>rot(v,roll,pitch,yaw,tilt));
+      const a=vv[0],b=vv[1],c=vv[2];
+      let n=[(b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),(b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])];
+      const nl=Math.hypot(...n)||1; n=n.map(q=>q/nl);
+      const pp=vv.map(proj);
+      if(!two){ // fuselaj: ekranda teskari bo'lsa — orqa yuza
+        let ar=0; for(let i=0;i<pp.length;i++){ const p1=pp[i],p2=pp[(i+1)%pp.length]; ar+=p1[0]*p2[1]-p2[0]*p1[1]; }
+        if(ar>0) return; }
+      let d=n[0]*LIGHT[0]+n[1]*LIGHT[1]+n[2]*LIGHT[2]; if(two) d=Math.abs(d);
+      const lum=.32+.78*Math.max(0,d), spec=f.sp?Math.pow(Math.max(0,d),f.sp>1?6:14)*(f.sp>1?120:150):0;
+      const col=f.c.map(q=>Math.min(255,Math.round(q*lum+spec)));
+      polys.push({pp,z:vv.reduce((m,v)=>m+v[2],0)/vv.length,col,glass:f.glass});
+    };
+    P3.F.forEach(f=>add(f,false)); P3.W.forEach(f=>add(f,true));
+    polys.sort((a,b)=>a.z-b.z);
+    // pastdan yumshoq neon nur
+    const gl=ctx.createRadialGradient(x,y,0,x,y,s*2.2); gl.addColorStop(0,'rgba(255,60,100,.35)'); gl.addColorStop(1,'rgba(255,60,100,0)');
+    ctx.fillStyle=gl; ctx.beginPath(); ctx.arc(x,y,s*2.2,0,7); ctx.fill();
+    // dvigatel alangasi (orqada)
+    const tail=proj(rot([-1.3,.09,0],roll,pitch,yaw,tilt)), back=proj(rot([-2.3-.4*Math.sin(now/45),.09,0],roll,pitch,yaw,tilt));
+    const fl=ctx.createLinearGradient(back[0],back[1],tail[0],tail[1]); fl.addColorStop(0,'rgba(255,170,40,0)'); fl.addColorStop(1,'rgba(255,220,90,.95)');
+    ctx.strokeStyle=fl; ctx.lineCap='round'; ctx.lineWidth=s*.22; ctx.beginPath(); ctx.moveTo(tail[0],tail[1]); ctx.lineTo(back[0],back[1]); ctx.stroke();
+    for(const p of polys){
+      ctx.beginPath(); ctx.moveTo(p.pp[0][0],p.pp[0][1]); for(let i=1;i<p.pp.length;i++) ctx.lineTo(p.pp[i][0],p.pp[i][1]); ctx.closePath();
+      ctx.fillStyle='rgba('+p.col[0]+','+p.col[1]+','+p.col[2]+','+(p.glass?.85:1)+')'; ctx.fill();
+      ctx.strokeStyle='rgba('+p.col[0]+','+p.col[1]+','+p.col[2]+',.9)'; ctx.lineWidth=.6; ctx.stroke();
+    }
+    // aylanuvchi parrak (burunda, 3D da qisqargan)
+    const hub=rot([1.5,0,0],roll,pitch,yaw,tilt), pa=now/22;
+    ctx.save(); const h=proj(hub);
+    for(let k=0;k<2;k++){ const a=pa+k*Math.PI;
+      const tip=proj(rot([1.5,Math.cos(a)*.75,Math.sin(a)*.75],roll,pitch,yaw,tilt));
+      ctx.strokeStyle='rgba(40,30,40,.75)'; ctx.lineWidth=s*.09; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(h[0],h[1]); ctx.lineTo(tip[0],tip[1]); ctx.stroke(); }
+    const r1=proj(rot([1.5,.75,0],roll,pitch,yaw,tilt)), r2=proj(rot([1.5,0,.75],roll,pitch,yaw,tilt));
+    ctx.fillStyle='rgba(255,255,255,.13)'; ctx.beginPath();
+    ctx.ellipse(h[0],h[1],Math.max(2,Math.hypot(r2[0]-h[0],r2[1]-h[1])),Math.max(2,Math.hypot(r1[0]-h[0],r1[1]-h[1])),Math.atan2(r1[1]-h[1],r1[0]-h[0])-Math.PI/2,0,7); ctx.fill();
+    ctx.fillStyle='#ffd24a'; ctx.beginPath(); ctx.arc(h[0],h[1],s*.1,0,7); ctx.fill();
     ctx.restore();
+  }
+  // 3D animatsiya: chayqalish (krен) + har 7 s da "bochka" aylanishi
+  function flyRoll(t,now){
+    let r=Math.sin(now/420)*0.42+Math.sin(now/170)*0.08;
+    const cyc=t%7; if(t>2 && cyc>5 && cyc<6.1){ const u=(cyc-5)/1.1; r+=u*u*(3-2*u)*Math.PI*2; }
+    return r;
   }
   // egri chiziq: uchi chapdan o'ngga siljiydi (8 s), keyin o'ngda chayqalib turadi
   function curve(W,H,t,now){
@@ -18959,7 +19170,7 @@ function initCrash(){
       const cd=Math.max(0,S.betDur-phaseEl());
       cnt.textContent=cd.toFixed(1); barf.style.width=Math.min(100,cd/S.betDur*100)+'%'; mx.textContent='';
       // kutish: samolyot pastda tebranib turadi
-      drawPlane(44*dpr+Math.sin(now/600)*3*dpr, H-42*dpr+Math.sin(now/300)*3*dpr, -0.25+Math.sin(now/500)*0.06, 18*dpr);
+      drawPlane(48*dpr+Math.sin(now/600)*3*dpr, H-46*dpr+Math.sin(now/300)*3*dpr, -0.22+Math.sin(now/500)*0.06, 17*dpr, Math.sin(now/700)*0.3);
     } else if(S.phase==='fly'){
       wait.classList.remove('on'); box.classList.remove('bust'); mx.classList.remove('bust'); mx.classList.add('fly');
       const t=phaseEl(), m=Math.exp(S.growth*t);
@@ -18967,7 +19178,7 @@ function initCrash(){
       tip=curve(W,H,t,now);
       if(!lastTip || Math.hypot(tip[0]-lastTip[0],tip[1]-lastTip[1])>5*dpr){ puffs.push({x:tip[0]-18*dpr,y:tip[1]+4*dpr,r:3*dpr,life:1}); lastTip=tip.slice(); }
       particles(dt);
-      drawPlane(tip[0],tip[1],tip[2],20*dpr);
+      drawPlane(tip[0],tip[1],tip[2],22*dpr,flyRoll(t,now));
       if(myOpen()) btn.querySelector('small') && (btn.querySelector('small').textContent=fmtMoney(Math.floor(S.me.bet*m))+'$');
     } else {
       wait.classList.remove('on'); box.classList.add('bust'); mx.classList.remove('fly'); mx.classList.add('bust');
@@ -18975,7 +19186,7 @@ function initCrash(){
       particles(dt);
       // samolyot o'ng-yuqoriga uchib ketadi
       const k=(now-crashAt)/1000;
-      if(k<1.2 && tip[0]) drawPlane(tip[0]+k*k*W*0.9, tip[1]-k*k*H*0.8, -0.6, 20*dpr);
+      if(k<1.2 && tip[0]) drawPlane(tip[0]+k*k*W*0.9, tip[1]-k*k*H*0.8, -0.6-k*0.8, 19*dpr*(1+k*.6), k*k*16);
     }
   }
   window.CR={stop(){ alive=false; cancelAnimationFrame(raf); clearTimeout(timer); }, poke(){ poll(true); }};

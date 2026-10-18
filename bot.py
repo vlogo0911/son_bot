@@ -18033,15 +18033,27 @@ WEBAPP_HTML = r"""<!doctype html>
   .bal .n{font-size:18px;font-weight:800;color:var(--lime);text-shadow:0 0 12px rgba(163,230,53,.5)}
   .bal .l{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
   /* o'yin */
-  .crashbox{height:220px;border-radius:20px;border:1px solid var(--line);position:relative;overflow:hidden;
-    background:radial-gradient(120% 120% at 50% 120%, rgba(139,92,246,.22), rgba(7,7,13,.4));
-    display:flex;align-items:center;justify-content:center}
-  .crashbox.bust{background:radial-gradient(120% 120% at 50% 120%, rgba(255,80,80,.3), rgba(7,7,13,.4))}
-  .mx{font-size:56px;font-weight:900;letter-spacing:1px;color:var(--cyan);
-    text-shadow:0 0 24px rgba(34,211,238,.7)}
-  .mx.bust{color:#ff6b6b;text-shadow:0 0 24px rgba(255,80,80,.7)}
-  .plane{position:absolute;font-size:30px;transition:none;bottom:14px;left:14px}
+  .crashbox{height:250px;border-radius:22px;border:1px solid #2a1a4a;position:relative;overflow:hidden;
+    background:radial-gradient(130% 110% at 20% 110%, #3a1d6e 0%, #1a0f38 45%, #0a0718 100%);
+    display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 60px rgba(0,0,0,.6)}
+  .crashbox.bust{background:radial-gradient(130% 110% at 20% 110%, #6e1d2a 0%, #2a0f16 45%, #0a0718 100%)}
+  .mx{font-size:62px;font-weight:900;letter-spacing:1px;color:#fff;z-index:3;
+    text-shadow:0 0 30px rgba(255,255,255,.5),0 2px 10px rgba(0,0,0,.6)}
+  .mx.bust{color:#ff4d6a;text-shadow:0 0 30px rgba(255,77,106,.8)}
+  .plane{position:absolute;font-size:34px;transition:none;bottom:14px;left:10px;z-index:3;filter:drop-shadow(0 0 8px rgba(255,80,100,.8))}
+  .funmode{position:absolute;top:0;left:0;right:0;text-align:center;z-index:3;
+    background:linear-gradient(90deg,var(--gold2),var(--gold),var(--gold2));color:#3a2600;
+    font-weight:900;font-size:12px;letter-spacing:2px;padding:4px}
+  .cstat{position:absolute;bottom:10px;left:0;right:0;text-align:center;z-index:3;font-size:13px;font-weight:700;color:#fff;opacity:.9}
   .betrow{display:flex;gap:8px;margin-top:14px;align-items:center}
+  .stepper{display:flex;align-items:center;background:#0d0d16;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .stepper button{background:none;border:none;color:var(--gold);font-size:22px;font-weight:900;width:44px;height:48px;cursor:pointer}
+  .quick{display:flex;gap:6px;margin-top:10px}
+  .quick .q{flex:1;text-align:center;padding:9px;border-radius:10px;border:1px solid var(--line);font-weight:800;font-size:13px;color:var(--dim);cursor:pointer}
+  .bigbet{width:100%;margin-top:12px;border:none;border-radius:16px;padding:18px;font-size:18px;font-weight:900;color:#06220d;cursor:pointer;
+    background:linear-gradient(135deg,#34d399,#10b981);box-shadow:0 0 26px rgba(16,185,129,.45)}
+  .bigbet.cash{color:#3a2600;background:linear-gradient(135deg,var(--gold),var(--gold2));box-shadow:0 0 26px rgba(255,180,32,.5)}
+  .bigbet:disabled{opacity:.5}
   input.bet{flex:1;background:#0d0d16;border:1px solid var(--line);border-radius:14px;color:var(--txt);
     padding:13px;font-size:16px;font-weight:700;text-align:center;outline:none}
   .btn{border:none;border-radius:14px;padding:14px 18px;font-size:15px;font-weight:800;color:#07070d;cursor:pointer}
@@ -18327,12 +18339,15 @@ function render(res){
   // CRASH (Aviator)
   const cr=$('<div class="sec" id="s-crash"></div>');
   cr.innerHTML=
-    '<h2>🚀 Crash — Aviator</h2>'+
     '<div class="hist" id="chist"></div>'+
-    '<div class="crashbox" id="cbox"><canvas id="ccanvas"></canvas><div class="mx" id="mx">1.00x</div><div class="plane" id="plane">🛩️</div></div>'+
-    '<div class="note" id="cnote">Tikib, portlashdan oldin yechib oling! 🎯 Qachon portlashi — sir.</div>'+
-    '<div class="betrow"><input class="bet" id="cbet" type="number" inputmode="numeric" value="50"></div>'+
-    '<button class="btn go full" id="cbtn">🚀 Tikish (50$)</button>';
+    '<div class="crashbox" id="cbox"><canvas id="ccanvas"></canvas>'+
+      '<div class="funmode">✦ FUN MODE ✦</div>'+
+      '<div class="mx" id="mx">1.00x</div><div class="plane" id="plane">🛩️</div>'+
+      '<div class="cstat" id="cnote">Tikib, portlashdan oldin yechib oling · qachon portlashi sir 🎯</div></div>'+
+    '<div class="betrow">'+
+      '<div class="stepper"><button id="cminus">−</button><input class="bet" id="cbet" type="number" inputmode="numeric" value="50" style="border:none;width:90px"></div>'+
+      '<button class="bigbet" id="cbtn" style="margin-top:0;flex:1">BET · 50$</button></div>'+
+    '<div class="quick"><div class="q" data-v="50">50</div><div class="q" data-v="100">100</div><div class="q" data-v="500">500</div><div class="q" data-v="1000">1000</div></div>';
   app.appendChild(cr);
   window.CHIST=d.crash_history||[];
 
@@ -18403,52 +18418,71 @@ function renderHist(el){ if(!el) return; el.innerHTML=(window.CHIST||[]).map(v=>
 function initCrash(){
   const btn=document.getElementById('cbtn'), bet=document.getElementById('cbet'),
         mx=document.getElementById('mx'), box=document.getElementById('cbox'), cv=document.getElementById('ccanvas'),
-        plane=document.getElementById('plane'), note=document.getElementById('cnote'), chist=document.getElementById('chist');
+        plane=document.getElementById('plane'), note=document.getElementById('cnote'), chist=document.getElementById('chist'),
+        minus=document.getElementById('cminus'), cr=document.getElementById('s-crash');
   if(!btn) return;
   renderHist(chist);
   const ctx=cv.getContext('2d'); const dpr=window.devicePixelRatio||1;
-  let state='idle', raf=null, poll=null, t0=0, growth=0.12, cur=1;
-  function size(){ cv.width=box.clientWidth*dpr; cv.height=box.clientHeight*dpr; }
-  bet.oninput=()=>{ if(state==='idle') btn.textContent='🚀 Tikish ('+(parseInt(bet.value)||0)+'$)'; };
+  let state='idle', raf=null, poll=null, t0=0, growth=0.12, cur=1, idleRaf=null;
+  function size(){ const w=box.clientWidth,h=box.clientHeight; if(cv.width!==w*dpr||cv.height!==h*dpr){cv.width=w*dpr;cv.height=h*dpr;} }
+  function setBetLabel(){ btn.textContent='BET · '+(parseInt(bet.value)||0)+'$'; }
+  bet.oninput=()=>{ if(state==='idle') setBetLabel(); };
+  minus.onclick=()=>{ if(state!=='idle')return; bet.value=Math.max(10,(parseInt(bet.value)||0)-10); setBetLabel(); };
+  cr.querySelectorAll('.quick .q').forEach(q=>q.onclick=()=>{ if(state!=='idle')return; bet.value=q.dataset.v; setBetLabel(); });
+  // aylanadigan nurlar foni
+  function rays(W,H){
+    const ox=0,oy=H,R=Math.hypot(W,H)*1.3,rot=performance.now()/9000,n=14,span=Math.PI*0.52,lo=0.06;
+    for(let i=0;i<n;i++){
+      const a=lo+(i/n)*span+rot, a2=a+(span/n)*0.55;
+      ctx.beginPath(); ctx.moveTo(ox,oy);
+      ctx.lineTo(ox+Math.cos(a)*R, oy-Math.sin(a)*R);
+      ctx.lineTo(ox+Math.cos(a2)*R, oy-Math.sin(a2)*R); ctx.closePath();
+      ctx.fillStyle=i%2? 'rgba(150,110,235,.12)':'rgba(90,60,170,.10)'; ctx.fill();
+    }
+  }
+  function curve(W,H,t,color){
+    const maxM=Math.max(cur*1.3,2.2),N=54,px=i=>8*dpr+(W-16*dpr)*(i/N),py=m=>H-18*dpr-(H-40*dpr)*((m-1)/(maxM-1));
+    let ex=px(0),ey=py(1);
+    const line=new Path2D(); line.moveTo(px(0),py(1));
+    for(let i=0;i<=N;i++){ const m=Math.exp(growth*(t*i/N)); ex=px(i); ey=py(m); line.lineTo(ex,ey); }
+    const fill=new Path2D(line); fill.lineTo(ex,H); fill.lineTo(px(0),H); fill.closePath();
+    const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,color.f0); g.addColorStop(1,color.f1);
+    ctx.fillStyle=g; ctx.fill(fill);
+    ctx.strokeStyle=color.s; ctx.lineWidth=4*dpr; ctx.lineJoin='round'; ctx.shadowColor=color.s; ctx.shadowBlur=14*dpr; ctx.stroke(line); ctx.shadowBlur=0;
+    return [ex,ey];
+  }
   function draw(){
-    const t=(performance.now()-t0)/1000; cur=Math.exp(growth*t);
+    size(); const W=cv.width,H=cv.height; const t=(performance.now()-t0)/1000; cur=Math.exp(growth*t);
     mx.textContent=cur.toFixed(2)+'x';
-    const W=cv.width,H=cv.height,maxM=Math.max(cur*1.25,2.2),N=48; size();
-    ctx.clearRect(0,0,W,H);
-    const px=i=>W*(i/N), py=m=>H-(H-8*dpr)*((m-1)/(maxM-1));
-    let ex=0,ey=py(1);
-    ctx.beginPath(); ctx.moveTo(0,py(1));
-    for(let i=0;i<=N;i++){ const m=Math.exp(growth*(t*i/N)); ex=px(i); ey=py(m); ctx.lineTo(ex,ey); }
-    const line=new Path2D(); line.moveTo(0,py(1));
-    for(let i=0;i<=N;i++){ line.lineTo(px(i),py(Math.exp(growth*(t*i/N)))); }
-    ctx.lineTo(ex,H); ctx.lineTo(0,H); ctx.closePath();
-    const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'rgba(255,70,90,.5)'); g.addColorStop(1,'rgba(255,70,90,.04)');
-    ctx.fillStyle=g; ctx.fill();
-    ctx.strokeStyle='#ff4d6a'; ctx.lineWidth=3*dpr; ctx.shadowColor='rgba(255,77,106,.8)'; ctx.shadowBlur=12*dpr; ctx.stroke(line); ctx.shadowBlur=0;
-    plane.style.left=(ex/dpr-12)+'px'; plane.style.top=(ey/dpr-14)+'px';
+    ctx.clearRect(0,0,W,H); rays(W,H);
+    const [ex,ey]=curve(W,H,t,{f0:'rgba(255,60,90,.55)',f1:'rgba(255,60,90,.04)',s:'#ff3b6b'});
+    plane.style.left=(ex/dpr-14)+'px'; plane.style.top=(ey/dpr-16)+'px'; plane.style.bottom='auto';
     raf=requestAnimationFrame(draw);
   }
+  function idle(){ size(); const W=cv.width,H=cv.height; ctx.clearRect(0,0,W,H); rays(W,H); idleRaf=requestAnimationFrame(idle); }
   function stopLoops(){ cancelAnimationFrame(raf); clearInterval(poll); poll=null; }
   function bust(crash){
     stopLoops(); state='idle'; box.classList.add('bust'); mx.classList.add('bust');
-    mx.textContent=(crash||cur).toFixed(2)+'x 💥'; plane.textContent='💥'; note.textContent='💥 Portladi! Yutqazdingiz.'; haptic('error');
+    mx.textContent=(crash||cur).toFixed(2)+'x'; plane.textContent='💥'; note.textContent='💥 Portladi!'; haptic('error');
     renderHist(chist); resetSoon();
   }
   function resetSoon(){ setTimeout(()=>{ box.classList.remove('bust'); mx.classList.remove('bust'); plane.textContent='🛩️';
-    plane.style.left='10px'; plane.style.top='auto'; plane.style.bottom='12px'; mx.textContent='1.00x'; ctx.clearRect(0,0,cv.width,cv.height);
-    note.textContent='Tikib, portlashdan oldin yechib oling! 🎯 Qachon portlashi — sir.'; btn.className='btn go full'; btn.disabled=false;
-    btn.textContent='🚀 Tikish ('+(parseInt(bet.value)||0)+'$)'; btn.onclick=start; }, 1700); }
+    plane.style.left='10px'; plane.style.top='auto'; plane.style.bottom='14px'; mx.textContent='1.00x';
+    note.textContent='Tikib, portlashdan oldin yechib oling · qachon portlashi sir 🎯';
+    btn.className='bigbet'; btn.style.flex='1'; btn.style.marginTop='0'; btn.disabled=false; setBetLabel(); btn.onclick=start;
+    idle(); }, 1700); }
   function start(){
-    const b=parseInt(bet.value)||0; btn.disabled=true;
+    const b=parseInt(bet.value)||0; btn.disabled=true; cancelAnimationFrame(idleRaf);
     api('/app/api/crash/start',{bet:b}).then(r=>{
-      if(!r.ok||r.error){ note.textContent=errText(r.error,r.min); btn.disabled=false; return; }
+      if(!r.ok||r.error){ note.textContent=errText(r.error,r.min); btn.disabled=false; idle(); return; }
       setBal(r.balance); window.CHIST=r.history||window.CHIST; growth=r.growth||0.12; t0=performance.now(); state='fly';
       plane.style.bottom='auto'; box.classList.remove('bust'); mx.classList.remove('bust');
-      btn.className='btn cash full'; btn.textContent='💰 Yechib olish'; btn.disabled=false; btn.onclick=cash;
-      note.textContent='🚀 Uchyapti…'; raf=requestAnimationFrame(draw);
-      poll=setInterval(()=>{ api('/app/api/crash/state',{}).then(s=>{
-        if(!s.alive){ if(s.history) window.CHIST=s.history; bust(s.crash); } }); }, 350);
-    }).catch(()=>{ btn.disabled=false; });
+      btn.className='bigbet cash'; btn.disabled=false; btn.onclick=cash; note.textContent='🚀 Uchyapti…';
+      raf=requestAnimationFrame(draw);
+      btn.textContent='CASH OUT';
+      poll=setInterval(()=>{ api('/app/api/crash/state',{}).then(s=>{ if(!s.alive){ if(s.history) window.CHIST=s.history; bust(s.crash); }
+        else if(btn.className.indexOf('cash')>=0){ btn.textContent='CASH OUT · '+fmtMoney(Math.round(b*s.mult))+'$'; } }); }, 350);
+    }).catch(()=>{ btn.disabled=false; idle(); });
   }
   function cash(){
     if(state!=='fly') return; state='idle'; stopLoops(); btn.disabled=true;
@@ -18456,11 +18490,11 @@ function initCrash(){
       if(r.history) window.CHIST=r.history; renderHist(chist);
       if(r.result==='win'){ setBal(r.balance); mx.textContent=r.multiplier.toFixed(2)+'x';
         note.textContent='✅ +'+fmtMoney(r.win)+'$ ('+r.multiplier.toFixed(2)+'x)'; haptic('success'); }
-      else { box.classList.add('bust'); mx.classList.add('bust'); mx.textContent=(r.crash||cur).toFixed(2)+'x 💥'; note.textContent='💥 Kech qoldingiz!'; haptic('error'); }
+      else { box.classList.add('bust'); mx.classList.add('bust'); mx.textContent=(r.crash||cur).toFixed(2)+'x'; note.textContent='💥 Kech qoldingiz!'; haptic('error'); }
       resetSoon();
     }).catch(()=>{ btn.disabled=false; });
   }
-  size(); state='idle'; btn.onclick=start;
+  size(); state='idle'; setBetLabel(); btn.onclick=start; idle();
 }
 
 // ---- FROG (Baqa) ----

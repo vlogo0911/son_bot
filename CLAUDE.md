@@ -104,3 +104,8 @@
   `bet·mult` yutuq, aks holda yutqazish. 🐸 Baqa — `web_frog_start` (rejim easy/medium/hard → qatordagi tuzoqlar soni, `frog_mult`
   bilan bir xil RTP), `web_frog_step(col)` qadam/tuzoq, `web_frog_cashout`. Holat `WEB_CRASH`/`WEB_FROG` (bot siklida, bitta o'yin
   har foydalanuvchi). Faqat web app yoqilgan bo'lsa (`web_enabled_for`).
+  🛍 Do'kon (interaktiv): `web_shop_buy(uid, gift, to)` — sovg'a sotib olib (narx `_wallet_take`), juftga yoki @username/ID ga
+  yuboradi (`_EXCHANGE_LOOP_BOT.send_message`), yetkazilmasa pul qaytadi. 🏦 Bank (interaktiv, faqat instant banklar):
+  `web_bank_loan`/`web_bank_repay`/`web_bank_deposit` — botdagi bir xil qoidalar (birinchi kredit 1000, `LOAN_AMOUNTS`/`LOAN_DAYS`,
+  `DEPOSIT_AMOUNTS`/`DEPOSIT_DAYS`, `loan_due`/`deposit_payout`, faol kredit/omonat tekshiruvi). Payloadda `shop`, `has_partner`,
+  `bank_opts` (banklar, summalar, kunlar, can_loan/can_deposit). Endpointlar: `/app/api/{shop/buy,bank/loan,bank/repay,bank/deposit}`.

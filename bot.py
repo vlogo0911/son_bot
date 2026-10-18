@@ -16533,6 +16533,14 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_frog_step(uid, body.get("col"))
         elif path == "/app/api/frog/cashout":
             coro = web_frog_cashout(uid)
+        elif path == "/app/api/shop/buy":
+            coro = web_shop_buy(uid, body.get("gift"), body.get("to"))
+        elif path == "/app/api/bank/loan":
+            coro = web_bank_loan(uid, body.get("bank"), body.get("amount"), body.get("days"))
+        elif path == "/app/api/bank/repay":
+            coro = web_bank_repay(uid)
+        elif path == "/app/api/bank/deposit":
+            coro = web_bank_deposit(uid, body.get("bank"), body.get("amount"), body.get("days"))
         else:
             self._send(404, {"ok": False})
             return
@@ -17490,6 +17498,20 @@ async def webapp_payload(user_id):
             "hunger": round(kid["hunger"]), "happy": round(kid["happy"]),
         })
 
+    # 🛍 Do'kon va 🏦 bank imkoniyatlari (web app interaktiv uchun)
+    shop = [{"key": k, "name": nm, "price": pr} for k, (nm, pr) in SHOP_GIFTS.items()]
+    has_partner = active_pair(user_id) is not None
+    instant_banks = [{"id": b["id"], "name": b["name"],
+                      "loan_rate": round(b["loan_rate"] * 100, 1), "deposit_rate": round(b["deposit_rate"] * 100, 1)}
+                     for b in banks_all(only_active=True) if not b["apply_mode"]]
+    bank_opts = {
+        "banks": instant_banks,
+        "loan_amounts": ([LOAN_FIRST] if not had_loan_before(user_id) else LOAN_AMOUNTS),
+        "loan_days": list(LOAN_DAYS), "dep_amounts": DEPOSIT_AMOUNTS, "dep_days": list(DEPOSIT_DAYS),
+        "can_loan": not (active_loan(user_id) or pending_app(user_id) or money < 0),
+        "can_deposit": not (active_deposit(user_id) or active_loan(user_id) or money < 0),
+    }
+
     data = {
         "name": name, "username": username, "id": user_id,
         "money": money, "money_fmt": fmt_money(money),
@@ -17497,6 +17519,7 @@ async def webapp_payload(user_id):
         "level": level_name(0, points), "rank": rank, "kids": len(kid_list),
         "loan": bool(lo), "birja": round(birja_val, 2),
         "bank": bank, "birja_list": birja_rows, "kids_list": kid_list,
+        "shop": shop, "has_partner": has_partner, "bank_opts": bank_opts,
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -17655,6 +17678,129 @@ async def web_frog_cashout(uid):
     return {"result": "cashed", "multiplier": mult, "win": win, "balance": wallet_balance(uid)}
 
 
+# ── 🛍 Web app: Do'kon (sovg'a sotib olib yuborish) ──
+
+async def web_shop_buy(uid, gift_key, recipient):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    if gift_key not in SHOP_GIFTS:
+        return {"error": "item"}
+    name, price = SHOP_GIFTS[gift_key]
+    rid = None
+    if recipient == "partner":
+        pair = active_pair(uid)
+        if not pair:
+            return {"error": "no_pair"}
+        rid = pair[2] if pair[1] == uid else pair[1]
+    else:
+        recipient = str(recipient or "").strip()
+        if recipient.startswith("@"):
+            row = db().execute("SELECT user_id FROM users WHERE lower(username)=lower(?)", (recipient[1:],)).fetchone()
+            rid = row[0] if row else None
+        elif recipient.lstrip("-").isdigit():
+            rid = int(recipient)
+    if not rid:
+        return {"error": "recipient"}
+    if rid == uid:
+        return {"error": "self"}
+    owner = is_money_owner(uid)
+    c = db()
+    gift_id = None
+    with c:
+        if not owner and not _wallet_take(c, uid, price):
+            return {"error": "funds", "balance": wallet_balance(uid)}
+        cur = c.execute(
+            "INSERT INTO gift_log(sender_id,recipient_id,gift_key,price,created_at) VALUES(?,?,?,?,?)",
+            (uid, rid, gift_key, price, datetime.now().isoformat(timespec="seconds")))
+        gift_id = cur.lastrowid
+    try:
+        await _EXCHANGE_LOOP_BOT.send_message(
+            rid, f"🎁 {person_name(uid)} sizga {gift_label_html(gift_key, name)} sovg‘a qildi!")
+    except TelegramError:
+        with c:
+            c.execute("DELETE FROM gift_log WHERE id=?", (gift_id,))
+            if not owner:
+                _wallet_add(c, uid, price)
+        return {"error": "undeliverable", "balance": wallet_balance(uid)}
+    return {"result": "sent", "gift": name, "to": person_name(rid), "balance": wallet_balance(uid)}
+
+
+# ── 🏦 Web app: Bank (kredit / omonat — faqat instant banklar) ──
+
+async def web_bank_loan(uid, bank_id, amount, days):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    try:
+        bank = bank_get(int(bank_id))
+        amount, days = int(amount), int(days)
+    except (TypeError, ValueError):
+        return {"error": "bad"}
+    if not bank or not bank["active"] or bank["apply_mode"]:
+        return {"error": "bank"}
+    if active_loan(uid):
+        return {"error": "loan_has"}
+    if pending_app(uid):
+        return {"error": "apply_pending"}
+    if wallet_balance(uid) < 0:
+        return {"error": "debt"}
+    allowed = LOAN_AMOUNTS if had_loan_before(uid) else [LOAN_FIRST]
+    if amount not in allowed or days not in LOAN_DAYS:
+        return {"error": "params"}
+    due = loan_due(amount, days, bank["loan_rate"])
+    now = int(time.time())
+    c = db()
+    with c:
+        issue_loan(c, uid, bank["id"], amount, days, due, now)
+    return {"result": "loan", "amount": amount, "days": days, "due": due, "balance": wallet_balance(uid)}
+
+
+async def web_bank_repay(uid):
+    loan = active_loan(uid)
+    if not loan:
+        return {"error": "no_loan"}
+    loan_id, _, _, due, _, _ = loan
+    now = int(time.time())
+    c = db()
+    with c:
+        paid = _wallet_take(c, uid, due)
+        if paid:
+            c.execute("UPDATE bank_loans SET status='paid', closed_at=? WHERE id=? AND status='active'", (now, loan_id))
+    if not paid:
+        return {"error": "funds", "balance": wallet_balance(uid)}
+    return {"result": "repaid", "due": due, "balance": wallet_balance(uid)}
+
+
+async def web_bank_deposit(uid, bank_id, amount, days):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    try:
+        bank = bank_get(int(bank_id))
+        amount, days = int(amount), int(days)
+    except (TypeError, ValueError):
+        return {"error": "bad"}
+    if not bank or not bank["active"]:
+        return {"error": "bank"}
+    if active_deposit(uid):
+        return {"error": "dep_has"}
+    if active_loan(uid) or wallet_balance(uid) < 0:
+        return {"error": "dep_loan"}
+    if amount not in DEPOSIT_AMOUNTS or days not in DEPOSIT_DAYS:
+        return {"error": "params"}
+    payout = deposit_payout(amount, days, bank["deposit_rate"])
+    now = int(time.time())
+    matures = now + days * DAY_SECONDS
+    c = db()
+    with c:
+        taken = _wallet_take(c, uid, amount)
+        if taken:
+            c.execute(
+                "INSERT INTO bank_deposits(user_id,amount,days,payout,created_at,matures_at,bank_id) VALUES(?,?,?,?,?,?,?)",
+                (uid, amount, days, payout, now, matures, bank["id"]))
+    if not taken:
+        return {"error": "funds", "balance": wallet_balance(uid)}
+    return {"result": "deposit", "amount": amount, "days": days, "payout": payout, "balance": wallet_balance(uid)}
+
+
 WEBAPP_HTML = r"""<!doctype html>
 <html lang="uz">
 <head>
@@ -17748,6 +17894,16 @@ WEBAPP_HTML = r"""<!doctype html>
   .pad.safe{border-color:var(--lime);color:var(--lime)}
   .pad.bad{border-color:#ff6b6b;color:#ff6b6b}
   .pad.dim{opacity:.35}
+  .frow{display:flex;gap:8px;margin-top:10px}
+  select.sel{flex:1;background:#0d0d16;border:1px solid var(--line);border-radius:12px;color:var(--txt);
+    padding:12px;font-size:15px;font-weight:700;outline:none;appearance:none;-webkit-appearance:none;
+    background-image:linear-gradient(45deg,transparent 50%,var(--cyan) 50%),linear-gradient(135deg,var(--cyan) 50%,transparent 50%);
+    background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+  #toast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%) translateY(20px);opacity:0;
+    background:#14142a;border:1px solid var(--line);color:var(--txt);padding:12px 18px;border-radius:14px;
+    font-weight:700;font-size:14px;max-width:88%;text-align:center;transition:.25s;pointer-events:none;z-index:99;
+    box-shadow:0 0 24px rgba(139,92,246,.4)}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 </style>
 </head>
 <body>
@@ -17829,8 +17985,45 @@ function render(res){
       '<div class="val lime">'+esc(s.payout)+'$</div>'+
       '<div class="hsub">Qo‘yilgan: '+esc(s.amount)+'$ · '+esc(s.days)+' kun · yechish: '+esc(s.matures_at)+'</div></div>'));
   }
-  if((!d.bank||(!d.bank.loan&&!d.bank.deposit)))
-    bk.appendChild($('<div class="card full"><div class="center">Faol kredit yoki omonat yo‘q.<br><span class="hsub">Botda /profil → 🏦 Banklar</span></div></div>'));
+  const bo=d.bank_opts||{};
+  const bankSel=(bo.banks||[]).map(b=>'<option value="'+b.id+'">'+esc(b.name)+' · '+b.loan_rate+'%</option>').join('');
+  // Kredit to'lash
+  if(d.bank && d.bank.loan){
+    const rp=$('<button class="btn cash full" id="brepay">💳 Kreditni to‘lash ('+esc(d.bank.loan.due)+'$)</button>');
+    rp.onclick=()=>{ rp.disabled=true; api('/app/api/bank/repay',{}).then(r=>{
+      if(r.result==='repaid'){ setBal(r.balance); toast('✅ Kredit to‘landi'); refresh(); }
+      else { toast(errText(r.error)); rp.disabled=false; } }); };
+    bk.appendChild(rp);
+  } else if(bo.can_loan && (bo.banks||[]).length){
+    const amtO=(bo.loan_amounts||[]).map(a=>'<option value="'+a+'">'+fmtMoney(a)+'$</option>').join('');
+    const dayO=(bo.loan_days||[]).map(x=>'<option value="'+x+'">'+x+' kun</option>').join('');
+    const f=$('<div class="card full" style="margin-top:12px"><div class="lbl">💸 Kredit olish</div>'+
+      '<div class="frow"><select class="sel" id="lbank">'+bankSel+'</select></div>'+
+      '<div class="frow"><select class="sel" id="lamt">'+amtO+'</select><select class="sel" id="ldays">'+dayO+'</select></div>'+
+      '<button class="btn go full" id="loanbtn">💸 Kredit olish</button></div>');
+    app_q(f,'#loanbtn').onclick=()=>{ const b=app_q(f,'#loanbtn'); b.disabled=true;
+      api('/app/api/bank/loan',{bank:app_q(f,'#lbank').value,amount:app_q(f,'#lamt').value,days:app_q(f,'#ldays').value}).then(r=>{
+        if(r.result==='loan'){ setBal(r.balance); toast('✅ Kredit olindi: +'+fmtMoney(r.amount)+'$'); refresh(); }
+        else { toast(errText(r.error)); b.disabled=false; } }); };
+    bk.appendChild(f);
+  }
+  // Omonat
+  if(bo.can_deposit && (bo.banks||[]).length && !(d.bank&&d.bank.deposit)){
+    const amtO=(bo.dep_amounts||[]).map(a=>'<option value="'+a+'">'+fmtMoney(a)+'$</option>').join('');
+    const dayO=(bo.dep_days||[]).map(x=>'<option value="'+x+'">'+x+' kun</option>').join('');
+    const bankSelD=(bo.banks||[]).map(b=>'<option value="'+b.id+'">'+esc(b.name)+' · '+b.deposit_rate+'%</option>').join('');
+    const f=$('<div class="card full" style="margin-top:12px"><div class="lbl">💰 Omonat qo‘yish</div>'+
+      '<div class="frow"><select class="sel" id="dbank">'+bankSelD+'</select></div>'+
+      '<div class="frow"><select class="sel" id="damt">'+amtO+'</select><select class="sel" id="ddays">'+dayO+'</select></div>'+
+      '<button class="btn go full" id="depbtn">💰 Omonat qo‘yish</button></div>');
+    app_q(f,'#depbtn').onclick=()=>{ const b=app_q(f,'#depbtn'); b.disabled=true;
+      api('/app/api/bank/deposit',{bank:app_q(f,'#dbank').value,amount:app_q(f,'#damt').value,days:app_q(f,'#ddays').value}).then(r=>{
+        if(r.result==='deposit'){ setBal(r.balance); toast('✅ Omonat qo‘yildi'); refresh(); }
+        else { toast(errText(r.error)); b.disabled=false; } }); };
+    bk.appendChild(f);
+  }
+  if((!d.bank||(!d.bank.loan&&!d.bank.deposit)) && !((bo.banks||[]).length))
+    bk.appendChild($('<div class="card full"><div class="center">Bank mavjud emas.</div></div>'));
   app.appendChild(bk);
 
   // BIRJA
@@ -17859,6 +18052,37 @@ function render(res){
   if(!(d.kids_list||[]).length) fl.appendChild($('<div class="center">Farzandlar yo‘q.<br><span class="hsub">Botda /oila</span></div>'));
   fz.appendChild(fl);
   app.appendChild(fz);
+
+  // SHOP
+  const sh=$('<div class="sec" id="s-shop"></div>');
+  sh.appendChild($('<h2>🛍 Do‘kon — sovg‘a yuborish</h2>'));
+  const toWrap=$('<div class="card full"><div class="lbl">Kimga</div>'+
+    '<div class="seg" id="shto">'+(d.has_partner?'<div class="s on" data-t="partner">💞 Juftimga</div>':'')+
+    '<div class="s'+(d.has_partner?'':' on')+'" data-t="other">👤 Boshqaga</div></div>'+
+    '<div class="frow" id="shidwrap" style="'+(d.has_partner?'display:none':'')+'"><input class="bet" id="shid" placeholder="@username yoki ID"></div></div>');
+  sh.appendChild(toWrap);
+  let shMode=d.has_partner?'partner':'other';
+  toWrap.querySelectorAll('#shto .s').forEach(s=>s.onclick=()=>{
+    toWrap.querySelectorAll('#shto .s').forEach(x=>x.classList.remove('on')); s.classList.add('on'); shMode=s.dataset.t;
+    app_q(toWrap,'#shidwrap').style.display=shMode==='other'?'':'none';
+  });
+  const gifts=$('<div class="grid" style="margin-top:12px"></div>');
+  (d.shop||[]).forEach(g=>{
+    const el=$('<div class="card" style="text-align:center;cursor:pointer"><div style="font-size:30px">'+esc(g.name.split(" ")[0])+'</div>'+
+      '<div style="margin-top:6px">'+esc(g.name.replace(/^\S+\s/,''))+'</div><div class="val mag" style="font-size:16px">'+g.price+'$</div></div>');
+    el.onclick=()=>{
+      const to = shMode==='partner' ? 'partner' : (app_q(toWrap,'#shid').value||'').trim();
+      if(shMode==='other' && !to){ toast('Qabul qiluvchini kiriting'); return; }
+      el.style.opacity=.5;
+      api('/app/api/shop/buy',{gift:g.key,to:to}).then(r=>{
+        el.style.opacity=1;
+        if(r.result==='sent'){ setBal(r.balance); toast('✅ '+esc(g.name)+' → '+esc(r.to)); }
+        else toast(errText(r.error)); });
+    };
+    gifts.appendChild(el);
+  });
+  sh.appendChild(gifts);
+  app.appendChild(sh);
 
   // CRASH (Aviator)
   const cr=$('<div class="sec" id="s-crash"></div>');
@@ -17899,7 +18123,7 @@ function render(res){
 
   // TABS
   const tabs=$('<div class="tabs"></div>');
-  const defs=[['profil','👤'],['reyting','💎'],['bank','🏦'],['birja','📈'],['farzand','👶'],['crash','🚀'],['frog','🐸']];
+  const defs=[['profil','👤'],['reyting','💎'],['shop','🛍'],['bank','🏦'],['birja','📈'],['farzand','👶'],['crash','🚀'],['frog','🐸']];
   if(d.is_owner&&d.owner) defs.push(['owner','👑']);
   defs.forEach(([k,t])=>{
     const el=$('<div class="tab" data-k="'+k+'">'+t+'</div>');
@@ -17912,6 +18136,10 @@ function render(res){
 }
 function setBal(v){ window.BAL=v; const b=document.getElementById('bal'); if(b) b.textContent=fmtMoney(v)+'$'; }
 function fmtMoney(n){ return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g,' '); }
+function app_q(el,sel){ return el.querySelector(sel); }
+function toast(m){ let t=document.getElementById('toast'); if(!t){ t=document.createElement('div'); t.id='toast'; document.body.appendChild(t);}
+  t.textContent=m; t.className='show'; clearTimeout(window._tt); window._tt=setTimeout(()=>t.className='',2200); }
+function refresh(){ api('/app/api/data',{}).then(r=>{ if(r&&r.ok&&r.enabled) render(r); }); }
 function api(path,body){ return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(Object.assign({initData:tg?tg.initData:''},body||{}))}).then(r=>r.json()); }
 function haptic(t){ try{tg.HapticFeedback.notificationOccurred(t);}catch(e){} }

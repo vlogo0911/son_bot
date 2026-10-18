@@ -17354,9 +17354,10 @@ async def panel_exchange_callback(query, context):
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
 if not WEBAPP_URL:
-    _rw_dom = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
-    if _rw_dom:
-        WEBAPP_URL = "https://" + _rw_dom
+    WEBAPP_URL = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip().rstrip("/")
+# Scheme bo'lmasa (masalan faqat domen yozilgan bo'lsa) — https:// qo'shamiz
+if WEBAPP_URL and not WEBAPP_URL.startswith(("http://", "https://")):
+    WEBAPP_URL = "https://" + WEBAPP_URL
 
 
 def init_webapp():

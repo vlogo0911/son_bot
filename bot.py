@@ -8667,7 +8667,7 @@ async def post_init(application: Application):
         ("words", "📃 Taqiqlangan so‘zlar"),
         ("filter", "💬 Filtr qo‘shish"), ("filters", "💬 Filtrlar"), ("delfilter", "🗑 Filtr o‘chirish"),
         ("setwelcome", "👋 Salomlashish matni"), ("setrules", "📜 Qoidalarni o‘rnatish"),
-        ("rules", "📜 Guruh qoidalari"),
+        ("rules", "📜 Guruh qoidalari"), ("badmute", "🔇 Taqiq. so‘z mute muddati"),
         ("setlog", "📋 Log kanal"), ("report", "📣 Adminlarga shikoyat"),
         ("info", "🪪 Foydalanuvchi ma’lumoti"), ("id", "🆔 ID"), ("admins", "👮 Adminlar"),
         ("help", "❓ Yordam"),
@@ -14033,7 +14033,7 @@ async def cb_kid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 GUARD_DEFAULTS = {"captcha": 0, "welcome": 1, "antilink": 0, "antiflood": 0, "warn_limit": 3, "warn_action": "mute",
                   "welcome_text": "", "night": 0, "night_start": 0, "night_end": 7, "night_active": 0,
-                  "night_saved": "", "log_chat": 0, "locks": 0, "rules": ""}
+                  "night_saved": "", "log_chat": 0, "locks": 0, "rules": "", "badword_mute": 1800}
 CAPTCHA_TTL = 120               # captcha uchun vaqt (soniya)
 FLOOD_COUNT, FLOOD_WINDOW = 7, 5   # 5 soniyada 7 ta xabar — flood
 FLOOD_MUTE = 300                # flood uchun jim qilish (soniya)
@@ -14529,22 +14529,21 @@ async def guard_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.delete()
         except TelegramError:
             return
-        # Empire Security uslubi: xabarni o'chirib, a'zoni 30 daqiqa jim qilamiz va
-        # «✅ Bekor qilish» tugmasi bilan muddatni ko'rsatamiz.
-        until = int(time.time()) + BADWORD_MUTE
+        # Empire Security uslubi: xabarni o'chirib, a'zoni (sozlangan muddatga) jim qilamiz va
+        # «✅ Bekor qilish» tugmasi bilan muddatni ko'rsatamiz. Muddat guruh bo'yicha sozlanadi (/badmute).
+        dur = settings.get("badword_mute") or BADWORD_MUTE
+        until = int(time.time()) + dur
         muted = False
         try:
-            await mod_mute(context.bot, chat_id, user.id, BADWORD_MUTE)
+            await mod_mute(context.bot, chat_id, user.id, dur)
             muted = True
         except TelegramError as e:
             logger.warning("Taqiqlangan so'z: jim qilib bo'lmadi: %s", e)
         if muted:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                g2_t(chat_id, "bw_undo"), callback_data=f"bw:{chat_id}:{user.id}")]])
             await context.bot.send_message(
                 chat_id,
                 g2_t(chat_id, "bw_mute", name=name, id=user.id, until=tashkent_dt(until)),
-                reply_markup=kb,
+                reply_markup=undo_kb(chat_id, "mute", user.id),
             )
         else:
             sent = await context.bot.send_message(chat_id, g2_t(chat_id, "badword", name=name))
@@ -14609,6 +14608,7 @@ async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     settings = gs_get(chat.id)
     limit = settings["warn_limit"]
+    undo_act = None   # "mute" / "ban" bo'lsa — xabar tagiga «Bekor qilish» tugmasi qo'yiladi
     c = db()
     try:
         if command in ("warn", "unwarn", "warns"):
@@ -14623,9 +14623,11 @@ async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if settings["warn_action"] == "ban":
                     await context.bot.ban_chat_member(chat.id, target)
                     text = mod_t(chat.id, "warn_ban", name=name)
+                    undo_act = "ban"
                 else:
                     await mod_mute(context.bot, chat.id, target, WARN_MUTE)
                     text = mod_t(chat.id, "warn_mute", name=name, limit=limit, dur=fmt_dur(chat.id, WARN_MUTE))
+                    undo_act = "mute"
             elif command == "warn":
                 text = mod_t(chat.id, "warn", name=name, n=count, limit=limit)
                 reason = " ".join(args).strip()
@@ -14644,6 +14646,7 @@ async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
             seconds = seconds or 3600
             await mod_mute(context.bot, chat.id, target, seconds)
             text = mod_t(chat.id, "mute", name=name, dur=fmt_dur(chat.id, seconds))
+            undo_act = "mute"
         elif command == "unmute":
             await mod_unmute(context.bot, chat.id, target)
             text = mod_t(chat.id, "unmute", name=name)
@@ -14652,9 +14655,11 @@ async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
             seconds = seconds or 3600
             await context.bot.ban_chat_member(chat.id, target, until_date=int(time.time()) + seconds)
             text = mod_t(chat.id, "tban", name=name, dur=fmt_dur(chat.id, seconds))
+            undo_act = "ban"
         elif command == "ban":
             await context.bot.ban_chat_member(chat.id, target)
             text = mod_t(chat.id, "ban", name=name)
+            undo_act = "ban"
         elif command == "unban":
             await context.bot.unban_chat_member(chat.id, target, only_if_banned=True)
             text = mod_t(chat.id, "unban", name=name)
@@ -14667,7 +14672,9 @@ async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Moderatsiya /%s bajarilmadi: %s", command, e)
         await msg.reply_text(mod_t(chat.id, "no_rights"))
         return
-    await msg.reply_text(text)
+    # Jazo (mute/ban) xabari tagida «Bekor qilish» tugmasi — faqat huquqli admin bosadi, xabar o'chmaydi.
+    kb = undo_kb(chat.id, undo_act, target) if undo_act else None
+    await msg.reply_text(text, reply_markup=kb)
     if command != "warns":
         await mod_log(context.bot, chat.id, f"⚖️ /{command} — {name} ← {user_mention(user.id, user.first_name) if user else 'admin'}"
                       + (f"\n📝 {escape(' '.join(args)[:200])}" if args else ""))
@@ -15280,8 +15287,11 @@ G2_TEXT = {
                     "🙊 {name}, voy-voy-voy! Bunday so‘zlar bizda ishlatilmaydi 🚫"],
         "bw_mute": "🚫 {name} [{id}] taqiqlangan so‘zdan foydalandi.\nHolati: <b>Mute holatida</b> 🔇\nMuddat: <b>{until}</b> gacha",
         "bw_undo": "✅ Bekor qilish",
-        "bw_undone": "\n\n♻️ {admin} tomonidan bekor qilindi — {name} yana yoza oladi.",
-        "bw_only_admin": "⛔ Buni faqat adminlar bosa oladi.",
+        "undo_no_right": "⛔ Buni faqat «a’zolarni cheklash» huquqiga ega adminlar bosa oladi.",
+        "undo_unmuted": "\n\n♻️ {admin} mute’ni bekor qildi — {name} yana yoza oladi.",
+        "undo_unbanned": "\n\n♻️ {admin} ban’ni bekor qildi — {name} qaytib kira oladi.",
+        "badmute_now": "🔇 Taqiqlangan so‘z uchun mute muddati: <b>{dur}</b>.\nO‘zgartirish: <code>/badmute 1h</code> (yoki 30m, 1d).",
+        "badmute_set": "✅ Taqiqlangan so‘z mute muddati <b>{dur}</b> qilib belgilandi.",
         "locks": "🔒 <b>CHEKLOVLAR</b>\n\n❌ — shu turdagi xabarlar oddiy a’zolardan o‘chiriladi.",
         "lock_names": {"sticker": "🎭 Stikerlar", "animation": "🎞 GIF", "voice": "🎤 Ovozli xabar",
                        "video_note": "⭕ Dumaloq video", "forward": "↪️ Forward"},
@@ -15726,33 +15736,81 @@ async def cb_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   f"{done} — {user_mention(uid, uid)} ({user_mention(q.from_user.id, q.from_user.first_name)})")
 
 
-async def cb_badword_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Taqiqlangan so'z uchun qo'yilgan mute'ni «✅ Bekor qilish» tugmasi bilan olib tashlaydi (faqat admin)."""
-    q = update.callback_query
+def undo_kb(chat_id, act, uid):
+    """Jazo xabari tagidagi «✅ Bekor qilish» tugmasi. act: 'mute' yoki 'ban'."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        g2_t(chat_id, "bw_undo"), callback_data=f"undo:{act}:{uid}")]])
+
+
+async def admin_can_restrict(bot, chat_id, user_id):
+    """Foydalanuvchi — a'zolarni cheklash huquqiga ega adminmi (yoki guruh/bot egasi)?"""
+    if user_id in CAREER_OWNER_IDS:
+        return True
     try:
-        _, chat_s, uid_s = q.data.split(":")
-        chat_id, uid = int(chat_s), int(uid_s)
-    except ValueError:
+        m = await bot.get_chat_member(chat_id, user_id)
+    except TelegramError:
+        return False
+    if m.status == ChatMemberStatus.OWNER:
+        return True
+    return m.status == ChatMemberStatus.ADMINISTRATOR and bool(getattr(m, "can_restrict_members", False))
+
+
+async def cb_mod_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Jazo (mute/ban) xabari tagidagi «✅ Bekor qilish» — faqat cheklash huquqiga ega admin bosadi."""
+    q = update.callback_query
+    chat_id = q.message.chat.id if q.message else None
+    act, uid = "mute", None
+    parts = q.data.split(":")
+    try:
+        if parts[0] == "undo":           # undo:<mute|ban>:<uid>
+            act, uid = parts[1], int(parts[2])
+        elif parts[0] == "bw":           # eski format: bw:<chat>:<uid> (= mute)
+            chat_id, uid, act = int(parts[1]), int(parts[2]), "mute"
+    except (ValueError, IndexError):
         await q.answer()
         return
-    if not await user_is_chat_admin(context.bot, chat_id, q.from_user.id):
-        await q.answer(g2_t(chat_id, "bw_only_admin"), show_alert=True)
+    if uid is None or chat_id is None:
+        await q.answer()
+        return
+    if not await admin_can_restrict(context.bot, chat_id, q.from_user.id):
+        await q.answer(g2_t(chat_id, "undo_no_right"), show_alert=True)
         return
     try:
-        await mod_unmute(context.bot, chat_id, uid)
+        if act == "ban":
+            await context.bot.unban_chat_member(chat_id, uid, only_if_banned=True)
+        else:
+            await mod_unmute(context.bot, chat_id, uid)
     except TelegramError:
         await q.answer(g2_t(chat_id, "r_fail"), show_alert=True)
         return
     admin = user_mention(q.from_user.id, q.from_user.first_name)
+    key = "undo_unbanned" if act == "ban" else "undo_unmuted"
     await q.answer("✅")
     try:
         await q.edit_message_text(
-            q.message.text_html + g2_t(chat_id, "bw_undone", admin=admin, name=user_mention(uid, uid)),
+            q.message.text_html + g2_t(chat_id, key, admin=admin, name=user_mention(uid, uid)),
             reply_markup=None,
         )
     except TelegramError:
         pass
-    await mod_log(context.bot, chat_id, f"♻️ Taqiqlangan so‘z mute bekor qilindi — {user_mention(uid, uid)} ({admin})")
+    await mod_log(context.bot, chat_id, f"♻️ {act} bekor qilindi — {user_mention(uid, uid)} ({admin})")
+
+
+async def cmd_badmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Taqiqlangan so'z uchun mute muddatini guruh bo'yicha sozlaydi."""
+    msg, chat, user = await gh_admin_guard(update, context)
+    if not msg:
+        return
+    cur = gs_get(chat.id).get("badword_mute") or BADWORD_MUTE
+    if not context.args:
+        await msg.reply_text(g2_t(chat.id, "badmute_now", dur=fmt_dur(chat.id, cur)))
+        return
+    seconds = parse_dur(context.args[0])
+    if not seconds:
+        await msg.reply_text(g2_t(chat.id, "badmute_now", dur=fmt_dur(chat.id, cur)))
+        return
+    gs_set(chat.id, "badword_mute", seconds)
+    await msg.reply_text(g2_t(chat.id, "badmute_set", dur=fmt_dur(chat.id, seconds)))
 
 
 # ───────────────────────────── 🛡 GROUP HELP QO'SHIMCHA BUYRUQLARI ─────────────────────────────
@@ -15826,8 +15884,11 @@ def gh_t(chat_id, key, **kw):
 def init_grouphelp():
     c = db()
     with c:
-        if "rules" not in {r[1] for r in c.execute("PRAGMA table_info(group_settings)")}:
+        have = {r[1] for r in c.execute("PRAGMA table_info(group_settings)")}
+        if "rules" not in have:
             c.execute("ALTER TABLE group_settings ADD COLUMN rules TEXT NOT NULL DEFAULT ''")
+        if "badword_mute" not in have:
+            c.execute("ALTER TABLE group_settings ADD COLUMN badword_mute INTEGER NOT NULL DEFAULT 1800")
         c.execute(
             "CREATE TABLE IF NOT EXISTS group_filters ("
             "chat_id INTEGER NOT NULL, trigger TEXT NOT NULL, reply TEXT NOT NULL, "
@@ -17213,6 +17274,7 @@ def main():
         (["title", "unvon"], cmd_title),
         (["setwelcome", "setwelc"], cmd_setwelcome),
         (["setrules"], cmd_setrules),
+        (["badmute", "setbadmute"], cmd_badmute),
         (["filter", "filters", "delfilter"], cmd_filter),
         (["report"], cmd_report),
         (["setlog"], cmd_setlog),
@@ -17267,7 +17329,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_settings, pattern=r"^gs:-?\d+:\w+$"))
     app.add_handler(CallbackQueryHandler(cb_admin, pattern=r"^ga:-?\d+:\d+(:\w+)?$"))
     app.add_handler(CallbackQueryHandler(cb_report, pattern=r"^rp:-?\d+:\d+:\d+:(del|mute|ban)$"))
-    app.add_handler(CallbackQueryHandler(cb_badword_undo, pattern=r"^bw:-?\d+:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_mod_undo, pattern=r"^(undo:(mute|ban):\d+|bw:-?\d+:\d+)$"))
     app.add_handler(CallbackQueryHandler(cb_fsub_check, pattern=r"^fsub:check$"))
     app.add_handler(CallbackQueryHandler(cb_inline_game, pattern=r"^ix:(xo|rsp|crash|memory):\d+:(uz|eng|ru|kz)$"))
     app.add_handler(InlineQueryHandler(secret_inline))

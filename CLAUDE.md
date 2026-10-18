@@ -54,8 +54,11 @@
   `announce_new_admin` panel tugmasini chiqaradi. Bot faqat o'zi tayinlagan adminlarni o'zgartira oladi.
 - 🛡 2-bosqich: 🚫 taqiqlangan so'zlar (`group_badwords`, `/addword /delword /words`, settings → So'zlar), 🔒 cheklovlar
   (`locks` bitmaskasi: stiker/GIF/ovozli/dumaloq video/forward). Taqiqlangan so'z ishlatilsa (Empire Security uslubi):
-  xabar o'chadi + a'zo `BADWORD_MUTE` (30 daq) jim qilinadi, `tashkent_dt` bilan muddat ko'rsatiladi va «✅ Bekor qilish»
-  tugmasi (`bw:<chat>:<uid>`, `cb_badword_undo` — faqat admin unmute qiladi) chiqadi. 🌙 tungi rejim (`night_*` ustunlari, `night_worker` har 60 s,
+  xabar o'chadi + a'zo jim qilinadi (muddat guruh bo'yicha sozlanadi: `group_settings.badword_mute`, default 30 daq, `/badmute 1h`),
+  `tashkent_dt` bilan muddat ko'rsatiladi va «✅ Bekor qilish» tugmasi chiqadi.
+  Umumiy «Bekor qilish»: `/mute /tmute /ban /tban` va warn-dan kelib chiqqan jazo xabari tagida ham `undo_kb(chat,act,uid)`
+  (`undo:<mute|ban>:<uid>`, eski `bw:<chat>:<uid>` ham qabul qilinadi) → `cb_mod_undo`; tugmani faqat `admin_can_restrict`
+  (a'zolarni cheklash huquqiga ega admin/owner) bosa oladi, xabar o'chmaydi (auto-delete yo'q). 🌙 tungi rejim (`night_*` ustunlari, `night_worker` har 60 s,
   Toshkent vaqti; `set_chat_permissions` bilan yopadi, oldingi ruxsatlar `night_saved` da), 📣 `/report` va "@admin" (adminlarga
   shaxsiy xabar + 🗑/🔇/🚀 tugmalar `cb_report`), 📋 log kanal (`/setlog @kanal|off`, `mod_log`).
 - 💱 Botlar aro pul almashuvi (`cb_exchange`, `ex:<uid>:...`; owner panel → 💱 Pul almashuvi, `panel:exch*`): hamkor bot bilan

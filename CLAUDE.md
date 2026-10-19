@@ -174,3 +174,10 @@
   formasi/ryukzak/darslik, lab xalati, talaba kostyumi/planshet/yotoqxona...): har farzandga bir marta (`family_children.gear`),
   sotib olinganda kayfiyat +eff, shu davrda kayfiyat har buyum uchun 15% sekin tushadi (maks 60%). Bot: farzand menyusida
   "🎒 Buyumlar" (`kid:...:g:<id>`); web: kartada "🎒 Buyumlar" + Do'kon'da "👶 Farzand buyumlari" (`/app/api/kid` act=gear).
+- 🧒 Farzand 3D personaji (web): kartochka bosilganda `openKidStudio(k)` — to'liq ekranli studiya; `KID3D` (three.js r128 cdnjs'dan
+  kerak bo'lganda yuklanadi) protsedura personaj: proporsiyalar yoshga qarab (bosh/tana/oyoq, `height()` sm), kamera umumiy
+  masshtabda (o'sish ko'rinadi), nafas/ko'z qisish, ko'z yoshi animatsiyasi. Chapda 3 katak (bosh kiyim/ustki/shim-yubka), o'ngda 3
+  (oyoq kiyim/aksessuar/emotsiya) — `KID3D.CAT` katalog (yosh/jins bo'yicha `allowed`, `fit` standartlar; chaqaloq: bodi, taglik,
+  so'rg'ich, emotsiyalar). Aylantirish: barmoq bilan surish + ⟲/⟳ (Old/O'ng yon/Orqa/Chap yon). Kiyimlar `family_children.outfit`
+  (JSON) — `/app/api/kid/outfit` (`web_kid_outfit`, faqat ota-ona, qiymatlar `[a-z0-9_]` bilan tozalanadi). Payloadda `outfit`,
+  `parents` (ota-ona ismlari kartada).

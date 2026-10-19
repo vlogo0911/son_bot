@@ -13892,6 +13892,7 @@ KID_COLUMNS = {
     "meals": "INTEGER NOT NULL DEFAULT 0",        # joriy yoshda yeyilgan ovqatlar (kid_meals_need ga yetganda +1 yosh)
     "last_meal": "INTEGER NOT NULL DEFAULT 0",    # oxirgi ovqat vaqti (12 soat oralig'i)
     "gear": "TEXT NOT NULL DEFAULT ''",           # sotib olingan buyumlar (vergul bilan)
+    "outfit": "TEXT NOT NULL DEFAULT ''",         # 3D personaj kiyimlari (JSON: hat/top/bottom/shoes/acc/emo)
 }
 ALIMONY_PER_CHILD = 75      # $ / kun / farzand — farzand ishga kirguncha
 KID_FIELDS = ("id", "pair_id", "parent1_id", "parent2_id", "gender", "child_name", *KID_COLUMNS)
@@ -16917,6 +16918,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_birja_buy(uid, body.get("asset"), body.get("usd"))
         elif path == "/app/api/birja/sell":
             coro = web_birja_sell(uid, body.get("asset"), body.get("pct"))
+        elif path == "/app/api/kid/outfit":
+            coro = web_kid_outfit(uid, body.get("kid"), body.get("outfit"))
         elif path == "/app/api/edu/enroll":
             coro = web_edu_enroll(uid, body.get("kid"), body.get("inst"))
         elif path in ("/app/api/edu/add", "/app/api/edu/update", "/app/api/edu/toggle"):
@@ -17963,6 +17966,9 @@ async def webapp_payload(user_id):
     # 👶 Farzandlar (boshqaruv uchun: ovqat/o'yinchoq ro'yxati, ta'lim to'lovi)
     _stage_uz = {"baby": "👶 Chaqaloq", "kinder": "🧒 Bog‘cha", "school": "🎒 Maktab",
                  "college": "🏫 Kollej", "uni": "🎓 Universitet", "work": "💼 Ishchi"}
+    def _plain_name(pid):
+        r = db().execute("SELECT first_name, username FROM users WHERE user_id=?", (pid,)).fetchone()
+        return ((r[0] if r and r[0] else None) or (("@" + r[1]) if r and r[1] else None) or str(pid))[:24]
     kid_list = []
     for kid in kids_of(user_id):
         st = kid_stage(kid)
@@ -17981,6 +17987,7 @@ async def webapp_payload(user_id):
             "growth": round(min(1.0, kid["meals"] / kid_meals_need(kid["age"])) * 100), "block": kid_block(kid) or "",
             "meals": kid["meals"], "meals_need": kid_meals_need(kid["age"]),
             "next_meal": int(kid_eat_check(kid, int(time.time())) or 0), "gear": _items("gear"),
+            "outfit": kid_outfit(kid), "parents": [_plain_name(kid["parent1_id"]), _plain_name(kid["parent2_id"])],
             "inst": ({"id": inst["id"], "name": inst["name"], "fee": inst["fee"]} if inst else None),
             "salary": KID_SALARY.get(kid["edu"], 0) if kid["working"] else 0,
             "food": _items("food"), "toy": _items("toy"), "fee": fee_due,
@@ -18648,6 +18655,36 @@ async def web_kid_action(uid, kid_id, act, item):
     return {"error": "act"}
 
 
+KID_OUTFIT_SLOTS = ("hat", "top", "bottom", "shoes", "acc", "emo")
+
+
+def kid_outfit(kid):
+    try:
+        d = json.loads(kid.get("outfit") or "{}")
+        return {k: v for k, v in d.items() if k in KID_OUTFIT_SLOTS and isinstance(v, str)}
+    except (ValueError, TypeError):
+        return {}
+
+
+async def web_kid_outfit(uid, kid_id, outfit):
+    """3D personaj kiyimlarini saqlaydi (faqat ota-ona). Qiymatlar — qisqa kalitlar (klient katalogi)."""
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    try:
+        kid = kid_row(int(kid_id))
+    except (TypeError, ValueError):
+        return {"error": "kid"}
+    if not kid or uid not in (kid["parent1_id"], kid["parent2_id"]):
+        return {"error": "not_parent"}
+    if not isinstance(outfit, dict):
+        return {"error": "outfit"}
+    clean = {k: v for k, v in outfit.items()
+             if k in KID_OUTFIT_SLOTS and isinstance(v, str) and re.fullmatch(r"[a-z0-9_]{1,20}", v)}
+    with db() as c:
+        c.execute("UPDATE family_children SET outfit=? WHERE id=?", (json.dumps(clean), kid["id"]))
+    return {"result": "saved", "outfit": clean}
+
+
 async def web_edu_enroll(uid, kid_id, inst_id):
     """Ota/ona farzandni hozirgi bosqichiga mos muassasaga yozdiradi (to'lov keyin — 🎓 Ta'lim tugmasida)."""
     if not web_enabled_for(uid):
@@ -19132,6 +19169,45 @@ WEBAPP_HTML = r"""<!doctype html>
   .erow .en{flex:1}.erow .ef{width:84px;text-align:right}
   .erow span{width:32px;height:32px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:9px;cursor:pointer;
     background:linear-gradient(180deg,#2a1e0c,#140e07);box-shadow:inset 0 0 0 1px #8a6420}
+  /* ───── 🧒 3D farzand studiyasi ───── */
+  .kst{position:fixed;inset:0;z-index:80;background:rgba(5,4,2,.82);backdrop-filter:blur(6px);display:none;align-items:flex-end;justify-content:center}
+  .kst.show{display:flex;animation:fade .25s ease}
+  .kst-in{position:relative;width:100%;max-width:540px;height:94vh;border-radius:26px 26px 0 0;overflow:hidden;display:flex;flex-direction:column;
+    box-shadow:0 -10px 40px rgba(0,0,0,.6),inset 0 0 0 1.5px rgba(255,214,110,.55);isolation:isolate}
+  .kst-in::before{content:"";position:absolute;inset:0;z-index:-1}
+  .kst-in.st-baby::before{background:radial-gradient(120% 70% at 50% 30%,#ffe0ef 0%,#c9b6ff 50%,#4c3c9a 100%)}
+  .kst-in.st-kinder::before{background:radial-gradient(120% 70% at 50% 30%,#fff3b0 0%,#ffb347 50%,#c2410c 100%)}
+  .kst-in.st-school::before{background:radial-gradient(120% 70% at 50% 30%,#4caf87 0%,#1f5f45 55%,#0b2a1e 100%)}
+  .kst-in.st-college::before{background:radial-gradient(120% 70% at 50% 30%,#4f8be6 0%,#0b3d91 55%,#061a3d 100%)}
+  .kst-in.st-uni::before{background:radial-gradient(120% 70% at 50% 30%,#7b61c9 0%,#2a1d5c 55%,#0d0a20 100%)}
+  .kst-in.st-work::before{background:radial-gradient(120% 70% at 50% 30%,#8a7a4a 0%,#2b2410 55%,#0f0d08 100%)}
+  .kst-hd{display:flex;justify-content:space-between;align-items:flex-start;padding:16px 16px 6px}
+  .kst-name{font-size:24px;font-weight:900;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,.4)}
+  .kst-sub{font-size:12.5px;color:rgba(255,255,255,.9);margin-top:3px;font-weight:700}
+  .kst-x{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;color:#fff;cursor:pointer;background:rgba(0,0,0,.35)}
+  .kst-stage{position:relative;flex:1;min-height:300px}
+  #kstCv{width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+  .kst-col{position:absolute;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:12px}
+  .kst-col.l{left:10px}.kst-col.r{right:10px}
+  .kslot{width:66px;height:66px;border-radius:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;
+    background:rgba(0,0,0,.38);backdrop-filter:blur(4px);box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.35);transition:transform .15s}
+  .kslot .ki{font-size:28px;line-height:1}.kslot .kn{font-size:8.5px;font-weight:800;color:#fff;margin-top:4px;text-align:center;line-height:1.05}
+  .kslot.on{box-shadow:inset 0 0 0 2px #ffd24a,0 0 18px rgba(255,210,74,.7);transform:scale(1.06)}
+  .kst-load{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800}
+  .kst-rot{display:flex;align-items:center;justify-content:center;gap:18px;padding:6px 0 4px;color:#fff}
+  .kst-rot span{width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer;background:rgba(0,0,0,.35);box-shadow:inset 0 0 0 1px rgba(255,255,255,.3)}
+  .kst-rot b{min-width:110px;text-align:center;font-size:13px}
+  .kst-pick{min-height:118px;padding:8px 12px 18px;background:linear-gradient(180deg,rgba(0,0,0,.25),rgba(0,0,0,.55))}
+  .kst-hint{color:rgba(255,255,255,.85);font-size:12.5px;text-align:center;padding:26px 10px}
+  .kst-pt{font-weight:900;font-size:13px;color:#ffe08a;margin:2px 4px 8px}
+  .kst-opts{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+  .kst-opts::-webkit-scrollbar{display:none}
+  .kopt{flex:none;width:76px;padding:8px 4px;border-radius:14px;text-align:center;cursor:pointer;background:rgba(255,255,255,.1);box-shadow:inset 0 0 0 1px rgba(255,255,255,.2)}
+  .kopt span{font-size:26px;display:block}.kopt small{display:block;font-size:10px;font-weight:700;color:#fff;margin-top:4px;line-height:1.1}
+  .kopt.on{background:var(--g-metal);box-shadow:0 0 14px rgba(255,210,74,.6)}.kopt.on small{color:#2b1b02}
+  .kpar{margin-top:8px;font-size:12px;font-weight:700;color:rgba(255,255,255,.92)}
+  .k3d{position:absolute;top:12px;right:12px;z-index:2;font-size:11px;font-weight:900;color:#2b1b02;background:var(--g-metal);padding:4px 9px;border-radius:999px;
+    box-shadow:0 4px 10px rgba(0,0,0,.35);animation:padglow 2s ease-in-out infinite}
   /* ───── pastki tugmalar: kattaroq, nomli, oltin ───── */
   .tabs{gap:4px;padding:8px 8px calc(10px + env(safe-area-inset-bottom));overflow-x:auto;scrollbar-width:none;
     background:linear-gradient(180deg,rgba(28,20,8,.96),rgba(10,7,4,.98));border-top:none;
@@ -19336,10 +19412,11 @@ function render(res){
     const deco=KDECO[st].map((e,i)=>'<i style="--i:'+i+'">'+e+'</i>').join('');
     const instLine=(st in d.edu_default_fee)?(k.inst?'<div class="kinst">🏫 '+esc(k.inst.name)+' · <b>'+fmtMoney(k.inst.fee)+'$</b>/yil</div>'
       :'<div class="kinst dim">🏫 Muassasa tanlanmagan · standart '+fmtMoney(d.edu_default_fee[st])+'$/yil</div>'):'';
-    const card=$('<div class="kidc st-'+st+'"><div class="kdeco">'+deco+'</div>'+
+    const card=$('<div class="kidc st-'+st+'"><div class="kdeco">'+deco+'</div><div class="k3d">🧸 3D</div>'+
       '<div class="ktop"><div class="kava"><span class="kem">'+em+'</span><span class="kacc">'+S[2]+'</span></div>'+
       '<div class="kmeta"><div class="kname">'+esc(k.name)+'</div>'+
-      '<div class="kchips"><span class="kchip">'+esc(k.age)+' yosh</span><span class="kchip st">'+S[3]+' · '+S[4]+'</span></div></div></div>'+
+      '<div class="kchips"><span class="kchip">'+esc(k.age)+' yosh</span><span class="kchip st">'+S[3]+' · '+S[4]+'</span></div>'+
+      ((k.parents||[]).length?'<div class="kpar">👨‍👩‍👧 '+esc(k.parents[0])+' ❤️ '+esc(k.parents[1])+'</div>':'')+'</div></div>'+
       (k.working?'<div class="kwork">💼 Ishlaydi · kuniga <b>'+fmtMoney(k.salary)+'$</b> (ota-onaga teng)</div>':
       '<div class="kgrow"><div class="t"><span>🌱 Keyingi yoshgacha: 🍽 '+k.meals+'/'+k.meals_need+' ovqat</span><b>'+k.growth+'%</b></div><div class="track"><div class="fill" style="width:'+k.growth+'%"></div></div>'+
         '<div class="kmeal'+(k.next_meal?'':' ready')+'">'+(k.next_meal?'⏳ Keyingi ovqat: '+hm(k.next_meal):'🍽 Ovqatlanish vaqti!')+'</div></div>'+
@@ -19349,6 +19426,7 @@ function render(res){
       instLine)+
       '<div class="kbtns"></div></div>');
     const btns=app_q(card,'.kbtns');
+    card.addEventListener('click',e=>{ if(e.target.closest('.kbtn')) return; openKidStudio(k); });
     if(!k.working){
       if((k.food||[]).length){ const fb=$('<div class="kbtn'+(k.next_meal?' wait':'')+'">'+(k.next_meal?'⏳ '+(k.next_meal>=3600?Math.ceil(k.next_meal/3600)+' soat':Math.ceil(k.next_meal/60)+' daq'):'🍔 Ovqat')+'</div>');
         fb.onclick=()=>k.next_meal?toast('⏳ '+esc(k.name)+' yaqinda ovqatlandi. Keyingi ovqat: '+hm(k.next_meal)+' (12 soatda 1 marta)'):sheet('🍔 '+esc(k.name)+' — ovqat',k.food.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
@@ -19564,7 +19642,7 @@ function render(res){
 document.addEventListener('change',e=>{ if(e.target.matches&&e.target.matches('select.sel')&&typeof SND!=='undefined') SND.ui('select'); });
 document.addEventListener('pointerdown',e=>{
   // ✨ ovoz: o'yinlardan tashqaridagi tugmalar (o'yinlarning o'z effektlari bor)
-  const u=e.target.closest('.btn,.mini,.kbtn,.opt,.tab,.seg .s,.gcard,.gback,.card[data-tap],.chip,.ovx');
+  const u=e.target.closest('.btn,.mini,.kbtn,.opt,.tab,.seg .s,.gcard,.gback,.card[data-tap],.chip,.ovx,.kslot,.kopt,.kst-rot span,.kidc');
   if(u && typeof SND!=='undefined' && (!u.closest('#s-crash,#s-frog,#s-kami') || u.classList.contains('gback'))){
     SND.ui(u.classList.contains('tab')?'tab':(u.classList.contains('gcard')||u.hasAttribute('data-tap'))?'card':'sparkle'); }
   const t=e.target.closest('.btn,.mini,.kbtn,.opt,.tab,.pad.active,.seg .s');
@@ -19723,6 +19801,244 @@ const SND=(function(){
     m.classList.toggle('off',!musicOn); s.classList.toggle('off',!sfxOn); s.textContent=sfxOn?'🔊':'🔇'; }); }
   return {music:setMusic, play, ui, toggle, paintBars};
 })();
+
+// ---- 🧒 3D farzand personaji (three.js, kerak bo'lganda yuklanadi) ----
+const KID3D=(function(){
+  const URL3='https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+  let loading=null;
+  function load(){ if(window.THREE) return Promise.resolve(); if(loading) return loading;
+    loading=new Promise((ok,bad)=>{ const s=document.createElement('script'); s.src=URL3; s.onload=ok; s.onerror=()=>{loading=null;bad();}; document.head.appendChild(s); });
+    return loading; }
+  // katalog: slot → variantlar (min/max yosh, g — jins)
+  const CAT={
+    hat:{n:'Bosh kiyim',ic:'🎩',o:[['none','Yo‘q','🚫'],['cap_red','Qizil kepka','🧢'],['cap_blue','Ko‘k kepka','🧢'],['beanie','Telpak','🧶'],['bear','Ayiqcha shapka','🐻',0,6],
+      ['bow','Bant','🎀',0,99,'girl'],['crown','Oltin toj','👑'],['grad','Bitiruv shapkasi','🎓',19],['band','Gulchambar','🌸',0,99,'girl']]},
+    top:{n:'Ustki kiyim',ic:'👕',o:[['onesie','Bodi','🍼',0,2],['tee_red','Qizil futbolka','👕'],['tee_blue','Ko‘k futbolka','👕'],['tee_yellow','Sariq futbolka','👕'],['hoodie','Xudi','🧥',3],
+      ['dress_pink','Pushti ko‘ylak','👗',0,99,'girl'],['dress_purple','Binafsha ko‘ylak','👗',0,99,'girl'],['uniform','Maktab formasi','👔',7],['labcoat','Lab xalati','🥼',16],['suit','Kostyum','🤵',16]]},
+    bottom:{n:'Shim / yubka',ic:'👖',o:[['diaper','Taglik','🧷',0,2],['shorts','Shorti','🩳'],['jeans','Jinsi','👖',3],['pants_dark','Klassik shim','👖',7],['skirt','Yubka','💃',3,99,'girl']]},
+    shoes:{n:'Oyoq kiyim',ic:'👟',o:[['bare','Yalangoyoq','🦶'],['socks','Paypoq','🧦'],['sneakers','Krossovka','👟',2],['boots','Etik','🥾',3],['shoes_black','Tufli','👞',7],['sandals','Sandal','🩴',3]]},
+    acc:{n:'Aksessuar',ic:'🕶',o:[['none','Yo‘q','🚫'],['pacifier','So‘rg‘ich','🍼',0,3],['glasses','Ko‘zoynak','👓',5],['backpack','Ryukzak','🎒',5],['scarf','Sharf','🧣'],['bowtie','Babochka','🎀',3]]},
+    emo:{n:'Emotsiya',ic:'😊',o:[['happy','Xursand','😊'],['laugh','Kulgi','😆'],['love','Sevgi','😍'],['sleepy','Uyquchi','😴'],['surprised','Hayron','😮'],['cry','Yig‘loqi','😢'],['cool','Zo‘r','😎',5]]}
+  };
+  const DEF={hat:'none',top:'tee_blue',bottom:'shorts',shoes:'sneakers',acc:'none',emo:'happy'};
+  function allowed(slot,age,gender){ return CAT[slot].o.filter(o=>{ const mn=o[3]||0, mx=o[4]==null?99:o[4]; return age>=mn && age<=mx && (!o[5]||o[5]===gender); }); }
+  function fit(kid){ // yoshga mos kiyim (saqlangan bo'lsa — o'sha, bo'lmasa standart)
+    const out={}, age=kid.age, g=kid.gender;
+    for(const slot in CAT){ const ok=allowed(slot,age,g).map(o=>o[0]); let v=(kid.outfit||{})[slot];
+      if(!ok.includes(v)){ v= slot==='top'? (age<=2?'onesie':(g==='girl'?'dress_pink':'tee_blue')) : slot==='bottom'? (age<=2?'diaper':(g==='girl'&&age>=3?'skirt':'shorts'))
+        : slot==='shoes'? (age<2?'socks':'sneakers') : slot==='acc'? (age<=1?'pacifier':'none') : DEF[slot]; if(!ok.includes(v)) v=ok[0]; }
+      out[slot]=v; }
+    return out;
+  }
+  const COL={red:0xe53935,blue:0x1e88e5,yellow:0xfdd835,pink:0xf48fb1,purple:0x8e5bd6,white:0xf5f5f5,dark:0x263238,denim:0x3f6fb5,khaki:0xc8a46a,
+    hoodie:0x43a047,skin:0xf2c7a5,hair_b:0x3e2723,hair_g:0x5d4037,gold:0xffc63a,black:0x1a1a1a,navy:0x1a237e,brown:0x8d6e63,green:0x2e7d32};
+  // ---- sahna ----
+  let R,S,CAM,root=null,raf=0,cvs=null,stageCol=0x2a1e0c,blinkT=0,eyes=[],t0=0,targetRot=0,curRot=0,emoState='happy',tears=[];
+  function mat(c,o){ return new THREE.MeshStandardMaterial(Object.assign({color:c,roughness:.55,metalness:0},o||{})); }
+  function sph(r,c,x,y,z,sx,sy,sz,o){ const m=new THREE.Mesh(new THREE.SphereGeometry(r,32,24),mat(c,o)); m.position.set(x,y,z); if(sx) m.scale.set(sx,sy,sz); m.castShadow=true; return m; }
+  function cyl(rt,rb,h,c,x,y,z,o){ const m=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,28),mat(c,o)); m.position.set(x,y,z); m.castShadow=true; return m; }
+  function box(w,h,d,c,x,y,z,o){ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat(c,o)); m.position.set(x,y,z); m.castShadow=true; return m; }
+  function tor(r,tube,arc,c,x,y,z,o){ const m=new THREE.Mesh(new THREE.TorusGeometry(r,tube,12,40,arc||Math.PI*2),mat(c,o)); m.position.set(x,y,z); return m; }
+  function init(canvas){
+    cvs=canvas; R=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true}); R.setPixelRatio(Math.min(2,window.devicePixelRatio||1));
+    R.shadowMap.enabled=true; R.outputEncoding=THREE.sRGBEncoding; R.toneMapping=THREE.ACESFilmicToneMapping; R.toneMappingExposure=1.1;
+    S=new THREE.Scene(); CAM=new THREE.PerspectiveCamera(32,1,0.1,50);
+    S.add(new THREE.HemisphereLight(0xfff4e0,0x3a2a14,0.75));
+    const k=new THREE.DirectionalLight(0xffffff,1.15); k.position.set(2.5,4,3.5); k.castShadow=true; k.shadow.mapSize.set(1024,1024); S.add(k);
+    const rim=new THREE.DirectionalLight(0xffd27a,0.7); rim.position.set(-3,2.5,-3); S.add(rim);
+    const ground=new THREE.Mesh(new THREE.CircleGeometry(1.25,48),new THREE.MeshStandardMaterial({color:0xffffff,transparent:true,opacity:.18}));
+    ground.rotation.x=-Math.PI/2; ground.receiveShadow=true; S.add(ground);
+    const ring=new THREE.Mesh(new THREE.RingGeometry(1.18,1.28,64),new THREE.MeshBasicMaterial({color:0xffd24a,transparent:true,opacity:.55})); ring.rotation.x=-Math.PI/2; ring.position.y=.002; S.add(ring);
+  }
+  function lin(c){ const x=new THREE.Color(c); x.convertSRGBToLinear(); return x; }
+  function build(kid,of){
+    if(root){ S.remove(root); root.traverse(o=>{ if(o.geometry) o.geometry.dispose(); if(o.material) o.material.dispose(); }); }
+    root=new THREE.Group(); eyes=[]; tears=[]; emoState=of.emo;
+    const age=Math.max(0,Math.min(23,kid.age)), t=Math.min(1,age/20), girl=kid.gender==='girl';
+    const legH=.18+.5*t, torsoH=.3+.32*t, torsoR=.2+.05*t, headR=.36-.08*t, armL=.24+.32*t, legR=.075+.025*t;
+    const skin=COL.skin, hairC=girl?COL.hair_g:COL.hair_b;
+    const top=of.top, bot=of.bottom;
+    const topC= top.startsWith('tee_')?COL[top.slice(4)] : top==='hoodie'?COL.hoodie : top==='onesie'?0xffe082 : top.startsWith('dress_')?COL[top.slice(6)]
+      : top==='uniform'?COL.white : top==='labcoat'?COL.white : top==='suit'?COL.navy : COL.blue;
+    const botC= bot==='diaper'?COL.white : bot==='jeans'?COL.denim : bot==='pants_dark'?COL.dark : bot==='skirt'?(girl?COL.purple:COL.navy) : COL.khaki;
+    const dress=top.startsWith('dress_'), onesie=top==='onesie';
+    // ---- oyoqlar ----
+    const hipY=legH+.06, footY=.05;
+    [-1,1].forEach(sx=>{
+      const x=sx*(torsoR*.48);
+      const lower=(bot==='shorts'||bot==='skirt'||bot==='diaper'||dress||onesie)?skin:botC;
+      root.add(cyl(legR,legR*.92,legH,lower,x,footY+legH/2+.02,0));
+      if(bot==='shorts') root.add(cyl(legR*1.25,legR*1.2,legH*.42,botC,x,hipY-legH*.2,0));
+      // poyabzal
+      const sh=of.shoes;
+      if(sh==='bare') root.add(sph(legR*1.1,skin,x,footY,.04,1,.55,1.5));
+      else if(sh==='socks'){ root.add(sph(legR*1.15,0xffffff,x,footY,.04,1,.6,1.5)); root.add(cyl(legR*1.02,legR*1.02,.08,0xffffff,x,footY+.06,0)); }
+      else { const c= sh==='sneakers'?0xf44336: sh==='boots'?COL.brown: sh==='shoes_black'?COL.black: 0xffb74d;
+        root.add(box(legR*2.4,.08+(sh==='boots'?.04:0),legR*3.4,c,x,footY+(sh==='boots'?.02:0),.05));
+        if(sh==='sneakers') root.add(box(legR*2.45,.025,legR*3.45,0xffffff,x,footY-.035,.05));
+        if(sh==='boots') root.add(cyl(legR*1.15,legR*1.15,.16,c,x,footY+.12,0)); }
+    });
+    // ---- tana ----
+    const tY=hipY+torsoH/2;
+    if(bot==='diaper'||onesie){ root.add(sph(torsoR*1.02,onesie?topC:COL.white,0,hipY-.02,0,1,.6,1)); }
+    else if(!dress) root.add(cyl(torsoR*.98,torsoR*.95,.12,botC,0,hipY,0));
+    if(bot==='skirt'&&!dress) root.add(cyl(torsoR*1.0,torsoR*1.6,legH*.42,botC,0,hipY-legH*.15,0));
+    const body=cyl(torsoR,torsoR*1.02,torsoH,topC,0,tY,0); root.add(body);
+    root.add(sph(torsoR,topC,0,tY+torsoH/2,0,1,.45,1));            // yelka
+    if(dress) root.add(cyl(torsoR*1.02,torsoR*1.9,legH*.6,topC,0,hipY-legH*.22,0));
+    if(top==='uniform'){ root.add(box(.07,torsoH*.75,.02,0xc62828,0,tY,torsoR*.98)); root.add(cyl(torsoR*1.01,torsoR*1.03,torsoH*.55,COL.navy,0,tY-torsoH*.18,0)); }
+    if(top==='suit'){ root.add(box(.12,torsoH*.85,.02,0xffffff,0,tY+.02,torsoR*.97)); root.add(box(.05,torsoH*.6,.025,0xc62828,0,tY+.02,torsoR*.99)); }
+    if(top==='labcoat'){ root.add(cyl(torsoR*1.06,torsoR*1.25,torsoH*1.55,0xfafafa,0,tY-torsoH*.3,0,{transparent:true,opacity:.97}));
+      root.add(box(.02,torsoH*1.3,.02,0xb0bec5,0,tY-torsoH*.2,torsoR*1.12)); }
+    if(top==='hoodie'){ root.add(tor(torsoR*.62,.07,Math.PI*2,COL.hoodie,0,tY+torsoH/2+.02,-.08)); root.children[root.children.length-1].rotation.x=Math.PI/2.4;
+      root.add(box(torsoR*.9,.1,.02,0x2e7d32,0,tY-torsoH*.18,torsoR*.99)); }
+    // ---- qo'llar ----
+    [-1,1].forEach(sx=>{
+      const g=new THREE.Group(); g.position.set(sx*(torsoR+.05),tY+torsoH*.38,0); g.rotation.z=sx*.18;
+      const longSleeve=['hoodie','uniform','labcoat','suit','onesie'].includes(top);
+      const upper=cyl(.06+.015*t,.055+.015*t,armL*.5,topC,0,-armL*.25,0); g.add(upper);
+      g.add(cyl(.055+.012*t,.05+.012*t,armL*.5,longSleeve?(top==='labcoat'?0xfafafa:topC):skin,0,-armL*.72,0));
+      g.add(sph(.06+.012*t,skin,0,-armL*1.0,0));
+      root.add(g);
+    });
+    // ---- bosh ----
+    const hY=tY+torsoH/2+headR*.95;
+    root.add(cyl(.06,.07,.1,skin,0,hY-headR*.95,0));
+    const head=sph(headR,skin,0,hY,0); root.add(head);
+    [-1,1].forEach(sx=>root.add(sph(headR*.2,skin,sx*headR*.97,hY,0,.6,1,1)));
+    // soch
+    const hair=new THREE.Mesh(new THREE.SphereGeometry(headR*1.05,32,24,0,Math.PI*2,0,Math.PI*(age<=1?.28:.52)),mat(hairC,{roughness:.8}));
+    hair.position.set(0,hY+headR*.03,-headR*.04); hair.rotation.x=-.25; hair.castShadow=true; root.add(hair);
+    if(girl&&age>=3){ [-1,1].forEach(sx=>root.add(sph(headR*.32,hairC,sx*headR*.95,hY-headR*.15,-headR*.35,.8,1.4,.8))); root.add(sph(headR*.9,hairC,0,hY-headR*.25,-headR*.45,1,1.1,.6)); }
+    if(age<=1) root.add(tor(headR*.12,.018,Math.PI*1.4,hairC,0,hY+headR*1.02,0));
+    // yuz: ko'zlar va og'iz — emotsiya bo'yicha
+    const fz=headR*.92, ey=hY+headR*.12, ex=headR*.36, er=headR*(age<=2?.15:.12);
+    const emo=of.emo;
+    const eyeMat=mat(0x1a1a1a,{roughness:.2});
+    if(emo==='happy'||emo==='surprised'||emo==='cry'||emo==='cool'){
+      [-1,1].forEach(sx=>{ const g=new THREE.Group(); g.position.set(sx*ex,ey,fz);
+        const s=emo==='surprised'?1.3:1; const e=new THREE.Mesh(new THREE.SphereGeometry(er*s,24,18),eyeMat); e.scale.z=.5; g.add(e);
+        const hl=new THREE.Mesh(new THREE.SphereGeometry(er*.35*s,12,10),new THREE.MeshBasicMaterial({color:0xffffff})); hl.position.set(er*.3,er*.35,er*.35); g.add(hl);
+        root.add(g); eyes.push(g); });
+    } else if(emo==='laugh'||emo==='sleepy'){
+      [-1,1].forEach(sx=>{ const a=tor(er*1.05,er*.28,Math.PI,0x1a1a1a,sx*ex,ey-(emo==='sleepy'?er*.4:0),fz); a.rotation.z=emo==='sleepy'?Math.PI:0; root.add(a); });
+    } else if(emo==='love'){
+      [-1,1].forEach(sx=>{ const g=new THREE.Group(); g.position.set(sx*ex,ey,fz+.01); const red=mat(0xe91e63,{roughness:.3,emissive:0x550022});
+        g.add(sph(er*.62,0xe91e63,-er*.42,er*.25,0)); g.add(sph(er*.62,0xe91e63,er*.42,er*.25,0));
+        const c=new THREE.Mesh(new THREE.ConeGeometry(er*1.0,er*1.3,24),red); c.rotation.z=Math.PI; c.position.y=-er*.4; g.add(c); g.scale.z=.5; root.add(g); });
+    }
+    if(emo==='cool'){ [-1,1].forEach(sx=>root.add(box(er*3.2,er*2.0,.02,0x111111,sx*ex,ey,fz+.04,{metalness:.6,roughness:.15}))); root.add(box(ex*.8,.025,.02,0x111111,0,ey+er*.4,fz+.04)); }
+    if(emo==='cry'){ [-1,1].forEach(sx=>{ const d=sph(er*.45,0x64b5f6,sx*ex,ey-er*2.2,fz+.02,.8,1.3,.6,{transparent:true,opacity:.85,roughness:.05}); root.add(d); tears.push(d); }); }
+    // og'iz
+    const my=hY-headR*.32, mz=headR*.93;
+    if(of.acc==='pacifier'){ root.add(cyl(headR*.16,headR*.16,.03,0x81d4fa,0,my,mz+.02)).rotation&&0; const p=root.children[root.children.length-1]; p.rotation.x=Math.PI/2;
+      const r=tor(headR*.09,headR*.025,Math.PI*2,0xffffff,0,my,mz+.05); root.add(r); }
+    else if(emo==='laugh'){ const m=new THREE.Mesh(new THREE.SphereGeometry(headR*.2,24,16,0,Math.PI*2,Math.PI/2,Math.PI/2),mat(0x8e2430)); m.position.set(0,my+headR*.06,mz); m.rotation.x=-.25; root.add(m); }
+    else if(emo==='surprised'){ root.add(tor(headR*.09,headR*.035,Math.PI*2,0x8e2430,0,my,mz)); }
+    else if(emo==='sleepy'){ root.add(box(headR*.18,headR*.03,.02,0x8e2430,0,my,mz)); }
+    else { const sm=tor(headR*.17,headR*.03,Math.PI,0x8e2430,0,my+(emo==='cry'?-headR*.06:headR*.05),mz); sm.rotation.z=emo==='cry'?0:Math.PI; root.add(sm); }
+    // yonoqlar
+    [-1,1].forEach(sx=>root.add(sph(headR*.12,0xff8a80,sx*headR*.55,hY-headR*.18,headR*.8,1,.6,.4,{transparent:true,opacity:.7})));
+    // ---- bosh kiyim ----
+    const tY2=hY+headR*.7, h=of.hat;
+    if(h.startsWith('cap_')){ const c=h==='cap_red'?COL.red:COL.blue;
+      root.add(new THREE.Mesh(new THREE.SphereGeometry(headR*1.07,32,16,0,Math.PI*2,0,Math.PI*.42),mat(c))).position&&0; root.children[root.children.length-1].position.set(0,hY+headR*.05,0);
+      const brim=cyl(headR*.62,headR*.62,.025,c,0,hY+headR*.42,headR*.7); brim.scale.z=.7; root.add(brim); }
+    else if(h==='beanie'){ const b=new THREE.Mesh(new THREE.SphereGeometry(headR*1.08,32,16,0,Math.PI*2,0,Math.PI*.45),mat(0x7e57c2,{roughness:.9})); b.position.y=hY+headR*.02; root.add(b);
+      root.add(cyl(headR*1.06,headR*1.06,headR*.22,0x5e35b1,0,hY+headR*.35,0)); root.add(sph(headR*.2,0xffffff,0,hY+headR*1.12,0,1,1,1,{roughness:1})); }
+    else if(h==='bear'){ const b=new THREE.Mesh(new THREE.SphereGeometry(headR*1.08,32,16,0,Math.PI*2,0,Math.PI*.5),mat(COL.brown,{roughness:.95})); b.position.y=hY; root.add(b);
+      [-1,1].forEach(sx=>{ root.add(sph(headR*.26,COL.brown,sx*headR*.7,hY+headR*.85,0,1,1,.6,{roughness:.95})); root.add(sph(headR*.14,0xd7a98c,sx*headR*.7,hY+headR*.85,headR*.12,1,1,.4)); }); }
+    else if(h==='bow'){ [-1,1].forEach(sx=>{ const c=new THREE.Mesh(new THREE.ConeGeometry(headR*.22,headR*.4,16),mat(0xff4081)); c.rotation.z=sx*Math.PI/2; c.position.set(headR*.45+sx*headR*.2,hY+headR*.9,headR*.1); root.add(c); });
+      root.add(sph(headR*.09,0xf50057,headR*.45,hY+headR*.9,headR*.1)); }
+    else if(h==='band'){ for(let i=0;i<9;i++){ const a=-Math.PI*.9+i*(Math.PI*1.8/8); root.add(sph(headR*.11,[0xff80ab,0xfff176,0xb39ddb][i%3],Math.sin(a)*headR*.98,hY+headR*.62,Math.cos(a)*headR*.5)); } }
+    else if(h==='crown'){ const g=mat(COL.gold,{metalness:1,roughness:.25,emissive:0x3a2a00}); const band=new THREE.Mesh(new THREE.CylinderGeometry(headR*.62,headR*.66,headR*.3,32,1,true),g); band.position.y=tY2+headR*.12; root.add(band);
+      for(let i=0;i<6;i++){ const a=i/6*Math.PI*2; const c=new THREE.Mesh(new THREE.ConeGeometry(headR*.1,headR*.3,12),g); c.position.set(Math.cos(a)*headR*.62,tY2+headR*.42,Math.sin(a)*headR*.62); root.add(c);
+        root.add(sph(headR*.05,[0xff1744,0x2979ff,0x00e676][i%3],Math.cos(a)*headR*.66,tY2+headR*.12,Math.sin(a)*headR*.66,1,1,1,{roughness:.1})); } }
+    else if(h==='grad'){ root.add(cyl(headR*.62,headR*.66,headR*.28,COL.black,0,tY2+headR*.08,0)); root.add(box(headR*1.6,.04,headR*1.6,COL.black,0,tY2+headR*.24,0));
+      root.add(cyl(.008,.008,headR*.6,COL.gold,headR*.65,tY2,headR*.3)); root.add(sph(.03,COL.gold,headR*.65,tY2-headR*.32,headR*.3)); }
+    // ---- aksessuar ----
+    const a=of.acc;
+    if(a==='glasses'){ [-1,1].forEach(sx=>root.add(tor(er*1.7,.012,Math.PI*2,0x212121,sx*ex,ey,fz+.04))); root.add(box(ex*.5,.015,.015,0x212121,0,ey,fz+.04)); }
+    if(a==='backpack'){ root.add(box(torsoR*1.3,torsoH*.8,torsoR*.7,0xff7043,0,tY,-torsoR-torsoR*.3)); [-1,1].forEach(sx=>root.add(box(.03,torsoH*.85,.03,0xbf360c,sx*torsoR*.5,tY,torsoR*.95))); }
+    if(a==='scarf'){ const sc=tor(torsoR*.62,.06,Math.PI*2,0xd32f2f,0,tY+torsoH/2+.03,0); sc.rotation.x=Math.PI/2; root.add(sc); root.add(box(.1,torsoH*.5,.04,0xd32f2f,torsoR*.3,tY+torsoH*.1,torsoR*.95)); }
+    if(a==='bowtie'){ [-1,1].forEach(sx=>{ const c=new THREE.Mesh(new THREE.ConeGeometry(.045,.09,12),mat(0xc62828)); c.rotation.z=sx*Math.PI/2; c.position.set(sx*.04,tY+torsoH/2-.03,torsoR*.98); root.add(c); }); }
+    root.traverse(o=>{ if(o.material&&o.material.color&&!o.material._lin){ o.material.color.convertSRGBToLinear(); o.material._lin=1; } });
+    S.add(root);
+    // kamera: bo'yga moslab
+    // kamera umumiy masshtabda: chaqaloq kichik, katta yoshdagi baland ko'rinadi (yoshga qarab o'sish seziladi)
+    const H=hY+headR*(h==='none'?1.1:1.6), HC=0.42*H+0.58*2.05;
+    CAM.position.set(0,HC*.52,HC*2.3+1.0); CAM.lookAt(0,HC*.46,0);
+    root.rotation.y=curRot;
+  }
+  function frame(now){
+    raf=requestAnimationFrame(frame);
+    if(!root) return;
+    const w=cvs.clientWidth,h=cvs.clientHeight; if(R.domElement.width!==Math.floor(w*R.getPixelRatio())||R.domElement.height!==Math.floor(h*R.getPixelRatio())){ R.setSize(w,h,false); CAM.aspect=w/h; CAM.updateProjectionMatrix(); }
+    curRot+=(targetRot-curRot)*0.12; root.rotation.y=curRot;
+    const t=(now-t0)/1000; root.position.y=Math.sin(t*2)*.012; root.scale.y=1+Math.sin(t*2)*.008;
+    // ko'z qisish
+    if(t>blinkT){ blinkT=t+2.5+Math.random()*2.5; }
+    const b=Math.max(0,1-Math.abs(t-blinkT+.08)*14); eyes.forEach(e=>e.scale.y=1-0.9*b*(emoState==='surprised'?0.3:1));
+    tears.forEach((d,i)=>{ d.position.y-=0.0025; if(d.userData.y0==null) d.userData.y0=d.position.y+.0025; if(d.position.y<d.userData.y0-.12) d.position.y=d.userData.y0; });
+    R.render(S,CAM);
+  }
+  function height(age,g){ const T=[50,75,87,96,103,110,116,122,128,133,138,144,150,156,162,167,170,172,174,175,176];
+    const v=T[Math.min(T.length-1,Math.max(0,age|0))]; return g==='girl'&&age>=12?v-6:v; }
+  return {
+    CAT, allowed, fit, height,
+    async open(canvas,kid,outfit){ await load(); if(!R||cvs!==canvas){ if(R){ R.dispose(); } R=null; init(canvas); }
+      t0=performance.now(); curRot=targetRot=0; build(kid,outfit); cancelAnimationFrame(raf); raf=requestAnimationFrame(frame); },
+    rebuild(kid,outfit){ if(R) build(kid,outfit); },
+    turn(d){ targetRot+=d; }, drag(d){ targetRot+=d; curRot+=d; },
+    view(){ const a=((targetRot%(Math.PI*2))+Math.PI*2)%(Math.PI*2); const i=Math.round(a/(Math.PI/2))%4; return ['Old tomoni','O‘ng yon','Orqa tomoni','Chap yon'][i]; },
+    close(){ cancelAnimationFrame(raf); raf=0; }
+  };
+})();
+
+// ---- 🧒 Farzand 3D studiyasi (kartochka bosilganda) ----
+function openKidStudio(k){
+  let ov=document.getElementById('kst');
+  if(!ov){ ov=document.createElement('div'); ov.id='kst'; ov.className='kst'; document.body.appendChild(ov); }
+  const of=KID3D.fit(k), L=['hat','top','bottom'], Rr=['shoes','acc','emo'];
+  const slotHtml=s=>{ const o=KID3D.CAT[s].o.find(x=>x[0]===of[s])||KID3D.CAT[s].o[0];
+    return '<div class="kslot" data-s="'+s+'"><span class="ki">'+o[2]+'</span><span class="kn">'+KID3D.CAT[s].n+'</span></div>'; };
+  ov.innerHTML='<div class="kst-in st-'+(k.stage_key||'baby')+'">'+
+    '<div class="kst-hd"><div><div class="kst-name">'+esc(k.name)+'</div><div class="kst-sub">'+esc(k.age)+' yosh · 📏 ~'+KID3D.height(k.age,k.gender)+' sm · '+esc(k.stage)+
+      ((k.parents||[]).length?' · 👨‍👩‍👧 '+esc(k.parents[0])+' ❤️ '+esc(k.parents[1]):'')+'</div></div><span class="kst-x" id="kstX">✕</span></div>'+
+    '<div class="kst-stage" id="kstStage"><canvas id="kstCv"></canvas>'+
+      '<div class="kst-col l">'+L.map(slotHtml).join('')+'</div><div class="kst-col r">'+Rr.map(slotHtml).join('')+'</div>'+
+      '<div class="kst-load" id="kstLoad">⏳ 3D personaj yuklanmoqda…</div></div>'+
+    '<div class="kst-rot"><span id="kstL">⟲</span><b id="kstV">Old tomoni</b><span id="kstR">⟳</span></div>'+
+    '<div class="kst-pick" id="kstPick"><div class="kst-hint">👆 Kiyim tanlash uchun chekkadagi kataklarni bosing · personajni barmoq bilan aylantiring</div></div></div>';
+  ov.className='kst show';
+  const cv=document.getElementById('kstCv'), pick=document.getElementById('kstPick'), vlab=document.getElementById('kstV');
+  let saveT=0, cur=null;
+  const close=()=>{ ov.className='kst'; KID3D.close(); };
+  document.getElementById('kstX').onclick=close;
+  ov.onclick=e=>{ if(e.target===ov) close(); };
+  const upd=()=>{ vlab.textContent=KID3D.view(); };
+  document.getElementById('kstL').onclick=()=>{ KID3D.turn(-Math.PI/2); setTimeout(upd,10); };
+  document.getElementById('kstR').onclick=()=>{ KID3D.turn(Math.PI/2); setTimeout(upd,10); };
+  let dragX=null;
+  cv.addEventListener('pointerdown',e=>{ dragX=e.clientX; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove',e=>{ if(dragX==null) return; KID3D.drag((e.clientX-dragX)*0.012); dragX=e.clientX; upd(); });
+  cv.addEventListener('pointerup',()=>{ dragX=null; });
+  function showPick(s){
+    cur=s; ov.querySelectorAll('.kslot').forEach(x=>x.classList.toggle('on',x.dataset.s===s));
+    const opts=KID3D.allowed(s,k.age,k.gender);
+    pick.innerHTML='<div class="kst-pt">'+KID3D.CAT[s].ic+' '+KID3D.CAT[s].n+'</div><div class="kst-opts">'+
+      opts.map(o=>'<div class="kopt'+(of[s]===o[0]?' on':'')+'" data-v="'+o[0]+'"><span>'+o[2]+'</span><small>'+o[1]+'</small></div>').join('')+'</div>';
+    pick.querySelectorAll('.kopt').forEach(el=>el.onclick=()=>{
+      of[s]=el.dataset.v; pick.querySelectorAll('.kopt').forEach(x=>x.classList.toggle('on',x===el));
+      const o=KID3D.CAT[s].o.find(x=>x[0]===of[s]); ov.querySelector('.kslot[data-s="'+s+'"] .ki').textContent=o[2];
+      KID3D.rebuild(k,of); k.outfit=Object.assign({},of);
+      clearTimeout(saveT); saveT=setTimeout(()=>api('/app/api/kid/outfit',{kid:k.id,outfit:of}).then(r=>{ if(!r||r.error) toast(kidErr(r&&r.error)); }),500);
+    });
+  }
+  ov.querySelectorAll('.kslot').forEach(el=>el.onclick=()=>showPick(el.dataset.s));
+  KID3D.open(cv,k,of).then(()=>{ document.getElementById('kstLoad').style.display='none'; })
+    .catch(()=>{ document.getElementById('kstLoad').textContent='⚠️ 3D yuklanmadi. Internetni tekshiring.'; });
+}
 
 // ---- 3D "Royal" samolyot — umumiy chizgich (Crash va Kamikaze) ----
 function planeKit(ctx,dpr){

@@ -139,3 +139,9 @@
   o'yin bo'limlarida "‹ Kazino" (`.gback`). `setTab` crash/frog uchun Kazino tabini yoritadi. Baqa web'da endi "🌊 Hovuz" (backend o'zgarmagan).
   Banner rasmlari repo'dagi `webapp_assets/` (crash.jpg — foydalanuvchi samolyot rasmi, hovuz.jpg — three.js 3D render: tojli qurbaqa),
   `GET /app/a/<nom>` → `_ExchangeHandler._asset`, faqat `WEBAPP_ASSETS` ro'yxatidagi fayllar (1 kun kesh).
+- 🛩 Web Kamikaze (1xGames uslubi, Kazino'da): 12 ustun × 5 qator dengiz, har qadamda keyingi ustundan katak tanlanadi, dushman kemasi
+  shu ustunga bitta o'q uzadi (joylari `web_kami_start` da SystemRandom bilan yashirin, `WEB_KAMI`). Koeffitsiyent `kami_mult` =
+  0.92·(5/4)^qadam (x1.15 → x13.38), yutuq `kami_win` (float yaxlitlash). API `/app/api/kami/{start,step,cashout}`; restartda
+  `web_kami_settle_open` (post_shutdown). Ko'rinish: `kami_enabled_for` — standart faqat ownerlar (test), owner panel → 🌐 Web App →
+  "🛩 Kamikaze: hamma uchun ochish" (`webapp_config.kami`, `panel:webapp_kami`). Payloadda `kami`, `kami_test`. Klient `initKami`
+  (`window.KM`), 3D samolyot `planeKit(ctx,dpr)` — Crash bilan umumiy. Banner `webapp_assets/kamikaze.jpg` (three.js render).

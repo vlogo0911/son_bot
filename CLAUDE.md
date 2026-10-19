@@ -144,4 +144,4 @@
   0.92·(5/4)^qadam (x1.15 → x13.38), yutuq `kami_win` (float yaxlitlash). API `/app/api/kami/{start,step,cashout}`; restartda
   `web_kami_settle_open` (post_shutdown). Ko'rinish: `kami_enabled_for` — standart faqat ownerlar (test), owner panel → 🌐 Web App →
   "🛩 Kamikaze: hamma uchun ochish" (`webapp_config.kami`, `panel:webapp_kami`). Payloadda `kami`, `kami_test`. Klient `initKami`
-  (`window.KM`), 3D samolyot `planeKit(ctx,dpr)` — Crash bilan umumiy. Banner `webapp_assets/kamikaze.jpg` (three.js render).
+  (`window.KM`), 3D samolyot `planeKit(ctx,dpr)` — Crash bilan umumiy. Banner `webapp_assets/kamikaze.jpg` — foydalanuvchi bergan kema rasmi fonida uning biplan rasmi (OpenCV GrabCut bilan kesilgan, tungi rangga moslangan, olov/tutun/iz qo'shilgan) kemaga sho'ng'iyapti.

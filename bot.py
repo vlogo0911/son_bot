@@ -18760,7 +18760,7 @@ WEBAPP_HTML = r"""<!doctype html>
   .knote{text-align:center;color:var(--dim);font-size:13px;margin:10px 0 2px;min-height:18px}
   .knote b{color:var(--gold)}
   .kq{margin-top:10px}
-  .gtest{position:absolute;top:96px;left:50%;transform:translateX(-50%) rotate(-6deg);padding:3px 10px;border-radius:8px;
+  .gtest{position:absolute;top:9px;left:-36px;transform:rotate(-40deg);padding:2px 30px;border-radius:8px;
     background:#ff3b5c;color:#fff;font-weight:900;font-size:11px;letter-spacing:1px;box-shadow:0 4px 10px rgba(0,0,0,.4)}
   .g-kami .gimg{background-position:50% 60%}
   .g-kami::before{background:linear-gradient(180deg,rgba(4,10,30,.85) 0%,rgba(4,10,30,.3) 34%,rgba(0,0,0,0) 55%,rgba(0,0,0,.6) 100%)}

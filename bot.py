@@ -19025,7 +19025,7 @@ function render(res){
       '<div class="gcard g-hovuz" data-go="frog"><div class="gimg" style="background-image:url(/app/a/hovuz.jpg)"></div>'+
         '<div class="gtag">EMPIRE GAMES</div><div class="gtitle">HOVUZ</div>'+
         '<div class="gfoot"><span class="glive"><i></i>x4.08 gacha</span><span class="gplay">▶</span></div></div>'+
-      (d.kami?'<div class="gcard g-kami" data-go="kami"><div class="gimg" style="background-image:url(/app/a/kamikaze.jpg)"></div>'+
+      (d.kami?'<div class="gcard g-kami" data-go="kami"><div class="gimg" style="background-image:url(/app/a/kamikaze.jpg?v=2)"></div>'+
         '<div class="gtag">EMPIRE GAMES</div><div class="gtitle">KAMI<br>KAZE</div>'+(d.kami_test?'<div class="gtest">🧪 TEST</div>':'')+
         '<div class="gfoot"><span class="glive"><i></i>x13 gacha</span><span class="gplay">▶</span></div></div>':'')+
     '</div>'+

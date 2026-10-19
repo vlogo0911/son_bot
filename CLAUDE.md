@@ -134,3 +134,8 @@
 - Crash samolyoti 3D ("Royal" — foydalanuvchi rasmi asosida: qizil korpus, oltin kapot halqasi/konus/chiziq, qora dum va yon panelda oltin toj, oltin ramkali kabina, 3 parrakli pervanel + oltin disk, olovli iz): `P3` mesh (fuselaj halqalari + qanot/dum yuzalari, `n` — bir tomonlama bezaklar), `rot()` krен/pitch/yaw/tilt, perspektiva, flat shading,
   aylanuvchi parrak; `flyRoll` — chayqalish + har 7 s da bochka aylanishi; portlashda aylanib uchib ketadi.
 - Web Baqa: tuzoqlar `_web_frog_traps` (SystemRandom, har o'yinda yangi), `WEB_FROG_EXTRA` (8%) — qatorga yashirin qo'shimcha tuzoq.
+- 🎰 Web app Kazino: pastki qatorda Crash/Baqa o'rniga bitta "Kazino" tab (`CASINO_ICON` — SVG oltin fishka+toj). `#s-casino` lobbisi:
+  ikkita banner (`.gcard`, 1win uslubi: "EMPIRE GAMES" yorlig'i, katta sarlavha, Ken Burns + yaltirash) → `setTab('crash'|'frog')`;
+  o'yin bo'limlarida "‹ Kazino" (`.gback`). `setTab` crash/frog uchun Kazino tabini yoritadi. Baqa web'da endi "🌊 Hovuz" (backend o'zgarmagan).
+  Banner rasmlari repo'dagi `webapp_assets/` (crash.jpg — foydalanuvchi samolyot rasmi, hovuz.jpg — three.js 3D render: tojli qurbaqa),
+  `GET /app/a/<nom>` → `_ExchangeHandler._asset`, faqat `WEBAPP_ASSETS` ro'yxatidagi fayllar (1 kun kesh).

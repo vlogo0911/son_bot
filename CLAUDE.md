@@ -167,3 +167,10 @@
 - Web Farzandlar: har bosqichga alohida karta dizayni (`.kidc.st-baby|kinder|school|college|uni|work`, emoji jins bo'yicha `KS`,
   suzuvchi bezaklar `KDECO`), o'sish progressi, "🏫 Muassasa" tanlash; "🏫 Ta'lim yo'li" — kategoriyalar eng katta farzand yoshi
   yetganda ochiladi (🔒 N yoshdan). Owner tabida "🏫 Ta'lim muassasalari": ochish, nomi/narxini saqlash (💾), yopish/ochish.
+- 🍽 Farzand o'sishi endi OVQAT bo'yicha (vaqt bo'yicha emas): 12 soatda 1 marta ovqat (`KID_MEAL_GAP`, `kid_eat_check`/`kid_eat`,
+  ustunlar `meals`, `last_meal`); `kid_meals_need(age)` = 7 + yosh//3 ta ovqatdan keyin +1 yosh (kid_tick, blok bo'lmasa).
+  Erta ovqat → `too_soon` (bot alert / web `error: too_soon, wait`). Migratsiya: eski `growth` → `meals`.
+- 🎒 Farzand buyumlari (`KID_ITEMS` tur "gear", har davr uchun: beshik/belanchak/aravacha, bog'cha formasi/samokat, maktab
+  formasi/ryukzak/darslik, lab xalati, talaba kostyumi/planshet/yotoqxona...): har farzandga bir marta (`family_children.gear`),
+  sotib olinganda kayfiyat +eff, shu davrda kayfiyat har buyum uchun 15% sekin tushadi (maks 60%). Bot: farzand menyusida
+  "🎒 Buyumlar" (`kid:...:g:<id>`); web: kartada "🎒 Buyumlar" + Do'kon'da "👶 Farzand buyumlari" (`/app/api/kid` act=gear).

@@ -13631,11 +13631,56 @@ KID_ITEMS = {
     "console": ("toy", 10, 22, 300, 100, {"uz": "🎮 O‘yin pristavkasi", "eng": "🎮 Game console", "ru": "🎮 Игровая приставка", "kz": "🎮 Ойын приставкасы"}),
     "phone": ("toy", 13, 22, 450, 100, {"uz": "📱 Smartfon", "eng": "📱 Smartphone", "ru": "📱 Смартфон", "kz": "📱 Смартфон"}),
     "laptop": ("toy", 16, 22, 700, 100, {"uz": "💻 Noutbuk", "eng": "💻 Laptop", "ru": "💻 Ноутбук", "kz": "💻 Ноутбук"}),
+    # 🎒 Buyumlar (gear): har davr uchun, har farzandga bir marta — kayfiyat +eff va shu davrda kayfiyat sekinroq tushadi
+    "cradle": ("gear", 0, 2, 120, 30, {"uz": "🛏 Beshik", "eng": "🛏 Cradle", "ru": "🛏 Колыбель", "kz": "🛏 Бесік"}),
+    "swing": ("gear", 0, 2, 90, 25, {"uz": "🎠 Belanchak", "eng": "🎠 Baby swing", "ru": "🎠 Качели", "kz": "🎠 Әткеншек"}),
+    "stroller": ("gear", 0, 2, 200, 30, {"uz": "🚼 Aravacha", "eng": "🚼 Stroller", "ru": "🚼 Коляска", "kz": "🚼 Арба"}),
+    "pacifier": ("gear", 0, 2, 25, 15, {"uz": "🍼 So‘rg‘ich va idishlar", "eng": "🍼 Pacifier & bottles", "ru": "🍼 Соска и бутылочки", "kz": "🍼 Емізік пен бөтелке"}),
+    "k_uniform": ("gear", 3, 6, 80, 25, {"uz": "🧥 Bog‘cha formasi", "eng": "🧥 Kindergarten uniform", "ru": "🧥 Форма для садика", "kz": "🧥 Балабақша формасы"}),
+    "crayons": ("gear", 3, 6, 40, 20, {"uz": "🖍️ Rangli qalamlar", "eng": "🖍️ Crayons", "ru": "🖍️ Карандаши", "kz": "🖍️ Түрлі түсті қарындаш"}),
+    "scooter": ("gear", 3, 6, 150, 30, {"uz": "🛴 Samokat", "eng": "🛴 Scooter", "ru": "🛴 Самокат", "kz": "🛴 Самокат"}),
+    "s_uniform": ("gear", 7, 15, 150, 25, {"uz": "👔 Maktab formasi", "eng": "👔 School uniform", "ru": "👔 Школьная форма", "kz": "👔 Мектеп формасы"}),
+    "backpack": ("gear", 7, 15, 90, 25, {"uz": "🎒 Ryukzak", "eng": "🎒 Backpack", "ru": "🎒 Рюкзак", "kz": "🎒 Рюкзак"}),
+    "books": ("gear", 7, 15, 120, 20, {"uz": "📚 Darsliklar to‘plami", "eng": "📚 Textbook set", "ru": "📚 Комплект учебников", "kz": "📚 Оқулықтар жинағы"}),
+    "stationery": ("gear", 7, 15, 40, 15, {"uz": "✏️ Kanselyariya", "eng": "✏️ Stationery", "ru": "✏️ Канцелярия", "kz": "✏️ Кеңсе тауарлары"}),
+    "labcoat": ("gear", 16, 18, 180, 25, {"uz": "🥼 Laboratoriya xalati", "eng": "🥼 Lab coat", "ru": "🥼 Лабораторный халат", "kz": "🥼 Зертхана халаты"}),
+    "calculator": ("gear", 16, 18, 60, 15, {"uz": "🧮 Muhandislik kalkulyatori", "eng": "🧮 Scientific calculator", "ru": "🧮 Инженерный калькулятор", "kz": "🧮 Инженерлік калькулятор"}),
+    "headphones": ("gear", 16, 22, 120, 25, {"uz": "🎧 Quloqchin", "eng": "🎧 Headphones", "ru": "🎧 Наушники", "kz": "🎧 Құлаққап"}),
+    "suit": ("gear", 19, 22, 300, 30, {"uz": "🤵 Talaba kostyumi", "eng": "🤵 Student suit", "ru": "🤵 Студенческий костюм", "kz": "🤵 Студент костюмі"}),
+    "tablet": ("gear", 19, 22, 400, 30, {"uz": "📱 Planshet", "eng": "📱 Tablet", "ru": "📱 Планшет", "kz": "📱 Планшет"}),
+    "dorm": ("gear", 19, 22, 500, 35, {"uz": "🏠 Yotoqxona jihozlari", "eng": "🏠 Dorm essentials", "ru": "🏠 Вещи для общежития", "kz": "🏠 Жатақхана заттары"}),
 }
+KID_MEAL_GAP = 12 * 3600    # farzand 12 soatda 1 marta ovqatlanadi
+
+
+def kid_meals_need(age):
+    """Bir yosh o'sish uchun kerakli ovqatlar: 0–2 yosh — 7 ta, har 3 yoshda +1 (haqiqiy odamdek yil uzayib boradi)."""
+    return 7 + max(0, age) // 3
+
+
+def kid_gear(kid):
+    return set(filter(None, (kid.get("gear") or "").split(",")))
+
+
+def kid_gear_now(kid):
+    """Joriy yoshga mos, sotib olingan buyumlar soni."""
+    owned = kid_gear(kid)
+    return sum(1 for k, v in KID_ITEMS.items() if v[0] == "gear" and k in owned and v[1] <= kid["age"] <= v[2])
+
+
+def kid_eat_check(kid, now):
+    """Ovqatlanish mumkinmi: None yoki keyingi ovqatgacha qolgan soniya."""
+    wait = KID_MEAL_GAP - (now - (kid.get("last_meal") or 0))
+    return wait if wait > 0 else None
+
+
+def kid_eat(kid, now):
+    kid["last_meal"] = now
+    kid["meals"] = (kid.get("meals") or 0) + 1
 
 KID_TEXT = {
     "uz": {
-        "list": "👶 <b>FARZANDLARIM</b>\n\nFarzandni tanlang 👇",
+        "list": "👶 <b>FARZANDLARIM</b>\n\n🍽 Farzand 12 soatda 1 marta ovqatlanadi; yetarli ovqatdan keyin 1 yosh o‘sadi (0–2 yosh — 7 ta, katta bo‘lgan sari ko‘proq).\n\nFarzandni tanlang 👇",
         "none": "👶 Sizda hali farzand yo‘q. /oila bo‘limidan farzand ko‘rishingiz mumkin.",
         "head": "{icon} <b>{name}</b> · {gender}\n🎂 Yoshi: <b>{age}</b> · {stage}",
         "needs": "🍽 To‘qlik: {hbar} {h}%\n😊 Kayfiyat: {jbar} {j}%\n📈 Keyingi yoshgacha: {left}",
@@ -13655,6 +13700,10 @@ KID_TEXT = {
         "toy_menu": "🧸 <b>{name} uchun o‘yinchoq</b>\n\n😊 Kayfiyat: {j}%\n💵 Hamyon: {wallet}$\n\nTanlang 👇",
         "food_line": "+{eff} to‘qlik", "toy_line": "+{eff} kayfiyat",
         "bought": "✅ {item} olindi (−{price}$)",
+        "too_soon": "⏳ {name} yaqinda ovqatlandi. Keyingi ovqat: <b>{left}</b> dan keyin (12 soatda 1 marta).",
+        "meal_prog": "{m}/{n} ovqat · keyingi ovqat: {next}", "now": "hozir ✅",
+        "b_gear": "🎒 Buyumlar", "gear_menu": "🎒 <b>{name} uchun buyumlar</b>\n\nHar biri bir marta olinadi: kayfiyatni ko‘taradi va shu davrda kayfiyat sekinroq tushadi.\n💵 Hamyon: {wallet}$\n\nTanlang 👇",
+        "gear_line": "+{eff} kayfiyat", "owned": "✅ bor", "gear_owned": "✅ {name}da bu buyum allaqachon bor.",
         "full_food": "😋 {name} to‘q — hozir ovqat kerak emas.",
         "full_toy": "😊 {name} juda xursand — hozir o‘yinchoq kerak emas.",
         "fee_ok": "✅ {place} to‘lovi to‘landi (−{fee}$)",
@@ -13679,7 +13728,7 @@ KID_TEXT = {
         "age_unit": "yosh",
     },
     "eng": {
-        "list": "👶 <b>MY CHILDREN</b>\n\nChoose a child 👇",
+        "list": "👶 <b>MY CHILDREN</b>\n\n🍽 A child eats once every 12 hours and grows a year after enough meals (7 at age 0–2, more as they grow).\n\nChoose a child 👇",
         "none": "👶 You have no children yet. You can have one in the /family section.",
         "head": "{icon} <b>{name}</b> · {gender}\n🎂 Age: <b>{age}</b> · {stage}",
         "needs": "🍽 Fullness: {hbar} {h}%\n😊 Mood: {jbar} {j}%\n📈 Until next birthday: {left}",
@@ -13699,6 +13748,10 @@ KID_TEXT = {
         "toy_menu": "🧸 <b>A toy for {name}</b>\n\n😊 Mood: {j}%\n💵 Wallet: {wallet}$\n\nChoose 👇",
         "food_line": "+{eff} fullness", "toy_line": "+{eff} mood",
         "bought": "✅ Bought {item} (−{price}$)",
+        "too_soon": "⏳ {name} ate recently. Next meal in <b>{left}</b> (once every 12 hours).",
+        "meal_prog": "{m}/{n} meals · next meal: {next}", "now": "now ✅",
+        "b_gear": "🎒 Gear", "gear_menu": "🎒 <b>Gear for {name}</b>\n\nEach is bought once: lifts mood and mood drops slower during this stage.\n💵 Wallet: {wallet}$\n\nChoose 👇",
+        "gear_line": "+{eff} mood", "owned": "✅ owned", "gear_owned": "✅ {name} already has this item.",
         "full_food": "😋 {name} is full — no food needed now.",
         "full_toy": "😊 {name} is very happy — no toy needed now.",
         "fee_ok": "✅ {place} fee paid (−{fee}$)",
@@ -13743,6 +13796,10 @@ KID_TEXT = {
         "toy_menu": "🧸 <b>Игрушка для: {name}</b>\n\n😊 Настроение: {j}%\n💵 Кошелёк: {wallet}$\n\nВыберите 👇",
         "food_line": "+{eff} сытость", "toy_line": "+{eff} настроение",
         "bought": "✅ Куплено: {item} (−{price}$)",
+        "too_soon": "⏳ {name} недавно поел(а). Следующий приём пищи через <b>{left}</b> (раз в 12 часов).",
+        "meal_prog": "{m}/{n} приёмов пищи · следующий: {next}", "now": "сейчас ✅",
+        "b_gear": "🎒 Вещи", "gear_menu": "🎒 <b>Вещи для: {name}</b>\n\nКаждая покупается один раз: поднимает настроение, и в этот период оно падает медленнее.\n💵 Кошелёк: {wallet}$\n\nВыберите 👇",
+        "gear_line": "+{eff} настроение", "owned": "✅ есть", "gear_owned": "✅ У ребёнка {name} это уже есть.",
         "full_food": "😋 {name} сыт(а) — еда сейчас не нужна.",
         "full_toy": "😊 {name} очень доволен(льна) — игрушка сейчас не нужна.",
         "fee_ok": "✅ Оплачено: {place} (−{fee}$)",
@@ -13787,6 +13844,10 @@ KID_TEXT = {
         "toy_menu": "🧸 <b>{name} үшін ойыншық</b>\n\n😊 Көңіл-күй: {j}%\n💵 Әмиян: {wallet}$\n\nТаңдаңыз 👇",
         "food_line": "+{eff} тоқтық", "toy_line": "+{eff} көңіл-күй",
         "bought": "✅ {item} алынды (−{price}$)",
+        "too_soon": "⏳ {name} жақында тамақтанды. Келесі тамақ: <b>{left}</b> кейін (12 сағатта 1 рет).",
+        "meal_prog": "{m}/{n} тамақ · келесі: {next}", "now": "қазір ✅",
+        "b_gear": "🎒 Заттар", "gear_menu": "🎒 <b>{name} үшін заттар</b>\n\nӘрқайсысы бір рет алынады: көңіл-күйді көтереді, осы кезеңде көңіл-күй баяу түседі.\n💵 Әмиян: {wallet}$\n\nТаңдаңыз 👇",
+        "gear_line": "+{eff} көңіл-күй", "owned": "✅ бар", "gear_owned": "✅ {name} бұл затқа ие.",
         "full_food": "😋 {name} тоқ — қазір тамақ керек емес.",
         "full_toy": "😊 {name} өте бақытты — қазір ойыншық керек емес.",
         "fee_ok": "✅ {place} төлемі төленді (−{fee}$)",
@@ -13828,6 +13889,9 @@ KID_COLUMNS = {
     "alimony_payer": "INTEGER NOT NULL DEFAULT 0",  # kuniga aliment to'laydigan ota/ona
     "last_alimony": "INTEGER NOT NULL DEFAULT 0",
     "inst_id": "INTEGER NOT NULL DEFAULT 0",      # yozilgan ta'lim muassasasi (edu_institutions.id)
+    "meals": "INTEGER NOT NULL DEFAULT 0",        # joriy yoshda yeyilgan ovqatlar (kid_meals_need ga yetganda +1 yosh)
+    "last_meal": "INTEGER NOT NULL DEFAULT 0",    # oxirgi ovqat vaqti (12 soat oralig'i)
+    "gear": "TEXT NOT NULL DEFAULT ''",           # sotib olingan buyumlar (vergul bilan)
 }
 ALIMONY_PER_CHILD = 75      # $ / kun / farzand — farzand ishga kirguncha
 KID_FIELDS = ("id", "pair_id", "parent1_id", "parent2_id", "gender", "child_name", *KID_COLUMNS)
@@ -13855,6 +13919,9 @@ def init_kids():
         for col, decl in KID_COLUMNS.items():
             if col not in have:
                 c.execute(f"ALTER TABLE family_children ADD COLUMN {col} {decl}")
+        if "meals" not in have:
+            # eski vaqt bo'yicha o'sish → ovqatlar soniga (o'sish jarayoni yo'qolmasin)
+            c.execute("UPDATE family_children SET meals=CAST(growth * 7 / 86400 AS INTEGER) WHERE growth > 0")
         if "custody_id" not in req_cols:
             c.execute("ALTER TABLE pair_requests ADD COLUMN custody_id INTEGER")
     init_edu()   # ta'lim muassasalari jadvali farzandlar bilan birga
@@ -13979,7 +14046,7 @@ def kid_tick(kid, now):
         return events
 
     kid["hunger"] = max(0.0, kid["hunger"] - KID_HUNGER_RATE * dt / 3600)
-    kid["happy"] = max(0.0, kid["happy"] - KID_HAPPY_RATE * dt / 3600)
+    kid["happy"] = max(0.0, kid["happy"] - KID_HAPPY_RATE * (1 - min(0.6, 0.15 * kid_gear_now(kid))) * dt / 3600)
     if kid["hunger"] <= 0 and not kid["alerts"] & KID_ALERT_HUNGRY:
         kid["alerts"] |= KID_ALERT_HUNGRY
         events.append(("n_hungry", {}))
@@ -13998,8 +14065,9 @@ def kid_tick(kid, now):
     if block:
         return events
 
-    kid["growth"] += dt
-    if kid["growth"] >= KID_YEAR:
+    # O'sish endi vaqt bo'yicha emas — ovqat bo'yicha: kid_meals_need(age) ta ovqatdan keyin +1 yosh
+    if kid["meals"] >= kid_meals_need(kid["age"]):
+        kid["meals"] = 0
         kid["growth"] = 0.0
         before = kid_stage(kid)
         kid["age"] += 1
@@ -14144,9 +14212,11 @@ def kid_view(uid, kid):
         ))
     else:
         h, j = round(kid["hunger"]), round(kid["happy"])
+        wait = kid_eat_check(kid, int(time.time()))
         lines.append(kid_t(
             uid, "needs", hbar=bar(h, 8), h=h, jbar=bar(j, 8), j=j,
-            left=kid_hours(uid, KID_YEAR - kid["growth"]),
+            left=kid_t(uid, "meal_prog", m=kid["meals"], n=kid_meals_need(kid["age"]),
+                       next=kid_hours(uid, wait) if wait else kid_t(uid, "now")),
         ))
         block = kid_block(kid)
         if block == "fee":
@@ -14166,6 +14236,7 @@ def kid_view(uid, kid):
         rows.append([
             kid_btn(uid, kid_t(uid, "b_food"), "f", kid["id"]),
             kid_btn(uid, kid_t(uid, "b_toy"), "t", kid["id"]),
+            kid_btn(uid, kid_t(uid, "b_gear"), "g", kid["id"]),
         ])
         if stage in KID_FEES and kid["fee_age"] < kid["age"] and block != "decide":
             rows.append([kid_btn(
@@ -14178,14 +14249,16 @@ def kid_view(uid, kid):
 def kid_items_view(uid, kid, kind):
     lang = kid_lang(uid)
     rows = []
+    owned = kid_gear(kid)
     for key, (k, lo, hi, price, eff, names) in KID_ITEMS.items():
         if k != kind or not lo <= kid["age"] <= hi:
             continue
-        effect = kid_t(uid, "food_line" if kind == "food" else "toy_line", eff=eff)
-        rows.append([kid_btn(uid, f"{names.get(lang, names['uz'])} — {price}$ · {effect}", "b", kid["id"], key)])
+        effect = kid_t(uid, {"food": "food_line", "toy": "toy_line", "gear": "gear_line"}[kind], eff=eff)
+        tail = kid_t(uid, "owned") if kind == "gear" and key in owned else f"{price}$ · {effect}"
+        rows.append([kid_btn(uid, f"{names.get(lang, names['uz'])} — {tail}", "b", kid["id"], key)])
     rows.append([kid_btn(uid, kid_t(uid, "b_kid", name=kid["child_name"]), "v", kid["id"])])
     text = kid_t(
-        uid, "food_menu" if kind == "food" else "toy_menu", name=escape(kid["child_name"]),
+        uid, {"food": "food_menu", "toy": "toy_menu", "gear": "gear_menu"}[kind], name=escape(kid["child_name"]),
         h=round(kid["hunger"]), j=round(kid["happy"]), wallet=fmt_money(wallet_balance(uid)),
     )
     return text, InlineKeyboardMarkup(rows)
@@ -14241,9 +14314,9 @@ async def cb_kid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show(kid_view(uid, kid))
         return
 
-    if action in ("f", "t"):
+    if action in ("f", "t", "g"):
         await q.answer()
-        await show(kid_items_view(uid, kid, "food" if action == "f" else "toy"))
+        await show(kid_items_view(uid, kid, {"f": "food", "t": "toy", "g": "gear"}[action]))
         return
 
     c = db()
@@ -14254,9 +14327,22 @@ async def cb_kid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         kind, _, _, price, eff, names = item
         stat = "hunger" if kind == "food" else "happy"
-        if kid[stat] >= 100:
+        now = int(time.time())
+        if kind == "gear":
+            if parts[4] in kid_gear(kid):
+                await q.answer(kid_t(uid, "gear_owned", name=kid["child_name"]), show_alert=True)
+                return
+            kid["gear"] = ",".join(sorted(kid_gear(kid) | {parts[4]}))
+        elif kind == "food":
+            wait = kid_eat_check(kid, now)
+            if wait:
+                await q.answer(re.sub(r"<[^>]+>", "", kid_t(uid, "too_soon", name=kid["child_name"], left=kid_hours(uid, wait))), show_alert=True)
+                return
+        if kind != "gear" and kid[stat] >= 100:
             await q.answer(kid_t(uid, "full_food" if kind == "food" else "full_toy", name=kid["child_name"]), show_alert=True)
             return
+        if kind == "food":
+            kid_eat(kid, now)
         kid[stat] = min(100.0, kid[stat] + eff)
         kid["alerts"] &= ~(KID_ALERT_HUNGRY if kind == "food" else KID_ALERT_SAD)
         with c:
@@ -17880,8 +17966,9 @@ async def webapp_payload(user_id):
     kid_list = []
     for kid in kids_of(user_id):
         st = kid_stage(kid)
+        owned = kid_gear(kid)
         def _items(kind):
-            return [{"key": k, "name": v[5].get("uz", k), "price": v[3]}
+            return [{"key": k, "name": v[5].get("uz", k), "price": v[3], "eff": v[4], "owned": k in owned}
                     for k, v in KID_ITEMS.items() if v[0] == kind and v[1] <= kid["age"] <= v[2]]
         fee_due = 0
         if not kid["working"] and st in KID_FEES and kid["fee_age"] < kid["age"]:
@@ -17891,7 +17978,9 @@ async def webapp_payload(user_id):
             "id": kid["id"], "name": kid["child_name"] or "—", "age": kid["age"],
             "stage": _stage_uz.get(st, st), "stage_key": st, "gender": kid["gender"], "working": bool(kid["working"]),
             "hunger": round(kid["hunger"]), "happy": round(kid["happy"]),
-            "growth": round(min(1.0, kid["growth"] / KID_YEAR) * 100), "block": kid_block(kid) or "",
+            "growth": round(min(1.0, kid["meals"] / kid_meals_need(kid["age"])) * 100), "block": kid_block(kid) or "",
+            "meals": kid["meals"], "meals_need": kid_meals_need(kid["age"]),
+            "next_meal": int(kid_eat_check(kid, int(time.time())) or 0), "gear": _items("gear"),
             "inst": ({"id": inst["id"], "name": inst["name"], "fee": inst["fee"]} if inst else None),
             "salary": KID_SALARY.get(kid["edu"], 0) if kid["working"] else 0,
             "food": _items("food"), "toy": _items("toy"), "fee": fee_due,
@@ -18515,22 +18604,35 @@ async def web_kid_action(uid, kid_id, act, item):
     if kid["working"]:
         return {"error": "working"}
     c = db()
-    if act in ("feed", "toy"):
+    if act in ("feed", "toy", "gear"):
         it = KID_ITEMS.get(item)
-        kind = "food" if act == "feed" else "toy"
+        kind = {"feed": "food", "toy": "toy", "gear": "gear"}[act]
         if not it or it[0] != kind or not it[1] <= kid["age"] <= it[2]:
             return {"error": "item"}
         price, eff = it[3], it[4]
         stat = "hunger" if kind == "food" else "happy"
-        if kid[stat] >= 100:
-            return {"error": "full"}
+        now = int(time.time())
+        if kind == "gear":
+            if item in kid_gear(kid):
+                return {"error": "owned"}
+            kid["gear"] = ",".join(sorted(kid_gear(kid) | {item}))
+        else:
+            if kind == "food":
+                wait = kid_eat_check(kid, now)
+                if wait:
+                    return {"error": "too_soon", "wait": int(wait)}
+            if kid[stat] >= 100:
+                return {"error": "full"}
+            if kind == "food":
+                kid_eat(kid, now)
         kid[stat] = min(100.0, kid[stat] + eff)
         kid["alerts"] &= ~(KID_ALERT_HUNGRY if kind == "food" else KID_ALERT_SAD)
         with c:
             if not _wallet_take(c, uid, price):
                 return {"error": "funds", "balance": wallet_balance(uid)}
             kid_save(c, kid)
-        return {"result": "ok", "stat": stat, "value": round(kid[stat]), "balance": wallet_balance(uid)}
+        return {"result": "ok", "stat": stat, "value": round(kid[stat]), "balance": wallet_balance(uid),
+                "meals": kid["meals"], "need": kid_meals_need(kid["age"]), "age": kid["age"]}
     if act == "fee":
         stage = kid_stage(kid)
         if stage not in KID_FEES or kid["fee_age"] >= kid["age"]:
@@ -19008,6 +19110,12 @@ WEBAPP_HTML = r"""<!doctype html>
   .kwork{margin-top:12px;font-size:13px;color:#ffe9a8;background:rgba(0,0,0,.3);padding:8px 10px;border-radius:12px}
   .kidc .kbtns{flex-wrap:wrap}
   .kidc .kbtn{background:rgba(0,0,0,.32);border-color:rgba(255,255,255,.28);color:#fff;flex:1 1 30%}
+  .kmeal{margin-top:6px;font-size:11.5px;font-weight:800;color:rgba(255,255,255,.85)}
+  .kmeal.ready{color:#fff;display:inline-block;background:rgba(70,220,120,.35);padding:3px 9px;border-radius:999px;animation:padglow 1.6s ease-in-out infinite}
+  .kidc .kbtn.wait{opacity:.7}
+  .kgshop{margin-top:12px}.kgh{display:flex;justify-content:space-between;align-items:center;margin:0 4px 8px;font-size:14px}
+  .kgh span{color:var(--dim);font-size:12px}
+  .card.kown{opacity:.6}
   .kidc .kbtn.kfee{background:var(--g-metal);color:#2b1b02;border-color:#ffe08a;font-weight:900}
   /* 🏫 Ta'lim yo'li */
   .edupath{margin-top:20px}
@@ -19233,7 +19341,8 @@ function render(res){
       '<div class="kmeta"><div class="kname">'+esc(k.name)+'</div>'+
       '<div class="kchips"><span class="kchip">'+esc(k.age)+' yosh</span><span class="kchip st">'+S[3]+' · '+S[4]+'</span></div></div></div>'+
       (k.working?'<div class="kwork">💼 Ishlaydi · kuniga <b>'+fmtMoney(k.salary)+'$</b> (ota-onaga teng)</div>':
-      '<div class="kgrow"><div class="t"><span>🌱 Keyingi yoshgacha</span><b>'+k.growth+'%</b></div><div class="track"><div class="fill" style="width:'+k.growth+'%"></div></div></div>'+
+      '<div class="kgrow"><div class="t"><span>🌱 Keyingi yoshgacha: 🍽 '+k.meals+'/'+k.meals_need+' ovqat</span><b>'+k.growth+'%</b></div><div class="track"><div class="fill" style="width:'+k.growth+'%"></div></div>'+
+        '<div class="kmeal'+(k.next_meal?'':' ready')+'">'+(k.next_meal?'⏳ Keyingi ovqat: '+hm(k.next_meal):'🍽 Ovqatlanish vaqti!')+'</div></div>'+
       (k.block?'<div class="kblock">'+BLOCKMSG[k.block]+'</div>':'')+
       '<div class="bars"><div class="bar"><div class="t">🍔 To‘qlik '+k.hunger+'%</div><div class="track"><div class="fill" style="width:'+k.hunger+'%;background:'+hc+'"></div></div></div>'+
       '<div class="bar"><div class="t">😊 Kayfiyat '+k.happy+'%</div><div class="track"><div class="fill" style="width:'+k.happy+'%;background:'+pc+'"></div></div></div></div>'+
@@ -19241,14 +19350,15 @@ function render(res){
       '<div class="kbtns"></div></div>');
     const btns=app_q(card,'.kbtns');
     if(!k.working){
-      if((k.food||[]).length){ const fb=$('<div class="kbtn">🍔 Ovqat</div>');
-        fb.onclick=()=>sheet('🍔 '+esc(k.name)+' — ovqat',k.food.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
-          (item)=>api('/app/api/kid',{kid:k.id,act:'feed',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('✅ To‘qlik '+r.value+'%'); refresh(); } else toast(kidErr(r.error)); }));
+      if((k.food||[]).length){ const fb=$('<div class="kbtn'+(k.next_meal?' wait':'')+'">'+(k.next_meal?'⏳ '+(k.next_meal>=3600?Math.ceil(k.next_meal/3600)+' soat':Math.ceil(k.next_meal/60)+' daq'):'🍔 Ovqat')+'</div>');
+        fb.onclick=()=>k.next_meal?toast('⏳ '+esc(k.name)+' yaqinda ovqatlandi. Keyingi ovqat: '+hm(k.next_meal)+' (12 soatda 1 marta)'):sheet('🍔 '+esc(k.name)+' — ovqat',k.food.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
+          (item)=>api('/app/api/kid',{kid:k.id,act:'feed',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('✅ To‘qlik '+r.value+'% · 🍽 '+r.meals+'/'+r.need); refresh(); } else toast(kidErr(r.error,r.wait)); }));
         btns.appendChild(fb); }
       if((k.toy||[]).length){ const tb=$('<div class="kbtn">🧸 O‘yinchoq</div>');
         tb.onclick=()=>sheet('🧸 '+esc(k.name)+' — o‘yinchoq',k.toy.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
           (item)=>api('/app/api/kid',{kid:k.id,act:'toy',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('✅ Kayfiyat '+r.value+'%'); refresh(); } else toast(kidErr(r.error)); }));
         btns.appendChild(tb); }
+      if((k.gear||[]).length){ const gb=$('<div class="kbtn">🎒 Buyumlar</div>'); gb.onclick=()=>gearSheet(k); btns.appendChild(gb); }
       const insts=(d.edu||[]).filter(x=>x.kind===st);
       if(insts.length){ const ib=$('<div class="kbtn">🏫 Muassasa</div>');
         ib.onclick=()=>sheet('🏫 '+esc(k.name)+' uchun '+S[3].toLowerCase(),insts.map(x=>({label:(k.inst&&k.inst.id===x.id?'✅ ':'')+esc(x.name)+' · '+fmtMoney(x.fee)+'$/yil',value:x.id})),
@@ -19305,6 +19415,24 @@ function render(res){
     gifts.appendChild(el);
   });
   sh.appendChild(gifts);
+  // 👶 Farzand buyumlari — har davr uchun
+  const gk=(d.kids_list||[]).filter(k=>!k.working && (k.gear||[]).length);
+  if(gk.length){
+    sh.appendChild($('<h2 style="margin-top:20px">👶 Farzand buyumlari</h2>'));
+    gk.forEach(k=>{
+      const box=$('<div class="kgshop"><div class="kgh"><b>'+esc(k.name)+'</b><span>'+esc(k.age)+' yosh · '+esc(k.stage)+'</span></div><div class="grid"></div></div>');
+      k.gear.forEach(it=>{
+        const ic=it.name.split(' ')[0], nm=it.name.replace(/^\S+\s/,'');
+        const el=$('<div class="card'+(it.owned?' kown':'')+'" data-tap="1" style="text-align:center;cursor:pointer"><div style="font-size:30px">'+esc(ic)+'</div>'+
+          '<div style="margin-top:6px;font-size:13px">'+esc(nm)+'</div>'+(it.owned?'<div class="hsub" style="margin-top:4px">✅ Bor</div>':'<div class="val mag" style="font-size:16px">'+fmtMoney(it.price)+'$</div><div class="hsub">😊 +'+it.eff+'</div>')+'</div>');
+        el.onclick=()=>{ if(it.owned){ toast('✅ '+esc(k.name)+'da bu buyum bor'); return; }
+          el.style.opacity=.5; api('/app/api/kid',{kid:k.id,act:'gear',item:it.key}).then(r=>{ el.style.opacity=1;
+            if(r.result==='ok'){ setBal(r.balance); toast('✅ '+esc(nm)+' olindi'); refresh(); } else toast(kidErr(r.error)); }); };
+        app_q(box,'.grid').appendChild(el);
+      });
+      sh.appendChild(box);
+    });
+  }
   app.appendChild(sh);
 
   // KAZINO — o'yinlar lobbisi
@@ -20189,6 +20317,12 @@ function errText(e,min){
   if(e==='bet_placed') return 'Bu raundga allaqachon tikkansiz';
   return 'Xato, qayta urining';
 }
+function hm(sec){ sec=Math.max(0,sec|0); const h=Math.floor(sec/3600), m=Math.floor(sec%3600/60); return (h?h+' soat ':'')+m+' daq'; }
+function gearSheet(k){
+  sheet('🎒 '+esc(k.name)+' uchun buyumlar',k.gear.map(it=>({label:esc(it.name)+'<br>'+(it.owned?'✅ bor':'<b>'+fmtMoney(it.price)+'$</b> · 😊 +'+it.eff),value:it.key})),
+    (item)=>{ const it=k.gear.find(x=>x.key===item); if(it&&it.owned){ toast('✅ Bu buyum allaqachon bor'); return; }
+      api('/app/api/kid',{kid:k.id,act:'gear',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('✅ '+esc(it?it.name:'Buyum')+' olindi · 😊 '+r.value+'%'); refresh(); } else toast(kidErr(r.error)); }); });
+}
 function eduErr(e){
   if(e==='name') return 'Nomi kamida 2 harf bo‘lsin';
   if(e==='fee') return 'To‘lov 0 – 1 000 000$ oralig‘ida bo‘lsin';
@@ -20196,7 +20330,9 @@ function eduErr(e){
   if(e==='owner_only') return 'Faqat bot egalari uchun';
   return errText(e);
 }
-function kidErr(e){
+function kidErr(e,wait){
+  if(e==='too_soon') return '⏳ Yaqinda ovqatlandi. Keyingi ovqat: '+hm(wait||0)+' dan keyin';
+  if(e==='owned') return '✅ Bu buyum allaqachon bor';
   if(e==='inst_stage') return 'Bu muassasa farzand yoshiga mos emas';
   if(e==='inst') return 'Muassasa topilmadi yoki yopilgan';
   if(e==='full') return 'To‘la — hozircha kerak emas';

@@ -8804,6 +8804,7 @@ async def post_init(application: Application):
 async def post_shutdown(application: Application):
     try:
         web_crash_refund_open()   # web Crash: yechilmagan tikishlar qaytadi
+        web_kami_settle_open()    # web Kamikaze: o'rtadagi o'yinlar hisoblanadi
     except Exception:  # noqa: BLE001
         logger.exception("Web crash tikishlarini qaytarishda xato")
     for game in list(FROG_GAMES.values()):
@@ -16695,6 +16696,12 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_frog_step(uid, body.get("col"))
         elif path == "/app/api/frog/cashout":
             coro = web_frog_cashout(uid)
+        elif path == "/app/api/kami/start":
+            coro = web_kami_start(uid, body.get("bet"))
+        elif path == "/app/api/kami/step":
+            coro = web_kami_step(uid, body.get("row"))
+        elif path == "/app/api/kami/cashout":
+            coro = web_kami_cashout(uid)
         elif path == "/app/api/shop/buy":
             coro = web_shop_buy(uid, body.get("gift"), body.get("to"))
         elif path == "/app/api/bank/loan":
@@ -17524,12 +17531,15 @@ def panel_webapp_view():
                      "so‘ng <code>WEBAPP_URL</code> (yoki <code>RAILWAY_PUBLIC_DOMAIN</code>) env qo‘shing.")
     lines += ["",
               f"👥 Hamma uchun: <b>{'✅ yoqilgan' if flags['all'] else '❌ o‘chiq'}</b>",
-              f"👑 Ownerlar uchun: <b>{'✅ yoqilgan' if flags['owner'] else '❌ o‘chiq'}</b>"]
+              f"👑 Ownerlar uchun: <b>{'✅ yoqilgan' if flags['owner'] else '❌ o‘chiq'}</b>",
+              f"🛩 Kamikaze: <b>{'✅ hamma uchun' if flags.get('kami') else '🧪 faqat ownerlar (test)'}</b>"]
     rows = [
         [InlineKeyboardButton("🔴 Hamma uchun o‘chirish" if flags["all"] else "🟢 Hamma uchun yoqish",
                               callback_data="panel:webapp_all")],
         [InlineKeyboardButton("🔴 Ownerlar uchun o‘chirish" if flags["owner"] else "🟢 Ownerlar uchun yoqish",
                               callback_data="panel:webapp_owner")],
+        [InlineKeyboardButton("🧪 Kamikaze: faqat ownerlarga" if flags.get("kami") else "🛩 Kamikaze: hamma uchun ochish",
+                              callback_data="panel:webapp_kami")],
         [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
     ]
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -17541,6 +17551,8 @@ async def panel_webapp_callback(query, context):
         webapp_set("all", 0 if webapp_flags()["all"] else 1)
     elif data == "panel:webapp_owner":
         webapp_set("owner", 0 if webapp_flags()["owner"] else 1)
+    elif data == "panel:webapp_kami":
+        webapp_set("kami", 0 if webapp_flags().get("kami") else 1)
     text, kb = panel_webapp_view()
     try:
         await query.edit_message_text(text, reply_markup=kb)
@@ -17787,6 +17799,8 @@ async def webapp_payload(user_id):
         "birja_market": birja_market, "birja_buy_fixed": BIRJA_BUY_FIXED,
         "birja_pcts": BIRJA_PCTS, "birja_min": BIRJA_MIN_ORDER,
         "crash_history": list(WEB_CRASH_HISTORY),
+        "kami": kami_enabled_for(user_id),
+        "kami_test": not webapp_flags().get("kami", 0),
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -18071,6 +18085,105 @@ async def web_frog_cashout(uid):
     return {"result": "cashed", "multiplier": mult, "win": win, "balance": wallet_balance(uid)}
 
 
+# ── 🛩 Web app: Kamikaze (1xGames uslubi) ──
+# 12 ustun × 5 qator dengiz. Har qadamda samolyot keyingi ustundan bitta katak tanlaydi; dushman kemasi
+# o'sha ustunga bitta o'q uzadi (joyi o'yin boshida serverda yashirin tanlanadi). Tegsa — yutqazish.
+KAMI_COLS = 12
+KAMI_ROWS = 5
+KAMI_RTP = 0.92
+KAMI_MIN_BET = 10
+WEB_KAMI: dict[int, dict] = {}
+_KAMI_RNG = random.SystemRandom()
+
+
+def kami_mult(step):
+    if step <= 0:
+        return 1.0
+    return math.floor(KAMI_RTP * (KAMI_ROWS / (KAMI_ROWS - 1)) ** step * 100) / 100
+
+
+def kami_win(bet, step):
+    """Yutuq: suzuvchi nuqta xatosini (100*1.15=114.99…) yaxlitlab olib tashlaydi."""
+    return int(round(bet * kami_mult(step), 2))
+
+
+def kami_enabled_for(uid):
+    """Test bosqichi: standart — faqat ownerlar; owner panel → Web App dan hamma uchun ochiladi."""
+    if not web_enabled_for(uid):
+        return False
+    return bool(webapp_flags().get("kami", 0)) or uid in CAREER_OWNER_IDS
+
+
+async def web_kami_start(uid, bet):
+    if not kami_enabled_for(uid):
+        return {"error": "disabled"}
+    if uid in WEB_KAMI:
+        return {"error": "bet_placed"}
+    try:
+        bet = int(bet)
+    except (TypeError, ValueError):
+        return {"error": "bet"}
+    if bet < KAMI_MIN_BET:
+        return {"error": "min", "min": KAMI_MIN_BET}
+    if bet > WEB_BET_MAX:
+        return {"error": "max"}
+    c = db()
+    with c:
+        if not _wallet_take(c, uid, bet):
+            return {"error": "funds", "balance": wallet_balance(uid)}
+    shots = [_KAMI_RNG.randrange(KAMI_ROWS) for _ in range(KAMI_COLS)]
+    WEB_KAMI[uid] = {"bet": bet, "shots": shots, "step": 0}
+    return {"started": True, "cols": KAMI_COLS, "rows": KAMI_ROWS, "bet": bet,
+            "ladder": [kami_mult(i) for i in range(1, KAMI_COLS + 1)], "balance": wallet_balance(uid)}
+
+
+async def web_kami_step(uid, row):
+    g = WEB_KAMI.get(uid)
+    if not g:
+        return {"error": "no_game"}
+    try:
+        row = int(row)
+    except (TypeError, ValueError):
+        return {"error": "row"}
+    if not 0 <= row < KAMI_ROWS:
+        return {"error": "row"}
+    col = g["step"]
+    shot = g["shots"][col]
+    if row == shot:
+        WEB_KAMI.pop(uid, None)
+        return {"result": "lose", "col": col, "row": row, "shot": shot, "balance": wallet_balance(uid)}
+    g["step"] += 1
+    mult = kami_mult(g["step"])
+    if g["step"] >= KAMI_COLS:
+        WEB_KAMI.pop(uid, None)
+        win = kami_win(g["bet"], g["step"])
+        wallet_change(uid, win)
+        return {"result": "win_full", "col": col, "row": row, "shot": shot, "multiplier": mult,
+                "win": win, "balance": wallet_balance(uid)}
+    return {"result": "safe", "col": col, "row": row, "shot": shot, "step": g["step"], "multiplier": mult,
+            "win": kami_win(g["bet"], g["step"]), "balance": wallet_balance(uid)}
+
+
+async def web_kami_cashout(uid):
+    g = WEB_KAMI.get(uid)
+    if not g:
+        return {"error": "no_game"}
+    if g["step"] <= 0:
+        return {"error": "no_step"}
+    WEB_KAMI.pop(uid, None)
+    mult = kami_mult(g["step"])
+    win = kami_win(g["bet"], g["step"])
+    wallet_change(uid, win)
+    return {"result": "cashed", "multiplier": mult, "win": win, "balance": wallet_balance(uid)}
+
+
+def web_kami_settle_open():
+    """Restartda: o'rtadagi o'yinlar — o'tilgan qadamlar bo'yicha yutuq, qadam yo'q bo'lsa tikish qaytadi."""
+    for uid, g in list(WEB_KAMI.items()):
+        wallet_change(uid, kami_win(g["bet"], g["step"]) if g["step"] else g["bet"])
+    WEB_KAMI.clear()
+
+
 # ── 🛍 Web app: Do'kon (sovg'a sotib olib yuborish) ──
 
 async def web_shop_buy(uid, gift_key, recipient):
@@ -18307,7 +18420,7 @@ async def web_kid_action(uid, kid_id, act, item):
 
 
 # Kazino bannerlari (faqat shu ro'yxatdagi fayllar uzatiladi)
-WEBAPP_ASSETS = {"crash.jpg": "image/jpeg", "hovuz.jpg": "image/jpeg"}
+WEBAPP_ASSETS = {"crash.jpg": "image/jpeg", "hovuz.jpg": "image/jpeg", "kamikaze.jpg": "image/jpeg"}
 
 WEBAPP_HTML = r"""<!doctype html>
 <html lang="uz">
@@ -18635,6 +18748,22 @@ WEBAPP_HTML = r"""<!doctype html>
   .tab .ti .cz-ico{display:block;filter:drop-shadow(0 2px 3px rgba(0,0,0,.6))}
   .tab.on .ti .cz-ico{animation:czpulse 1.8s ease-in-out infinite}
   @keyframes czpulse{50%{filter:drop-shadow(0 0 8px rgba(255,220,120,.9))}}
+  /* ───── 🛩 Kamikaze ───── */
+  .kbox{position:relative;height:340px;border-radius:22px;overflow:hidden;
+    box-shadow:0 12px 28px rgba(0,0,0,.55),inset 0 0 0 1.5px rgba(255,214,110,.5);background:#06203a}
+  #kcanvas{width:100%;height:100%;display:block;touch-action:manipulation}
+  .kmsg{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%) scale(.6);opacity:0;pointer-events:none;text-align:center;
+    font-weight:900;font-size:34px;color:#fff;text-shadow:0 4px 0 rgba(0,0,0,.35),0 0 24px rgba(255,200,70,.8);transition:all .3s cubic-bezier(.2,1.6,.4,1);white-space:nowrap}
+  .kmsg.on{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  .kmsg small{display:block;font-size:16px;font-weight:800;color:#ffe08a;margin-top:4px}
+  .kmsg.bad{color:#ff6b6b;text-shadow:0 4px 0 rgba(0,0,0,.35),0 0 24px rgba(255,60,60,.8)}
+  .knote{text-align:center;color:var(--dim);font-size:13px;margin:10px 0 2px;min-height:18px}
+  .knote b{color:var(--gold)}
+  .kq{margin-top:10px}
+  .gtest{position:absolute;top:96px;left:50%;transform:translateX(-50%) rotate(-6deg);padding:3px 10px;border-radius:8px;
+    background:#ff3b5c;color:#fff;font-weight:900;font-size:11px;letter-spacing:1px;box-shadow:0 4px 10px rgba(0,0,0,.4)}
+  .g-kami .gimg{background-position:50% 60%}
+  .g-kami::before{background:linear-gradient(180deg,rgba(4,10,30,.85) 0%,rgba(4,10,30,.3) 34%,rgba(0,0,0,0) 55%,rgba(0,0,0,.6) 100%)}
   /* ───── pastki tugmalar: kattaroq, nomli, oltin ───── */
   .tabs{gap:4px;padding:8px 8px calc(10px + env(safe-area-inset-bottom));overflow-x:auto;scrollbar-width:none;
     background:linear-gradient(180deg,rgba(28,20,8,.96),rgba(10,7,4,.98));border-top:none;
@@ -18896,6 +19025,9 @@ function render(res){
       '<div class="gcard g-hovuz" data-go="frog"><div class="gimg" style="background-image:url(/app/a/hovuz.jpg)"></div>'+
         '<div class="gtag">EMPIRE GAMES</div><div class="gtitle">HOVUZ</div>'+
         '<div class="gfoot"><span class="glive"><i></i>x4.08 gacha</span><span class="gplay">▶</span></div></div>'+
+      (d.kami?'<div class="gcard g-kami" data-go="kami"><div class="gimg" style="background-image:url(/app/a/kamikaze.jpg)"></div>'+
+        '<div class="gtag">EMPIRE GAMES</div><div class="gtitle">KAMI<br>KAZE</div>'+(d.kami_test?'<div class="gtest">🧪 TEST</div>':'')+
+        '<div class="gfoot"><span class="glive"><i></i>x13 gacha</span><span class="gplay">▶</span></div></div>':'')+
     '</div>'+
     '<div class="gnote">🎮 Barcha o‘yinlar virtual pul bilan · hamyoningizdan</div>';
   cz.querySelectorAll('.gcard').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
@@ -18936,6 +19068,20 @@ function render(res){
     '<button class="btn cash full" id="fcash" style="display:none">💰 Yechib olish</button>';
   app.appendChild(fr);
 
+  // KAMIKAZE (test: faqat ownerlar, keyin hamma uchun)
+  if(d.kami){
+    const km=$('<div class="sec" id="s-kami"></div>');
+    km.innerHTML=
+      '<div class="gback" data-back="1">‹ Kazino</div>'+
+      '<h2>🛩 Kamikaze</h2>'+
+      '<div class="kbox" id="kbox"><canvas id="kcanvas"></canvas><div class="kmsg" id="kmsg"></div></div>'+
+      '<div class="knote" id="knote">Kataklardan birini tanlab, dushman o‘qidan qoching. Kemagacha yeting — x'+'<b id="kmax">13</b>!</div>'+
+      '<div class="betrow"><div class="stepper"><button id="kminus">−</button><input class="bet" id="kbet" type="number" inputmode="numeric" value="50" style="border:none;width:74px;padding:13px 2px"><button id="kplus">+</button></div>'+
+      '<button class="btn go" id="kbtn" style="flex:1">🛩 O‘YNASH · 50$</button></div>'+
+      '<div class="quick kq"><div class="q" data-v="half">½</div><div class="q" data-v="dbl">×2</div><div class="q" data-v="100">100</div><div class="q" data-v="500">500</div><div class="q" data-v="1000">1K</div></div>';
+    app.appendChild(km);
+  }
+
   // OWNER
   if(d.is_owner && d.owner){
     const o=$('<div class="sec" id="s-owner"></div>');
@@ -18961,8 +19107,8 @@ function render(res){
   });
   app.appendChild(tabs);
   app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab('casino'));
-  setTab(defs.some(x=>x[0]===TAB)||TAB==='crash'||TAB==='frog'?TAB:'profil');
-  initCrash(); initFrog();
+  setTab(defs.some(x=>x[0]===TAB)||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
+  initCrash(); initFrog(); initKami();
 }
 // tegilganda oltin uchqunlar (Crash'dan tashqari)
 document.addEventListener('pointerdown',e=>{
@@ -18994,6 +19140,119 @@ function sheet(title, opts, onPick){
 function api(path,body){ return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(Object.assign({initData:tg?tg.initData:''},body||{}))}).then(r=>r.json()); }
 function haptic(t){ try{tg.HapticFeedback.notificationOccurred(t);}catch(e){} }
+
+// ---- 3D "Royal" samolyot — umumiy chizgich (Crash va Kamikaze) ----
+function planeKit(ctx,dpr){
+  //: qizil korpus + oltin bezaklar, toj belgisi (mesh + perspektiva + yoritish) ----
+  const RED=[214,22,40], GOLD=[255,196,58], BLACK=[26,20,24], GLASS=[18,26,44];
+  const P3=(function(){
+    const F=[], W=[], N=12;
+    // [x, radius, y-siljish, rang]
+    const rings=[[1.8,0,0],[1.6,.17,0],[1.47,.4,0],[1.34,.43,0],[1.0,.42,.01],[.55,.4,.02],[.05,.36,.04],[-.5,.26,.07],[-1.0,.15,.12],[-1.32,.07,.16]];
+    const segCol=[GOLD,GOLD,RED,RED,RED,RED,RED,RED,RED];
+    const R=rings.map(r=>Array.from({length:N},(_,i)=>{ const a=i/N*Math.PI*2; return [r[0],Math.cos(a)*r[1]+r[2],Math.sin(a)*r[1]]; }));
+    for(let k=0;k<R.length-1;k++) for(let i=0;i<N;i++){ const j=(i+1)%N;
+      let c=segCol[k];
+      if(k===2) c=GOLD;                                   // kapot oldidagi oltin halqa
+      if(k>=3 && k<=6 && (i===3||i===8)) c=GOLD;          // yon tomondagi oltin chaqmoq chizig'i
+      if(k>=4 && k<=6 && (i===5||i===6)) c=[150,14,28];   // pastki qorin — to'qroq
+      F.push({v:[R[k][i],R[k+1][i],R[k+1][j],R[k][j]],c,sp:c===GOLD?2:1}); }
+    F.push({v:R[R.length-1].slice().reverse(),c:BLACK});
+    // kabina: qoramtir shisha + oltin ramka
+    W.push({v:[[.62,.37,0],[.38,.58,-.17],[.0,.56,-.19],[-.24,.38,-.17],[-.24,.38,.17],[.0,.56,.19],[.38,.58,.17]],c:GLASS,sp:3,frame:1,bias:.04});
+    // past joylashgan qanotlar: qizil + oltin old qirra + oltin uch
+    for(const sg of [1,-1]){
+      W.push({v:[[.5,-.2,.2*sg],[-.32,-.2,.2*sg],[-.44,-.1,1.6*sg],[-.12,-.1,1.6*sg]],c:RED,sp:4});
+      W.push({v:[[.5,-.198,.2*sg],[.4,-.196,.2*sg],[-.1,-.108,1.42*sg],[-.04,-.11,1.42*sg]],c:GOLD,sp:2,bias:.02});
+      W.push({v:[[-.04,-.11,1.42*sg],[-.41,-.11,1.42*sg],[-.45,-.1,1.64*sg],[-.12,-.1,1.64*sg]],c:GOLD,sp:2,bias:.02});
+      // dum stabilizatori
+      W.push({v:[[-.98,.06,.05*sg],[-1.32,.08,.05*sg],[-1.44,.11,.72*sg],[-1.2,.11,.72*sg]],c:RED,sp:4});
+      W.push({v:[[-1.2,.11,.72*sg],[-1.44,.11,.72*sg],[-1.42,.11,.6*sg],[-1.18,.11,.6*sg]],c:GOLD,sp:2,bias:.02});
+    }
+    // vertikal dum: qora, oltin hoshiya, ikkala tomonda oltin toj
+    const fin=[[-.82,.16,0],[-1.36,.18,0],[-1.5,.86,0],[-1.2,.86,0]];
+    W.push({v:fin,c:BLACK,sp:1,edge:GOLD});
+    const crown=(cx,cy,sz,z,n)=>({v:[[cx-sz,cy-sz*.55,z],[cx+sz,cy-sz*.55,z],[cx+sz*1.1,cy+sz*.6,z],[cx+sz*.5,cy+sz*.05,z],[cx,cy+sz*.75,z],[cx-sz*.5,cy+sz*.05,z],[cx-sz*1.1,cy+sz*.6,z]],
+      c:GOLD,sp:2,n:[0,0,n],bias:.08});
+    for(const sg of [1,-1]){
+      W.push(crown(-1.24,.5,.13,.012*sg,sg));
+      // korpus yonidagi qora panel + toj
+      W.push({v:[[.6,-.12,.425*sg],[1.14,-.12,.43*sg],[1.14,.19,.425*sg],[.6,.19,.415*sg]],c:BLACK,sp:1,n:[0,0,sg],bias:.05,edge:GOLD});
+      W.push(crown(.87,.04,.14,.44*sg,sg));
+    }
+    return {F,W};
+  })();
+  const LIGHT=(()=>{ const l=[-.35,.75,.55], n=Math.hypot(...l); return l.map(x=>x/n); })();
+  function rot(v,roll,pitch,yaw,tilt){
+    let [x,y,z]=v, c,s,t;
+    c=Math.cos(roll); s=Math.sin(roll); t=y*c-z*s; z=y*s+z*c; y=t;          // x o'qi atrofida (krен)
+    c=Math.cos(pitch); s=Math.sin(pitch); t=x*c-y*s; y=x*s+y*c; x=t;        // z o'qi atrofida (burun yuqoriga)
+    c=Math.cos(yaw); s=Math.sin(yaw); t=x*c+z*s; z=-x*s+z*c; x=t;           // y o'qi atrofida
+    c=Math.cos(tilt); s=Math.sin(tilt); t=y*c-z*s; z=y*s+z*c; y=t;          // kamera biroz yuqoridan
+    return [x,y,z];
+  }
+  const rgb=(c,a)=>'rgba('+c[0]+','+c[1]+','+c[2]+','+(a==null?1:a)+')';
+  function drawPlane(x,y,ang,s,roll){
+    roll=roll||0; const now=performance.now();
+    const pitch=-ang, yaw=0.5, tilt=0.32, D=6, R3=v=>rot(v,roll,pitch,yaw,tilt);
+    const proj=p=>{ const f=D/(D-p[2]); return [x+p[0]*s*f, y-p[1]*s*f, p[2]]; };
+    const polys=[];
+    const add=(f,closed)=>{
+      const vv=f.v.map(R3), pp=vv.map(proj);
+      let n;
+      if(f.n){ n=R3(f.n); if(n[2]<=0.02) return; }      // bir tomonlama bezak (toj/panel)
+      else { const a=vv[0],b=vv[1],c=vv[2];
+        n=[(b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),(b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])]; }
+      const nl=Math.hypot(...n)||1; n=n.map(q=>q/nl);
+      if(closed){ let ar=0; for(let i=0;i<pp.length;i++){ const p1=pp[i],p2=pp[(i+1)%pp.length]; ar+=p1[0]*p2[1]-p2[0]*p1[1]; } if(ar>0) return; }
+      let d=n[0]*LIGHT[0]+n[1]*LIGHT[1]+n[2]*LIGHT[2]; if(!closed) d=Math.abs(d);
+      const lum=Math.max(f.c===GOLD?.62:0,(f.sp===4?.28+.6*Math.max(0,d):.3+.8*Math.max(0,d)));
+      const spec=f.sp===4?Math.pow(Math.max(0,d),30)*60:f.sp===3?Math.pow(Math.max(0,d),4)*160:f.sp===2?Math.pow(Math.max(0,d),5)*110:f.sp?Math.pow(Math.max(0,d),18)*120:0;
+      polys.push({pp,z:vv.reduce((m,v)=>m+v[2],0)/vv.length+(f.bias||0),col:f.c.map(q=>Math.min(255,Math.round(q*lum+spec))),f});
+    };
+    P3.F.forEach(f=>add(f,true)); P3.W.forEach(f=>add(f,false));
+    polys.sort((a,b)=>a.z-b.z);
+    // iliq oltin nur
+    const gl=ctx.createRadialGradient(x,y,0,x,y,s*2.4); gl.addColorStop(0,'rgba(255,150,40,.32)'); gl.addColorStop(1,'rgba(255,120,40,0)');
+    ctx.fillStyle=gl; ctx.beginPath(); ctx.arc(x,y,s*2.4,0,7); ctx.fill();
+    // olovli iz (dumdan orqaga)
+    const tail=proj(R3([-1.35,.1,0])), fk=Math.sin(now/45);
+    for(const [len,w,c0] of [[2.6+.4*fk,.34,'rgba(255,90,20,'],[2.0+.3*fk,.2,'rgba(255,170,40,'],[1.3+.2*fk,.09,'rgba(255,245,190,']]){
+      const back=proj(R3([-1.35-len,.1,0]));
+      const g=ctx.createLinearGradient(back[0],back[1],tail[0],tail[1]); g.addColorStop(0,c0+'0)'); g.addColorStop(1,c0+'.9)');
+      ctx.strokeStyle=g; ctx.lineCap='round'; ctx.lineWidth=s*w; ctx.beginPath(); ctx.moveTo(tail[0],tail[1]); ctx.lineTo(back[0],back[1]); ctx.stroke(); }
+    for(const p of polys){
+      ctx.beginPath(); ctx.moveTo(p.pp[0][0],p.pp[0][1]); for(let i=1;i<p.pp.length;i++) ctx.lineTo(p.pp[i][0],p.pp[i][1]); ctx.closePath();
+      ctx.fillStyle=rgb(p.col); ctx.fill();
+      if(p.f.frame||p.f.edge){ ctx.strokeStyle=rgb(GOLD); ctx.lineWidth=Math.max(1,s*.06); ctx.lineJoin='round'; ctx.stroke(); }
+      else { ctx.strokeStyle=rgb(p.col,.9); ctx.lineWidth=.6; ctx.stroke(); }
+      if(p.f.frame){ // shisha yaltirashi
+        const a=p.pp[1],b=p.pp[2]; ctx.strokeStyle='rgba(200,230,255,.55)'; ctx.lineWidth=Math.max(1,s*.05);
+        ctx.beginPath(); ctx.moveTo(a[0]+(b[0]-a[0])*.2,a[1]+(b[1]-a[1])*.2+s*.06); ctx.lineTo(a[0]+(b[0]-a[0])*.7,a[1]+(b[1]-a[1])*.7+s*.06); ctx.stroke(); }
+    }
+    // pervanel: oltin aylanish diski + 3 ta qora parrak (oltin uchli) + oltin konus
+    const h=proj(R3([1.66,0,0])), pa=now/18, PR=1.0;
+    const r1=proj(R3([1.66,PR,0])), r2=proj(R3([1.66,0,PR]));
+    const ea=Math.hypot(r2[0]-h[0],r2[1]-h[1]), eb=Math.hypot(r1[0]-h[0],r1[1]-h[1]), et=Math.atan2(r1[1]-h[1],r1[0]-h[0])-Math.PI/2;
+    ctx.save();
+    const dg=ctx.createRadialGradient(h[0],h[1],0,h[0],h[1],Math.max(ea,eb));
+    dg.addColorStop(0,'rgba(255,215,110,.05)'); dg.addColorStop(.75,'rgba(255,200,80,.22)'); dg.addColorStop(1,'rgba(255,220,120,.45)');
+    ctx.fillStyle=dg; ctx.beginPath(); ctx.ellipse(h[0],h[1],Math.max(2,ea),Math.max(2,eb),et,0,7); ctx.fill();
+    ctx.strokeStyle='rgba(255,215,120,.5)'; ctx.lineWidth=1;
+    for(const k of [.55,.8]){ ctx.beginPath(); ctx.ellipse(h[0],h[1],Math.max(1,ea*k),Math.max(1,eb*k),et,0,7); ctx.stroke(); }
+    for(let k=0;k<3;k++){ const a=pa+k*Math.PI*2/3;
+      const mid=proj(R3([1.66,Math.cos(a)*PR*.78,Math.sin(a)*PR*.78])), tp=proj(R3([1.66,Math.cos(a)*PR,Math.sin(a)*PR]));
+      ctx.lineCap='round'; ctx.strokeStyle='rgba(20,16,20,.8)'; ctx.lineWidth=s*.13;
+      ctx.beginPath(); ctx.moveTo(h[0],h[1]); ctx.lineTo(mid[0],mid[1]); ctx.stroke();
+      ctx.strokeStyle='rgba(255,200,70,.9)'; ctx.beginPath(); ctx.moveTo(mid[0],mid[1]); ctx.lineTo(tp[0],tp[1]); ctx.stroke(); }
+    const tipP=proj(R3([2.0,0,0])), sg=ctx.createRadialGradient(h[0]-s*.06,h[1]-s*.08,0,h[0],h[1],s*.24);
+    sg.addColorStop(0,'#fff6cf'); sg.addColorStop(.5,'#ffc93a'); sg.addColorStop(1,'#8a5a0c');
+    ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(h[0],h[1],s*.2,0,7); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(h[0]+(tipP[1]-h[1])*.45,h[1]-(tipP[0]-h[0])*.45); ctx.lineTo(tipP[0],tipP[1]); ctx.lineTo(h[0]-(tipP[1]-h[1])*.45,h[1]+(tipP[0]-h[0])*.45); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  return drawPlane;
+}
 
 // ---- CRASH (Aviator — bashorat qilib bo'lmaydi) ----
 function histClass(v){ return v>=10?'hi':(v>=2?'mid':'lo'); }
@@ -19129,114 +19388,7 @@ function initCrash(){
     for(let x=-(gridOff%step);x<W;x+=step){ ctx.beginPath(); ctx.moveTo(x,gy); ctx.lineTo(x-14*dpr,H); ctx.stroke(); }
     ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
   }
-  // ---- 3D "Royal" samolyot: qizil korpus + oltin bezaklar, toj belgisi (mesh + perspektiva + yoritish) ----
-  const RED=[214,22,40], GOLD=[255,196,58], BLACK=[26,20,24], GLASS=[18,26,44];
-  const P3=(function(){
-    const F=[], W=[], N=12;
-    // [x, radius, y-siljish, rang]
-    const rings=[[1.8,0,0],[1.6,.17,0],[1.47,.4,0],[1.34,.43,0],[1.0,.42,.01],[.55,.4,.02],[.05,.36,.04],[-.5,.26,.07],[-1.0,.15,.12],[-1.32,.07,.16]];
-    const segCol=[GOLD,GOLD,RED,RED,RED,RED,RED,RED,RED];
-    const R=rings.map(r=>Array.from({length:N},(_,i)=>{ const a=i/N*Math.PI*2; return [r[0],Math.cos(a)*r[1]+r[2],Math.sin(a)*r[1]]; }));
-    for(let k=0;k<R.length-1;k++) for(let i=0;i<N;i++){ const j=(i+1)%N;
-      let c=segCol[k];
-      if(k===2) c=GOLD;                                   // kapot oldidagi oltin halqa
-      if(k>=3 && k<=6 && (i===3||i===8)) c=GOLD;          // yon tomondagi oltin chaqmoq chizig'i
-      if(k>=4 && k<=6 && (i===5||i===6)) c=[150,14,28];   // pastki qorin — to'qroq
-      F.push({v:[R[k][i],R[k+1][i],R[k+1][j],R[k][j]],c,sp:c===GOLD?2:1}); }
-    F.push({v:R[R.length-1].slice().reverse(),c:BLACK});
-    // kabina: qoramtir shisha + oltin ramka
-    W.push({v:[[.62,.37,0],[.38,.58,-.17],[.0,.56,-.19],[-.24,.38,-.17],[-.24,.38,.17],[.0,.56,.19],[.38,.58,.17]],c:GLASS,sp:3,frame:1,bias:.04});
-    // past joylashgan qanotlar: qizil + oltin old qirra + oltin uch
-    for(const sg of [1,-1]){
-      W.push({v:[[.5,-.2,.2*sg],[-.32,-.2,.2*sg],[-.44,-.1,1.6*sg],[-.12,-.1,1.6*sg]],c:RED,sp:4});
-      W.push({v:[[.5,-.198,.2*sg],[.4,-.196,.2*sg],[-.1,-.108,1.42*sg],[-.04,-.11,1.42*sg]],c:GOLD,sp:2,bias:.02});
-      W.push({v:[[-.04,-.11,1.42*sg],[-.41,-.11,1.42*sg],[-.45,-.1,1.64*sg],[-.12,-.1,1.64*sg]],c:GOLD,sp:2,bias:.02});
-      // dum stabilizatori
-      W.push({v:[[-.98,.06,.05*sg],[-1.32,.08,.05*sg],[-1.44,.11,.72*sg],[-1.2,.11,.72*sg]],c:RED,sp:4});
-      W.push({v:[[-1.2,.11,.72*sg],[-1.44,.11,.72*sg],[-1.42,.11,.6*sg],[-1.18,.11,.6*sg]],c:GOLD,sp:2,bias:.02});
-    }
-    // vertikal dum: qora, oltin hoshiya, ikkala tomonda oltin toj
-    const fin=[[-.82,.16,0],[-1.36,.18,0],[-1.5,.86,0],[-1.2,.86,0]];
-    W.push({v:fin,c:BLACK,sp:1,edge:GOLD});
-    const crown=(cx,cy,sz,z,n)=>({v:[[cx-sz,cy-sz*.55,z],[cx+sz,cy-sz*.55,z],[cx+sz*1.1,cy+sz*.6,z],[cx+sz*.5,cy+sz*.05,z],[cx,cy+sz*.75,z],[cx-sz*.5,cy+sz*.05,z],[cx-sz*1.1,cy+sz*.6,z]],
-      c:GOLD,sp:2,n:[0,0,n],bias:.08});
-    for(const sg of [1,-1]){
-      W.push(crown(-1.24,.5,.13,.012*sg,sg));
-      // korpus yonidagi qora panel + toj
-      W.push({v:[[.6,-.12,.425*sg],[1.14,-.12,.43*sg],[1.14,.19,.425*sg],[.6,.19,.415*sg]],c:BLACK,sp:1,n:[0,0,sg],bias:.05,edge:GOLD});
-      W.push(crown(.87,.04,.14,.44*sg,sg));
-    }
-    return {F,W};
-  })();
-  const LIGHT=(()=>{ const l=[-.35,.75,.55], n=Math.hypot(...l); return l.map(x=>x/n); })();
-  function rot(v,roll,pitch,yaw,tilt){
-    let [x,y,z]=v, c,s,t;
-    c=Math.cos(roll); s=Math.sin(roll); t=y*c-z*s; z=y*s+z*c; y=t;          // x o'qi atrofida (krен)
-    c=Math.cos(pitch); s=Math.sin(pitch); t=x*c-y*s; y=x*s+y*c; x=t;        // z o'qi atrofida (burun yuqoriga)
-    c=Math.cos(yaw); s=Math.sin(yaw); t=x*c+z*s; z=-x*s+z*c; x=t;           // y o'qi atrofida
-    c=Math.cos(tilt); s=Math.sin(tilt); t=y*c-z*s; z=y*s+z*c; y=t;          // kamera biroz yuqoridan
-    return [x,y,z];
-  }
-  const rgb=(c,a)=>'rgba('+c[0]+','+c[1]+','+c[2]+','+(a==null?1:a)+')';
-  function drawPlane(x,y,ang,s,roll){
-    roll=roll||0; const now=performance.now();
-    const pitch=-ang, yaw=0.5, tilt=0.32, D=6, R3=v=>rot(v,roll,pitch,yaw,tilt);
-    const proj=p=>{ const f=D/(D-p[2]); return [x+p[0]*s*f, y-p[1]*s*f, p[2]]; };
-    const polys=[];
-    const add=(f,closed)=>{
-      const vv=f.v.map(R3), pp=vv.map(proj);
-      let n;
-      if(f.n){ n=R3(f.n); if(n[2]<=0.02) return; }      // bir tomonlama bezak (toj/panel)
-      else { const a=vv[0],b=vv[1],c=vv[2];
-        n=[(b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),(b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])]; }
-      const nl=Math.hypot(...n)||1; n=n.map(q=>q/nl);
-      if(closed){ let ar=0; for(let i=0;i<pp.length;i++){ const p1=pp[i],p2=pp[(i+1)%pp.length]; ar+=p1[0]*p2[1]-p2[0]*p1[1]; } if(ar>0) return; }
-      let d=n[0]*LIGHT[0]+n[1]*LIGHT[1]+n[2]*LIGHT[2]; if(!closed) d=Math.abs(d);
-      const lum=Math.max(f.c===GOLD?.62:0,(f.sp===4?.28+.6*Math.max(0,d):.3+.8*Math.max(0,d)));
-      const spec=f.sp===4?Math.pow(Math.max(0,d),30)*60:f.sp===3?Math.pow(Math.max(0,d),4)*160:f.sp===2?Math.pow(Math.max(0,d),5)*110:f.sp?Math.pow(Math.max(0,d),18)*120:0;
-      polys.push({pp,z:vv.reduce((m,v)=>m+v[2],0)/vv.length+(f.bias||0),col:f.c.map(q=>Math.min(255,Math.round(q*lum+spec))),f});
-    };
-    P3.F.forEach(f=>add(f,true)); P3.W.forEach(f=>add(f,false));
-    polys.sort((a,b)=>a.z-b.z);
-    // iliq oltin nur
-    const gl=ctx.createRadialGradient(x,y,0,x,y,s*2.4); gl.addColorStop(0,'rgba(255,150,40,.32)'); gl.addColorStop(1,'rgba(255,120,40,0)');
-    ctx.fillStyle=gl; ctx.beginPath(); ctx.arc(x,y,s*2.4,0,7); ctx.fill();
-    // olovli iz (dumdan orqaga)
-    const tail=proj(R3([-1.35,.1,0])), fk=Math.sin(now/45);
-    for(const [len,w,c0] of [[2.6+.4*fk,.34,'rgba(255,90,20,'],[2.0+.3*fk,.2,'rgba(255,170,40,'],[1.3+.2*fk,.09,'rgba(255,245,190,']]){
-      const back=proj(R3([-1.35-len,.1,0]));
-      const g=ctx.createLinearGradient(back[0],back[1],tail[0],tail[1]); g.addColorStop(0,c0+'0)'); g.addColorStop(1,c0+'.9)');
-      ctx.strokeStyle=g; ctx.lineCap='round'; ctx.lineWidth=s*w; ctx.beginPath(); ctx.moveTo(tail[0],tail[1]); ctx.lineTo(back[0],back[1]); ctx.stroke(); }
-    for(const p of polys){
-      ctx.beginPath(); ctx.moveTo(p.pp[0][0],p.pp[0][1]); for(let i=1;i<p.pp.length;i++) ctx.lineTo(p.pp[i][0],p.pp[i][1]); ctx.closePath();
-      ctx.fillStyle=rgb(p.col); ctx.fill();
-      if(p.f.frame||p.f.edge){ ctx.strokeStyle=rgb(GOLD); ctx.lineWidth=Math.max(1,s*.06); ctx.lineJoin='round'; ctx.stroke(); }
-      else { ctx.strokeStyle=rgb(p.col,.9); ctx.lineWidth=.6; ctx.stroke(); }
-      if(p.f.frame){ // shisha yaltirashi
-        const a=p.pp[1],b=p.pp[2]; ctx.strokeStyle='rgba(200,230,255,.55)'; ctx.lineWidth=Math.max(1,s*.05);
-        ctx.beginPath(); ctx.moveTo(a[0]+(b[0]-a[0])*.2,a[1]+(b[1]-a[1])*.2+s*.06); ctx.lineTo(a[0]+(b[0]-a[0])*.7,a[1]+(b[1]-a[1])*.7+s*.06); ctx.stroke(); }
-    }
-    // pervanel: oltin aylanish diski + 3 ta qora parrak (oltin uchli) + oltin konus
-    const h=proj(R3([1.66,0,0])), pa=now/18, PR=1.0;
-    const r1=proj(R3([1.66,PR,0])), r2=proj(R3([1.66,0,PR]));
-    const ea=Math.hypot(r2[0]-h[0],r2[1]-h[1]), eb=Math.hypot(r1[0]-h[0],r1[1]-h[1]), et=Math.atan2(r1[1]-h[1],r1[0]-h[0])-Math.PI/2;
-    ctx.save();
-    const dg=ctx.createRadialGradient(h[0],h[1],0,h[0],h[1],Math.max(ea,eb));
-    dg.addColorStop(0,'rgba(255,215,110,.05)'); dg.addColorStop(.75,'rgba(255,200,80,.22)'); dg.addColorStop(1,'rgba(255,220,120,.45)');
-    ctx.fillStyle=dg; ctx.beginPath(); ctx.ellipse(h[0],h[1],Math.max(2,ea),Math.max(2,eb),et,0,7); ctx.fill();
-    ctx.strokeStyle='rgba(255,215,120,.5)'; ctx.lineWidth=1;
-    for(const k of [.55,.8]){ ctx.beginPath(); ctx.ellipse(h[0],h[1],Math.max(1,ea*k),Math.max(1,eb*k),et,0,7); ctx.stroke(); }
-    for(let k=0;k<3;k++){ const a=pa+k*Math.PI*2/3;
-      const mid=proj(R3([1.66,Math.cos(a)*PR*.78,Math.sin(a)*PR*.78])), tp=proj(R3([1.66,Math.cos(a)*PR,Math.sin(a)*PR]));
-      ctx.lineCap='round'; ctx.strokeStyle='rgba(20,16,20,.8)'; ctx.lineWidth=s*.13;
-      ctx.beginPath(); ctx.moveTo(h[0],h[1]); ctx.lineTo(mid[0],mid[1]); ctx.stroke();
-      ctx.strokeStyle='rgba(255,200,70,.9)'; ctx.beginPath(); ctx.moveTo(mid[0],mid[1]); ctx.lineTo(tp[0],tp[1]); ctx.stroke(); }
-    const tipP=proj(R3([2.0,0,0])), sg=ctx.createRadialGradient(h[0]-s*.06,h[1]-s*.08,0,h[0],h[1],s*.24);
-    sg.addColorStop(0,'#fff6cf'); sg.addColorStop(.5,'#ffc93a'); sg.addColorStop(1,'#8a5a0c');
-    ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(h[0],h[1],s*.2,0,7); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(h[0]+(tipP[1]-h[1])*.45,h[1]-(tipP[0]-h[0])*.45); ctx.lineTo(tipP[0],tipP[1]); ctx.lineTo(h[0]-(tipP[1]-h[1])*.45,h[1]+(tipP[0]-h[0])*.45); ctx.closePath(); ctx.fill();
-    ctx.restore();
-  }
+  const drawPlane=planeKit(ctx,dpr);   // 3D "Royal" samolyot (umumiy: Crash + Kamikaze)
   // 3D animatsiya: chayqalish (krен) + har 7 s da "bochka" aylanishi
   function flyRoll(t,now){
     let r=Math.sin(now/420)*0.42+Math.sin(now/170)*0.08;
@@ -19300,6 +19452,215 @@ function initCrash(){
   }
   window.CR={stop(){ alive=false; cancelAnimationFrame(raf); clearTimeout(timer); }, poke(){ poll(true); }};
   paintBtn(); renderPlayers(); poll(true); raf=requestAnimationFrame(frame);
+}
+
+// ---- 🛩 KAMIKAZE ----
+function initKami(){
+  if(window.KM) window.KM.stop();
+  const cv=document.getElementById('kcanvas'); if(!cv) return;
+  const box=document.getElementById('kbox'), sec=document.getElementById('s-kami'),
+        btn=document.getElementById('kbtn'), bet=document.getElementById('kbet'), note=document.getElementById('knote'),
+        msg=document.getElementById('kmsg');
+  const ctx=cv.getContext('2d'), dpr=window.devicePixelRatio||1, drawPlane=planeKit(ctx,dpr);
+  const COLS=12, ROWS=5;
+  let ladder=Array.from({length:COLS},(_,i)=>Math.floor(0.92*Math.pow(1.25,i+1)*100)/100);
+  document.getElementById('kmax').textContent=Math.floor(ladder[COLS-1]);
+  // holat
+  let playing=false, busy=false, step=0, lane=2, curBet=0, alive=true, raf=0, camX=0;
+  let plane={x:0,y:0,fx:0,fy:0,t0:0,dur:0,dead:false,deadT:0,gone:false};
+  let shots=[];                 // [{col,row,t0,hit}] — o'q uchishi
+  let passed={};                // col -> {row, shot}
+  const sparks=[], splashes=[], puffs=[];
+  const waves=Array.from({length:46},(_,i)=>({x:Math.random(),y:Math.random(),l:.03+Math.random()*.06,p:Math.random()*6}));
+  const smokeS=Array.from({length:3},(_,i)=>({x:.15+i*.32+Math.random()*.08,s:.6+Math.random()*.5}));
+  function size(){ const w=box.clientWidth,h=box.clientHeight; if(cv.width!==w*dpr||cv.height!==h*dpr){cv.width=w*dpr;cv.height=h*dpr;} }
+  function geo(){ const W=cv.width,H=cv.height, top=58*dpr, bot=H-12*dpr, T=Math.min((bot-top)/ROWS, W/5.6);
+    return {W,H,T,top:top+((bot-top)-T*ROWS)/2, x0:T*1.1}; }
+  function cellXY(col,row,g){ return [g.x0+(col+0.5)*g.T, g.top+(row+0.5)*g.T]; }  // dunyo koordinatasi; col=-1 — start
+  function shipX(g){ return g.x0+(COLS+0.9)*g.T; }
+  // ---- tugmalar ----
+  function betVal(){ return Math.max(0,parseInt(bet.value)||0); }
+  function stepOf(v){ return v<100?10:v<1000?50:v<10000?500:5000; }
+  function setBet(v){ if(playing) return; bet.value=Math.max(10,Math.min(Math.round(v),1000000)); paint(); }
+  document.getElementById('kminus').onclick=()=>{ const v=betVal(); setBet(v-stepOf(v-1)); };
+  document.getElementById('kplus').onclick=()=>{ const v=betVal(); setBet(v+stepOf(v)); };
+  bet.oninput=paint;
+  sec.querySelectorAll('.kq .q').forEach(q=>q.onclick=()=>{ const v=q.dataset.v,b=betVal();
+    if(v==='half') setBet(b/2); else if(v==='dbl') setBet(b*2); else setBet(+v); });
+  function paint(){
+    btn.disabled=busy || (playing && step===0);
+    if(playing){ btn.className='btn cash'; btn.style.flex='1';
+      btn.textContent=step?('💰 YECHIB OLISH · '+fmtMoney(Math.floor(curBet*ladder[step-1]))+'$'):'👆 Katak tanlang';
+    } else { btn.className='btn go'; btn.style.flex='1'; btn.textContent='🛩 O‘YNASH · '+fmtMoney(betVal())+'$'; }
+  }
+  function flash(html,bad,ms){ msg.innerHTML=html; msg.className='kmsg on'+(bad?' bad':''); clearTimeout(msg._t);
+    msg._t=setTimeout(()=>msg.className='kmsg'+(bad?' bad':''),ms||1300); }
+  function reset(){ step=0; lane=2; passed={}; shots=[]; camX=0; const g=geo();
+    const [x,y]=cellXY(-1,lane,g); Object.assign(plane,{x,y,fx:x,fy:y,t0:0,dur:0,dead:false,gone:false}); }
+  function moveTo(col,row){ const g=geo(); const [x,y]=cellXY(col,row,g);
+    plane.fx=plane.x; plane.fy=plane.y; plane.tx=x; plane.ty=y; plane.t0=performance.now(); plane.dur=480; lane=row; }
+  btn.onclick=()=>{
+    if(busy) return;
+    if(!playing){
+      busy=true; paint();
+      api('/app/api/kami/start',{bet:betVal()}).then(r=>{ busy=false;
+        if(!r.ok||r.error){ toast(errText(r.error,r.min)); paint(); return; }
+        setBal(r.balance); ladder=r.ladder||ladder; curBet=r.bet; playing=true; reset();
+        note.innerHTML='Keyingi ustundan katak tanlang · <b>x'+ladder[0].toFixed(2)+'</b>'; haptic('success'); paint();
+      }).catch(()=>{ busy=false; paint(); });
+      return;
+    }
+    if(!step) return;
+    busy=true; paint();
+    api('/app/api/kami/cashout',{}).then(r=>{ busy=false;
+      if(r.result==='cashed'){ setBal(r.balance); playing=false; haptic('success');
+        flash('+'+fmtMoney(r.win)+'$<small>x'+r.multiplier.toFixed(2)+' da yechdingiz</small>');
+        note.innerHTML='✅ Yutuq: <b>+'+fmtMoney(r.win)+'$</b>'; burst(plane.x,plane.y,'#ffd24a',40); }
+      else toast(errText(r.error)); paint();
+    }).catch(()=>{ busy=false; paint(); });
+  };
+  // katak tanlash
+  cv.addEventListener('pointerdown',e=>{
+    if(!playing||busy||plane.dead) return;
+    const rc=cv.getBoundingClientRect(), px=(e.clientX-rc.left)*dpr+camX, py=(e.clientY-rc.top)*dpr, g=geo();
+    const [cx]=cellXY(step,0,g);
+    if(Math.abs(px-cx)>g.T*0.55) return;
+    const row=Math.floor((py-g.top)/g.T); if(row<0||row>=ROWS) return;
+    busy=true; paint(); moveTo(step,row);
+    api('/app/api/kami/step',{row:row}).then(r=>{
+      if(!r.ok||r.error){ busy=false; toast(errText(r.error)); paint(); return; }
+      const col=r.col; shots.push({col,row:r.shot,t0:performance.now()+220,hit:r.result==='lose'});
+      setTimeout(()=>{
+        busy=false;
+        if(r.result==='lose'){ playing=false; plane.dead=true; plane.deadT=performance.now(); passed[col]={row,shot:r.shot};
+          haptic('error'); flash('💥 URILDINGIZ!<small>−'+fmtMoney(curBet)+'$</small>',true,1700);
+          note.innerHTML='Dushman o‘qi tegdi. Yana urinib ko‘ring!'; setBal(r.balance); }
+        else { passed[col]={row,shot:r.shot}; step=r.step||COLS; setBal(r.balance);
+          if(r.result==='win_full'){ playing=false; plane.kamikaze=performance.now();
+            flash('🎯 KAMIKAZE!<small>+'+fmtMoney(r.win)+'$ · x'+r.multiplier.toFixed(2)+'</small>',false,2400);
+            note.innerHTML='🏆 Kemaga yetdingiz! <b>+'+fmtMoney(r.win)+'$</b>'; haptic('success'); }
+          else { note.innerHTML='Zo‘r! Hozir: <b>x'+r.multiplier.toFixed(2)+'</b> · keyingisi <b>x'+ladder[step].toFixed(2)+'</b>'; haptic('success'); } }
+        paint();
+      },720);
+    }).catch(()=>{ busy=false; paint(); });
+  });
+  function burst(x,y,c,n){ for(let i=0;i<n;i++){ const a=Math.random()*Math.PI*2,v=(1+Math.random()*4)*dpr;
+    sparks.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v-1.5*dpr,life:1,c:Math.random()<.5?c:'#ffffff'}); } }
+  // ---- chizish ----
+  function sea(g,now){
+    const {W,H}=g, gr=ctx.createLinearGradient(0,0,0,H);
+    gr.addColorStop(0,'#07152e'); gr.addColorStop(.18,'#0c2a4f'); gr.addColorStop(1,'#04203a'); ctx.fillStyle=gr; ctx.fillRect(0,0,W,H);
+    // ufq: yonayotgan kemalar va orollar (parallaks)
+    const hy=46*dpr, par=camX*0.25;
+    ctx.fillStyle='#0a1d33';
+    for(let i=0;i<4;i++){ const x=((i*W*0.42-par)%(W*1.6)+W*1.6)%(W*1.6)-W*0.2;
+      ctx.beginPath(); ctx.ellipse(x,hy,W*0.16,10*dpr,0,Math.PI,0); ctx.fill(); }
+    for(const sm of smokeS){ const x=((sm.x*W*1.4-par)%(W*1.4)+W*1.4)%(W*1.4)-W*0.1;
+      ctx.fillStyle='#1b2433'; ctx.fillRect(x-14*dpr*sm.s,hy-6*dpr,28*dpr*sm.s,6*dpr); ctx.fillRect(x-4*dpr*sm.s,hy-13*dpr*sm.s,7*dpr*sm.s,8*dpr*sm.s);
+      const fl=.6+.4*Math.sin(now/90+sm.x*20);
+      const fg=ctx.createRadialGradient(x,hy-8*dpr,0,x,hy-8*dpr,22*dpr*sm.s); fg.addColorStop(0,'rgba(255,170,60,'+(.75*fl)+')'); fg.addColorStop(1,'rgba(255,80,20,0)');
+      ctx.fillStyle=fg; ctx.beginPath(); ctx.arc(x,hy-8*dpr,22*dpr*sm.s,0,7); ctx.fill();
+      for(let k=0;k<5;k++){ const t=((now/2600+k/5)%1); ctx.fillStyle='rgba(70,70,80,'+(.35*(1-t))+')';
+        ctx.beginPath(); ctx.arc(x+t*26*dpr,hy-14*dpr-t*36*dpr,(5+t*14)*dpr*sm.s,0,7); ctx.fill(); } }
+    ctx.fillStyle='rgba(255,140,60,.10)'; ctx.fillRect(0,hy-2*dpr,W,4*dpr);
+    // to'lqinlar
+    ctx.strokeStyle='rgba(150,210,255,.16)'; ctx.lineWidth=1.4*dpr;
+    for(const w of waves){ const x=((w.x*W*1.3-camX*.8+now*0.012*dpr)%(W*1.3)+W*1.3)%(W*1.3)-W*.15, y=hy+8*dpr+w.y*(H-hy);
+      ctx.beginPath(); ctx.moveTo(x,y); ctx.quadraticCurveTo(x+w.l*W*.5,y-3*dpr*Math.sin(now/400+w.p),x+w.l*W,y); ctx.stroke(); }
+  }
+  function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+  function board(g,now){
+    const {T}=g, pad=T*0.09;
+    for(let c=-1;c<COLS;c++){
+      const x=g.x0+c*g.T; if(x-camX>g.W+T||x-camX<-T*2) continue;
+      if(c===-1){ // start: aviatashuvchi palubasi
+        ctx.fillStyle='#22324a'; rr(x+pad,g.top+pad,T-2*pad,T*ROWS-2*pad,10*dpr); ctx.fill();
+        ctx.strokeStyle='rgba(255,214,110,.35)'; ctx.setLineDash([6*dpr,6*dpr]); ctx.beginPath(); ctx.moveTo(x+T/2,g.top+pad*2); ctx.lineTo(x+T/2,g.top+T*ROWS-pad*2); ctx.stroke(); ctx.setLineDash([]);
+        continue; }
+      const next=playing&&c===step&&!busy, done=c<step||passed[c];
+      // koeffitsiyent yorlig'i
+      ctx.font='800 '+(11*dpr)+'px -apple-system,Segoe UI,Roboto,sans-serif'; ctx.textAlign='center';
+      ctx.fillStyle=next?'#ffd24a':done?'#7ee08a':'rgba(220,235,255,.55)';
+      ctx.fillText('x'+ladder[c].toFixed(2),x+T/2,g.top-8*dpr);
+      for(let r=0;r<ROWS;r++){
+        const y=g.top+r*T, p=passed[c];
+        let fill='rgba(120,190,255,.07)', stroke='rgba(150,210,255,.22)';
+        if(next){ const pu=.5+.5*Math.sin(now/260); fill='rgba(255,210,74,'+(.10+.10*pu)+')'; stroke='rgba(255,214,110,'+(.55+.4*pu)+')'; }
+        if(p && p.row===r){ fill='rgba(80,220,120,.22)'; stroke='rgba(120,240,150,.8)'; }
+        if(p && p.shot===r){ fill='rgba(255,70,70,.22)'; stroke='rgba(255,110,110,.7)'; }
+        ctx.fillStyle=fill; rr(x+pad,y+pad,T-2*pad,T-2*pad,9*dpr); ctx.fill();
+        ctx.strokeStyle=stroke; ctx.lineWidth=(next?2:1.2)*dpr; ctx.stroke();
+        if(p && p.shot===r){ ctx.font=(T*.38)+'px sans-serif'; ctx.textBaseline='middle'; ctx.fillText('💥',x+T/2,y+T/2+1); ctx.textBaseline='alphabetic'; }
+      }
+    }
+  }
+  function battleship(g,now){
+    const x=shipX(g), cy=g.top+g.T*ROWS/2, L=g.T*1.25, Hh=g.T*ROWS*0.95;
+    if(x-L-camX>g.W) return {x,cy};
+    ctx.save(); ctx.translate(x,cy+Math.sin(now/700)*2*dpr);
+    // korpus (yuqoridan ko'rinish, burni chapga)
+    const hg=ctx.createLinearGradient(-L/2,0,L/2,0); hg.addColorStop(0,'#5d6a7c'); hg.addColorStop(.5,'#8794a6'); hg.addColorStop(1,'#4a5566');
+    ctx.fillStyle=hg; ctx.beginPath(); ctx.moveTo(0,-Hh/2); ctx.quadraticCurveTo(L/2,-Hh/3,L/2,0); ctx.quadraticCurveTo(L/2,Hh/3,0,Hh/2);
+    ctx.quadraticCurveTo(-L/2,Hh/3,-L/2,0); ctx.quadraticCurveTo(-L/2,-Hh/3,0,-Hh/2); ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,.25)'; ctx.lineWidth=1.5*dpr; ctx.stroke();
+    ctx.fillStyle='#3b4554'; rr(-L*.22,-Hh*.18,L*.44,Hh*.36,6*dpr); ctx.fill();
+    // to'plar
+    for(const ty of [-.32,-.12,.12,.32]){ ctx.fillStyle='#2b333f'; ctx.beginPath(); ctx.arc(-L*.08,ty*Hh,L*.13,0,7); ctx.fill();
+      ctx.strokeStyle='#1d232c'; ctx.lineWidth=4*dpr; ctx.beginPath(); ctx.moveTo(-L*.08,ty*Hh); ctx.lineTo(-L*.42,ty*Hh); ctx.stroke(); }
+    ctx.fillStyle='#ff3b5c'; ctx.beginPath(); ctx.arc(L*.15,0,4*dpr*(0.7+0.3*Math.sin(now/200)),0,7); ctx.fill();
+    ctx.restore();
+    return {x,cy};
+  }
+  function frame(){
+    if(!alive) return; raf=requestAnimationFrame(frame);
+    if(!sec.classList.contains('on')) return;
+    size(); const g=geo(), now=performance.now();
+    // kamera: keyingi ustun ekranning ~45% ida
+    const target=Math.max(0, g.x0+(step+0.5)*g.T - g.W*0.45);
+    camX+=(target-camX)*0.08;
+    if(!playing && !plane.dead && !plane.kamikaze && step===0){ const [x,y]=cellXY(-1,lane,g); plane.x=x; plane.y=y; plane.tx=undefined; }
+    ctx.clearRect(0,0,g.W,g.H); sea(g,now); ctx.save(); ctx.translate(-camX,0); board(g,now); const sh=battleship(g,now);
+    // samolyot harakati
+    let px=plane.x, py=plane.y, ang=0;
+    if(plane.tx!=null){ const u=Math.min(1,(now-plane.t0)/plane.dur), e=u<.5?2*u*u:1-Math.pow(-2*u+2,2)/2;
+      const gx=plane.tx, gy=plane.ty;
+      px=plane.fx+(gx-plane.fx)*e; py=plane.fy+(gy-plane.fy)*e - Math.sin(Math.PI*u)*g.T*0.25;
+      ang=Math.atan2(gy-plane.fy, (gx-plane.fx)||1)*0.6;
+      if(u>=1){ plane.x=gx; plane.y=gy; plane.fx=gx; plane.fy=gy; plane.tx=null; }
+    }
+    // kemaga sho'ng'ish (to'liq g'alaba)
+    if(plane.kamikaze){ const u=Math.min(1,(now-plane.kamikaze)/700);
+      px=plane.x+(sh.x-plane.x)*u*u; py=plane.y+(sh.cy-plane.y)*u*u; ang=Math.atan2(sh.cy-plane.y,sh.x-plane.x);
+      if(u>=1 && !plane.boom){ plane.boom=true; burst(sh.x,sh.cy,'#ff8a3a',90); burst(sh.x,sh.cy,'#ffd24a',60); }
+      if(u>=1) px=-9999; }
+    // o'qlar
+    for(const s of shots){ const u=(now-s.t0)/520; if(u<0) continue;
+      const [tx,ty]=cellXY(s.col,s.row,g), sx=sh.x-g.T*0.5, sy=sh.cy+(s.row-2)*g.T*0.3;
+      if(u<1){ const x=sx+(tx-sx)*u, y=sy+(ty-sy)*u - Math.sin(Math.PI*u)*g.T*1.2;
+        ctx.fillStyle='#ffe08a'; ctx.shadowColor='#ff8a3a'; ctx.shadowBlur=14*dpr; ctx.beginPath(); ctx.arc(x,y,4*dpr,0,7); ctx.fill(); ctx.shadowBlur=0;
+        if(u<0.12){ ctx.fillStyle='rgba(255,200,90,'+(1-u/0.12)+')'; ctx.beginPath(); ctx.arc(sx,sy,12*dpr,0,7); ctx.fill(); } }
+      else if(!s.done){ s.done=true; splashes.push({x:tx,y:ty,t0:now}); burst(tx,ty,s.hit?'#ff5a3a':'#9fe8ff',s.hit?70:26); } }
+    for(let i=splashes.length-1;i>=0;i--){ const sp=splashes[i], u=(now-sp.t0)/700; if(u>1){ splashes.splice(i,1); continue; }
+      ctx.strokeStyle='rgba(200,240,255,'+(1-u)+')'; ctx.lineWidth=3*dpr*(1-u);
+      ctx.beginPath(); ctx.arc(sp.x,sp.y,g.T*0.15+u*g.T*0.45,0,7); ctx.stroke(); }
+    // tutun izi
+    if(playing && Math.random()<0.5) puffs.push({x:px-18*dpr,y:py+2*dpr,r:3*dpr,life:1});
+    for(let i=puffs.length-1;i>=0;i--){ const p=puffs[i]; p.life-=0.025; p.r+=0.25*dpr; p.x-=0.4*dpr; if(p.life<=0){ puffs.splice(i,1); continue; }
+      ctx.fillStyle='rgba(255,'+Math.round(120+p.life*100)+',60,'+(p.life*.3)+')'; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,7); ctx.fill(); }
+    // samolyot
+    if(!plane.dead){ drawPlane(px,py,ang,Math.min(15*dpr,g.T*0.24),Math.sin(now/380)*0.35); }
+    else { const u=(now-plane.deadT)/900; if(u<1){ drawPlane(px+u*20*dpr,py+u*u*g.T,0.6+u*2,Math.min(15*dpr,g.T*0.24)*(1-u*.4),u*10); } }
+    // uchqunlar
+    for(let i=sparks.length-1;i>=0;i--){ const p=sparks[i]; p.life-=0.02; p.x+=p.vx; p.y+=p.vy; p.vy+=0.08*dpr; p.vx*=.98;
+      if(p.life<=0){ sparks.splice(i,1); continue; }
+      ctx.globalAlpha=p.life; ctx.fillStyle=p.c; ctx.beginPath(); ctx.arc(p.x,p.y,2.4*dpr*p.life+.5,0,7); ctx.fill(); ctx.globalAlpha=1; }
+    ctx.restore();
+    // tugma yozuvi kemaga yetgandan keyin qayta tayyor holat
+    if(!playing && (plane.dead && now-plane.deadT>1800 || plane.kamikaze && now-plane.kamikaze>2600)){ plane.dead=false; plane.kamikaze=0; plane.boom=false; reset(); paint(); }
+  }
+  window.KM={stop(){ alive=false; cancelAnimationFrame(raf); },
+    cell(r){ const g=geo(), [x,y]=cellXY(step,r,g); return [(x-camX)/dpr,y/dpr]; }};
+  size(); reset(); paint(); raf=requestAnimationFrame(frame);
 }
 
 // ---- FROG (Baqa) ----
@@ -19382,7 +19743,7 @@ function kidErr(e){
 function setTab(k){
   TAB=k;
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==='s-'+k));
-  const tk=(k==='crash'||k==='frog')?'casino':k;
+  const tk=(k==='crash'||k==='frog'||k==='kami')?'casino':k;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===tk));
   if(k==='crash' && window.CR) window.CR.poke();
   window.scrollTo(0,0);

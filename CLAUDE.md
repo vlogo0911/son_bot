@@ -151,3 +151,7 @@
   Effektlar `SND.play(nom)`: chip/tick/takeoff/cash/boom (Crash), hop/plop/splash/cash/win (Hovuz), click/whoosh/cannon/splash/
   explode/bigboom/cash (Kamikaze). Brauzer siyosati: birinchi tegishda `AudioContext` ochiladi. 🎵/🔊 tugmalar (`.sndbar`) har o'yin
   bo'limida, tanlov `localStorage` (`snd_m`, `snd_s`).
+- ✨ Interfeys ovozlari (premium "sehrli uchqun"): `SND.ui(nom)` (70 ms throttle) — `tab` (pastki tablar, shisha qo'ng'iroq),
+  `sparkle` (tugmalar: kristall arpedjio + yuqori chastotali shimmer, notalar tasodifiy), `card` (Kazino bannerlari, do'kon sovg'alari
+  `data-tap`), `select` (select.sel change), `good` (toast ✅/🟢/🎉/🏆 bilan boshlansa). Umumiy `pointerdown` listener, o'yin
+  bo'limlari ichida faqat `.gback` (o'yinlarning o'z effektlari bor). `bell()` — noharmonik qismli qo'ng'iroq tembri.

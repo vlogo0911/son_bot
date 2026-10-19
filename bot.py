@@ -19004,7 +19004,7 @@ function render(res){
   });
   const gifts=$('<div class="grid" style="margin-top:12px"></div>');
   (d.shop||[]).forEach(g=>{
-    const el=$('<div class="card" style="text-align:center;cursor:pointer"><div style="font-size:30px">'+esc(g.name.split(" ")[0])+'</div>'+
+    const el=$('<div class="card" data-tap="1" style="text-align:center;cursor:pointer"><div style="font-size:30px">'+esc(g.name.split(" ")[0])+'</div>'+
       '<div style="margin-top:6px">'+esc(g.name.replace(/^\S+\s/,''))+'</div><div class="val mag" style="font-size:16px">'+g.price+'$</div></div>');
     el.onclick=()=>{
       const to = shMode==='partner' ? 'partner' : (app_q(toWrap,'#shid').value||'').trim();
@@ -19121,7 +19121,12 @@ function render(res){
   initCrash(); initFrog(); initKami();
 }
 // tegilganda oltin uchqunlar (Crash'dan tashqari)
+document.addEventListener('change',e=>{ if(e.target.matches&&e.target.matches('select.sel')&&typeof SND!=='undefined') SND.ui('select'); });
 document.addEventListener('pointerdown',e=>{
+  // ✨ ovoz: o'yinlardan tashqaridagi tugmalar (o'yinlarning o'z effektlari bor)
+  const u=e.target.closest('.btn,.mini,.kbtn,.opt,.tab,.seg .s,.gcard,.gback,.card[data-tap],.chip,.ovx');
+  if(u && typeof SND!=='undefined' && (!u.closest('#s-crash,#s-frog,#s-kami') || u.classList.contains('gback'))){
+    SND.ui(u.classList.contains('tab')?'tab':(u.classList.contains('gcard')||u.hasAttribute('data-tap'))?'card':'sparkle'); }
   const t=e.target.closest('.btn,.mini,.kbtn,.opt,.tab,.pad.active,.seg .s');
   if(!t || t.closest('#s-crash')) return;
   for(let i=0;i<10;i++){ const sp=document.createElement('i'); sp.className='spark';
@@ -19133,7 +19138,7 @@ document.addEventListener('pointerdown',e=>{
 function setBal(v){ window.BAL=v; const b=document.getElementById('bal'); if(b) b.textContent=fmtMoney(v)+'$'; }
 function fmtMoney(n){ return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g,' '); }
 function app_q(el,sel){ return el.querySelector(sel); }
-function toast(m){ let t=document.getElementById('toast'); if(!t){ t=document.createElement('div'); t.id='toast'; document.body.appendChild(t);}
+function toast(m){ if(typeof SND!=='undefined' && /^[✅🟢🎉🏆]/u.test(String(m))) SND.play('good'); let t=document.getElementById('toast'); if(!t){ t=document.createElement('div'); t.id='toast'; document.body.appendChild(t);}
   t.textContent=m; t.className='show'; clearTimeout(window._tt); window._tt=setTimeout(()=>t.className='',2200); }
 function refresh(){ api('/app/api/data',{}).then(r=>{ if(r&&r.ok&&r.enabled) render(r); }); }
 function sheet(title, opts, onPick){
@@ -19247,8 +19252,26 @@ const SND=(function(){
     whoosh(t){ noise(t,0.45,0.13,{type:'bandpass',f:500,fTo:2600,a:0.15,q:1.4}); },
     cannon(t){ noise(t,0.45,0.35,{f:900,fTo:120,a:0.002,wet:0.6}); voice('sine',70,t,0.4,0.35,{bus:sfxBus,a:0.002,r:0.4,slide:35}); },
     explode(t){ FX.boom(t); noise(t+0.08,0.9,0.2,{type:'highpass',f:2500,fTo:600,a:0.01}); },
-    bigboom(t){ FX.boom(t); FX.boom(t+0.18); noise(t,1.8,0.3,{f:600,fTo:60,a:0.01,wet:0.8}); setTimeout(()=>play('win'),500); }
+    bigboom(t){ FX.boom(t); FX.boom(t+0.18); noise(t,1.8,0.3,{f:600,fTo:60,a:0.01,wet:0.8}); setTimeout(()=>play('win'),500); },
+    // ✨ interfeys: sehrli uchqunlar (premium his)
+    sparkle(t){ const sc=[88,91,93,95,98,100,103,105], n=4+Math.floor(Math.random()*2), st=Math.floor(Math.random()*3);
+      for(let i=0;i<n;i++){ const m=sc[Math.min(sc.length-1,st+i+Math.floor(Math.random()*2))], tt=t+i*(0.028+Math.random()*0.014), f=mtof(m);
+        bell(f,tt,0.05-i*0.006,0.5); }
+      noise(t,0.35,0.025,{type:'highpass',f:6500,fTo:11000,a:0.02,wet:0.6}); },
+    tab(t){ const b=[84,86,88][Math.floor(Math.random()*3)]; bell(mtof(b),t,0.05,0.6); bell(mtof(b+7),t+0.05,0.04,0.7);
+      noise(t,0.22,0.015,{type:'highpass',f:8000,a:0.01,wet:0.5}); },
+    card(t){ noise(t,0.45,0.04,{type:'bandpass',f:1200,fTo:7000,a:0.12,q:2,wet:0.5});
+      [76,83,88,95,100].forEach((m,i)=>bell(mtof(m),t+0.06+i*0.045,0.045,0.6)); },
+    select(t){ bell(mtof(93+Math.floor(Math.random()*3)*2),t,0.035,0.35); },
+    good(t){ [72,79,84,88,91,96].forEach((m,i)=>{ bell(mtof(m),t+i*0.055,0.055,0.9); });
+      voice('sine',mtof(60),t,1.2,0.05,{bus:sfxBus,a:0.02,r:1.2,wet:0.8}); noise(t+0.1,0.8,0.02,{type:'highpass',f:7000,a:0.2,wet:0.8}); }
   };
+  // qo'ng'iroq: asosiy ton + noharmonik qism (shisha/kristall tembri)
+  function bell(f,t,vol,dur){ voice('sine',f,t,dur,vol,{bus:sfxBus,a:0.002,r:dur,wet:0.9});
+    voice('sine',f*2.76,t,dur*0.45,vol*0.35,{bus:sfxBus,a:0.001,r:dur*0.45,wet:0.9});
+    voice('triangle',f*5.4,t,dur*0.2,vol*0.12,{bus:sfxBus,a:0.001,r:dur*0.2}); }
+  let lastUi=0;
+  function ui(name){ const n=performance.now(); if(n-lastUi<70) return; lastUi=n; play(name); }
   function play(name){ if(!sfxOn || !init() || ctx.state!=='running' || !FX[name]) return; try{ FX[name](ctx.currentTime+0.01); }catch(e){} }
   function toggle(kind){
     if(kind==='m'){ musicOn=!musicOn; save('m',musicOn); setMusic(want); }
@@ -19258,7 +19281,7 @@ const SND=(function(){
   function paintBars(){ document.querySelectorAll('.sndbar').forEach(b=>{
     const m=b.querySelector('[data-snd="m"]'), s=b.querySelector('[data-snd="s"]');
     m.classList.toggle('off',!musicOn); s.classList.toggle('off',!sfxOn); s.textContent=sfxOn?'🔊':'🔇'; }); }
-  return {music:setMusic, play, toggle, paintBars};
+  return {music:setMusic, play, ui, toggle, paintBars};
 })();
 
 // ---- 3D "Royal" samolyot — umumiy chizgich (Crash va Kamikaze) ----

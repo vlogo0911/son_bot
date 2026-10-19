@@ -1840,6 +1840,65 @@ async def cmd_oila(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text("\n".join(lines), reply_markup=kb)
 
 
+def child_deliver_now(rid=None):
+    """Kutayotgan (tasdiqlangan, 48 soat kutilayotgan) so'rov(lar)ni darhol yetkazishga qo'yadi.
+    family_delivery_worker 3 soniya ichida yetkazadi. Qaytaradi: nechta so'rov."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as c:
+        if rid is None:
+            cur = c.execute("UPDATE child_requests SET due_at=? WHERE status='approved' AND (due_at IS NULL OR due_at>?)", (now, now))
+        else:
+            cur = c.execute("UPDATE child_requests SET due_at=? WHERE id=? AND status='approved'", (now, rid))
+    return cur.rowcount
+
+
+async def notify_owners_child_request(bot, rid, requester, partner, name, gender, due, cost):
+    """Yangi (to'langan, kutilayotgan) farzand so'rovi haqida ownerlarga xabar + ⚡ tugma."""
+    try:
+        due_txt = datetime.fromisoformat(due).strftime("%d.%m %H:%M")
+    except ValueError:
+        due_txt = due
+    text = ("👶 <b>FARZAND SO‘ROVI</b> #{rid}\n\n"
+            "👨 {a} (<code>{ra}</code>)\n❤️ {b} (<code>{rb}</code>)\n\n"
+            "🍼 Ism: <b>{name}</b> · {g}\n💵 To‘langan: <b>{cost}$</b>\n⏳ Yetkaziladi: <b>{due}</b> (48 soat)\n\n"
+            "Hammasini birdan yetkazish: /far").format(
+        rid=rid, a=person_name(requester), ra=requester, b=person_name(partner), rb=partner,
+        name=escape(name or "—"), g=escape(child_gender_label(requester, gender)), cost=fmt_money(cost), due=due_txt)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Hozir yetkazish", callback_data=f"family:far:{rid}")]])
+    for oid in sorted(CAREER_OWNER_IDS):
+        try:
+            await bot.send_message(oid, text, reply_markup=kb)
+        except TelegramError:
+            pass
+
+
+async def cmd_far(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/far — ownerlar: kutilayotgan barcha farzandlarni darhol egalariga yetkazadi."""
+    user, msg = update.effective_user, update.effective_message
+    if not user or not msg:
+        return
+    if user.id not in CAREER_OWNER_IDS:
+        await msg.reply_text("⛔ Bu buyruq faqat bot egalari uchun.")
+        return
+    rows = db().execute(
+        "SELECT id, requester_id, partner_id, child_name FROM child_requests WHERE status='approved' ORDER BY id").fetchall()
+    pending = db().execute("SELECT COUNT(*) FROM child_requests WHERE status='pending'").fetchone()[0]
+    if not rows:
+        await msg.reply_text("✅ Kutilayotgan farzand yo‘q." + (f"\n⏳ Juft roziligini kutayotgan so‘rovlar: <b>{pending}</b>" if pending else ""))
+        return
+    n = child_deliver_now()
+    lines = [f"⚡ <b>{len(rows)} ta farzand egalariga yetkazilmoqda:</b>", ""]
+    for rid, a, b, name in rows[:40]:
+        lines.append(f"👶 <b>{escape(name or '—')}</b> — {person_name(a)} ❤️ {person_name(b)}")
+    if len(rows) > 40:
+        lines.append(f"… va yana {len(rows) - 40} ta")
+    if pending:
+        lines += ["", f"⏳ Juft roziligini kutayotganlar: <b>{pending}</b> (rozilik berilgach yetkaziladi)"]
+    lines.append("\nOta-onalarga bir necha soniyada xabar boradi.")
+    logger.info("/far: %s ta so'rov darhol yetkazishga qo'yildi (owner %s)", n, user.id)
+    await msg.reply_text("\n".join(lines))
+
+
 async def family_delivery_worker(application):
     while True:
         try:
@@ -3966,8 +4025,24 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(pid, family_text(pid, "approved_now" if immediate_delivery else "approved"))
             except TelegramError:
                 pass
+        if not immediate_delivery:
+            await notify_owners_child_request(context.bot, rid, requester, partner, child_name, child_gender, due, cost)
         await q.answer("Rozilik qabul qilindi.")
         await q.edit_message_text("✅ Rozilik berildi. Farzand kutishsiz yetkaziladi." if immediate_delivery else "✅ Rozilik berildi. Farzand 48 soat ichida yetkaziladi.")
+        return
+
+    if data.startswith("family:far:"):
+        if uid not in CAREER_OWNER_IDS:
+            await q.answer("Faqat bot egalari uchun.", show_alert=True)
+            return
+        rid = int(data.rsplit(":", 1)[1])
+        n = child_deliver_now(rid)
+        await q.answer("⚡ Farzand hozir yetkaziladi!" if n else "Bu so‘rov allaqachon yetkazilgan yoki bekor qilingan.", show_alert=not n)
+        if n:
+            try:
+                await q.edit_message_text(q.message.text_html + "\n\n⚡ <b>Owner tomonidan darhol yetkazildi.</b>")
+            except TelegramError:
+                pass
         return
 
     if data.startswith("rel:gender:"):
@@ -13752,6 +13827,7 @@ KID_COLUMNS = {
     "custody_id": "INTEGER NOT NULL DEFAULT 0",   # ajrashgandan keyin farzand kim bilan qoladi
     "alimony_payer": "INTEGER NOT NULL DEFAULT 0",  # kuniga aliment to'laydigan ota/ona
     "last_alimony": "INTEGER NOT NULL DEFAULT 0",
+    "inst_id": "INTEGER NOT NULL DEFAULT 0",      # yozilgan ta'lim muassasasi (edu_institutions.id)
 }
 ALIMONY_PER_CHILD = 75      # $ / kun / farzand — farzand ishga kirguncha
 KID_FIELDS = ("id", "pair_id", "parent1_id", "parent2_id", "gender", "child_name", *KID_COLUMNS)
@@ -13781,6 +13857,47 @@ def init_kids():
                 c.execute(f"ALTER TABLE family_children ADD COLUMN {col} {decl}")
         if "custody_id" not in req_cols:
             c.execute("ALTER TABLE pair_requests ADD COLUMN custody_id INTEGER")
+    init_edu()   # ta'lim muassasalari jadvali farzandlar bilan birga
+
+
+# ── 🏫 Ta'lim muassasalari: ownerlar ochadi (nomi + yillik to'lov); farzand shu bosqichdagi muassasaga yoziladi ──
+EDU_KINDS = ("kinder", "school", "college", "uni")
+EDU_MIN_AGE = {"kinder": 3, "school": 7, "college": 16, "uni": 19}
+EDU_FEE_MAX = 1_000_000
+
+
+def init_edu():
+    with db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS edu_institutions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, name TEXT NOT NULL,
+            fee INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, owner_id INTEGER, created_at INTEGER)""")
+
+
+def edu_get(inst_id):
+    row = db().execute("SELECT id, kind, name, fee, active FROM edu_institutions WHERE id=?", (inst_id,)).fetchone()
+    return dict(zip(("id", "kind", "name", "fee", "active"), row)) if row else None
+
+
+def edu_list(only_active=True):
+    q = "SELECT id, kind, name, fee, active FROM edu_institutions" + (" WHERE active=1" if only_active else "") + " ORDER BY kind, fee, id"
+    return [dict(zip(("id", "kind", "name", "fee", "active"), r)) for r in db().execute(q)]
+
+
+def kid_inst(kid):
+    """Farzand hozirgi bosqichiga mos (faol) muassasada o'qisa — o'sha muassasa."""
+    if not kid.get("inst_id"):
+        return None
+    inst = edu_get(kid["inst_id"])
+    return inst if inst and inst["active"] and inst["kind"] == kid_stage(kid) else None
+
+
+def kid_fee(kid):
+    """Joriy yil uchun ta'lim to'lovi: muassasa narxi (owner belgilagan), aks holda standart KID_FEES."""
+    stage = kid_stage(kid)
+    if stage not in KID_FEES:
+        return 0
+    inst = kid_inst(kid)
+    return inst["fee"] if inst else KID_FEES[stage]
 
 
 def kid_stage(kid):
@@ -13874,7 +13991,7 @@ def kid_tick(kid, now):
     if block == "fee" and not kid["alerts"] & KID_ALERT_FEE:
         kid["alerts"] |= KID_ALERT_FEE
         stage = kid_stage(kid)
-        events.append(("n_fee", {"place": stage, "fee": KID_FEES[stage]}))
+        events.append(("n_fee", {"place": stage, "fee": kid_fee(kid)}))
     if block == "decide" and not kid["alerts"] & KID_ALERT_DECIDE:
         kid["alerts"] |= KID_ALERT_DECIDE
         events.append(("n_decide", {"place": "school" if kid["age"] == 16 else "college"}))
@@ -14033,7 +14150,7 @@ def kid_view(uid, kid):
         ))
         block = kid_block(kid)
         if block == "fee":
-            lines.append(kid_t(uid, "fee", place=kid_word(uid, "places", stage), fee=KID_FEES[stage]))
+            lines.append(kid_t(uid, "fee", place=kid_word(uid, "places", stage), fee=kid_fee(kid)))
         elif block == "decide":
             lines.append(kid_t(uid, "decide16" if kid["age"] == 16 else "decide19"))
         elif block:
@@ -14052,7 +14169,7 @@ def kid_view(uid, kid):
         ])
         if stage in KID_FEES and kid["fee_age"] < kid["age"] and block != "decide":
             rows.append([kid_btn(
-                uid, kid_t(uid, "b_fee", place=kid_word(uid, "places", stage), fee=KID_FEES[stage]), "fee", kid["id"],
+                uid, kid_t(uid, "b_fee", place=kid_word(uid, "places", stage), fee=kid_fee(kid)), "fee", kid["id"],
             )])
     rows.append([kid_btn(uid, kid_t(uid, "b_list"), "list")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -14160,7 +14277,7 @@ async def cb_kid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             await show(kid_view(uid, kid))
             return
-        fee = KID_FEES[stage]
+        fee = kid_fee(kid)
         kid["fee_age"] = kid["age"]
         kid["alerts"] &= ~KID_ALERT_FEE
         with c:
@@ -16714,6 +16831,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_birja_buy(uid, body.get("asset"), body.get("usd"))
         elif path == "/app/api/birja/sell":
             coro = web_birja_sell(uid, body.get("asset"), body.get("pct"))
+        elif path == "/app/api/edu/enroll":
+            coro = web_edu_enroll(uid, body.get("kid"), body.get("inst"))
+        elif path in ("/app/api/edu/add", "/app/api/edu/update", "/app/api/edu/toggle"):
+            coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/kid":
             coro = web_kid_action(uid, body.get("kid"), body.get("act"), body.get("item"))
         else:
@@ -17764,11 +17885,15 @@ async def webapp_payload(user_id):
                     for k, v in KID_ITEMS.items() if v[0] == kind and v[1] <= kid["age"] <= v[2]]
         fee_due = 0
         if not kid["working"] and st in KID_FEES and kid["fee_age"] < kid["age"]:
-            fee_due = KID_FEES[st]
+            fee_due = kid_fee(kid)
+        inst = kid_inst(kid)
         kid_list.append({
             "id": kid["id"], "name": kid["child_name"] or "—", "age": kid["age"],
-            "stage": _stage_uz.get(st, st), "working": bool(kid["working"]),
+            "stage": _stage_uz.get(st, st), "stage_key": st, "gender": kid["gender"], "working": bool(kid["working"]),
             "hunger": round(kid["hunger"]), "happy": round(kid["happy"]),
+            "growth": round(min(1.0, kid["growth"] / KID_YEAR) * 100), "block": kid_block(kid) or "",
+            "inst": ({"id": inst["id"], "name": inst["name"], "fee": inst["fee"]} if inst else None),
+            "salary": KID_SALARY.get(kid["edu"], 0) if kid["working"] else 0,
             "food": _items("food"), "toy": _items("toy"), "fee": fee_due,
         })
 
@@ -17799,6 +17924,8 @@ async def webapp_payload(user_id):
         "birja_market": birja_market, "birja_buy_fixed": BIRJA_BUY_FIXED,
         "birja_pcts": BIRJA_PCTS, "birja_min": BIRJA_MIN_ORDER,
         "crash_history": list(WEB_CRASH_HISTORY),
+        "edu": edu_list(True), "edu_min_age": EDU_MIN_AGE, "edu_default_fee": KID_FEES,
+        "edu_all": edu_list(False) if is_owner else [],
         "kami": kami_enabled_for(user_id),
         "kami_test": not webapp_flags().get("kami", 0),
         "is_owner": is_owner,
@@ -18408,7 +18535,7 @@ async def web_kid_action(uid, kid_id, act, item):
         stage = kid_stage(kid)
         if stage not in KID_FEES or kid["fee_age"] >= kid["age"]:
             return {"error": "no_fee"}
-        fee = KID_FEES[stage]
+        fee = kid_fee(kid)
         kid["fee_age"] = kid["age"]
         kid["alerts"] &= ~KID_ALERT_FEE
         with c:
@@ -18416,6 +18543,76 @@ async def web_kid_action(uid, kid_id, act, item):
                 return {"error": "funds", "balance": wallet_balance(uid)}
             kid_save(c, kid)
         return {"result": "fee", "fee": fee, "balance": wallet_balance(uid)}
+    return {"error": "act"}
+
+
+async def web_edu_enroll(uid, kid_id, inst_id):
+    """Ota/ona farzandni hozirgi bosqichiga mos muassasaga yozdiradi (to'lov keyin — 🎓 Ta'lim tugmasida)."""
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    try:
+        kid = kid_fresh(int(kid_id)); inst = edu_get(int(inst_id))
+    except (TypeError, ValueError):
+        return {"error": "kid"}
+    if not kid or uid not in (kid["parent1_id"], kid["parent2_id"]):
+        return {"error": "not_parent"}
+    if kid["working"]:
+        return {"error": "working"}
+    if not inst or not inst["active"]:
+        return {"error": "inst"}
+    if inst["kind"] != kid_stage(kid):
+        return {"error": "inst_stage"}
+    kid["inst_id"] = inst["id"]
+    with db() as c:
+        kid_save(c, kid)
+    return {"result": "enrolled", "inst": inst["name"], "fee": inst["fee"]}
+
+
+async def web_edu_admin(uid, act, body):
+    """Ownerlar: muassasa ochish / nomi va to'lovini o'zgartirish / yopish."""
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner_only"}
+    c = db()
+    if act == "add":
+        kind = body.get("kind")
+        name = str(body.get("name") or "").strip()[:40]
+        try:
+            fee = int(body.get("fee"))
+        except (TypeError, ValueError):
+            return {"error": "fee"}
+        if kind not in EDU_KINDS:
+            return {"error": "kind"}
+        if len(name) < 2:
+            return {"error": "name"}
+        if not 0 <= fee <= EDU_FEE_MAX:
+            return {"error": "fee"}
+        with c:
+            new_id = c.execute("INSERT INTO edu_institutions(kind, name, fee, active, owner_id, created_at) VALUES (?,?,?,?,?,?)",
+                               (kind, name, fee, 1, uid, int(time.time()))).lastrowid
+        return {"result": "added", "id": new_id, "edu_all": edu_list(False)}
+    try:
+        inst = edu_get(int(body.get("id")))
+    except (TypeError, ValueError):
+        inst = None
+    if not inst:
+        return {"error": "inst"}
+    if act == "update":
+        name = str(body.get("name") if body.get("name") is not None else inst["name"]).strip()[:40]
+        try:
+            fee = int(body.get("fee") if body.get("fee") is not None else inst["fee"])
+        except (TypeError, ValueError):
+            return {"error": "fee"}
+        if len(name) < 2:
+            return {"error": "name"}
+        if not 0 <= fee <= EDU_FEE_MAX:
+            return {"error": "fee"}
+        with c:
+            c.execute("UPDATE edu_institutions SET name=?, fee=? WHERE id=?", (name, fee, inst["id"]))
+        return {"result": "updated", "edu_all": edu_list(False)}
+    if act == "toggle":
+        with c:
+            c.execute("UPDATE edu_institutions SET active=? WHERE id=?", (0 if inst["active"] else 1, inst["id"]))
+        return {"result": "toggled", "edu_all": edu_list(False)}
     return {"error": "act"}
 
 
@@ -18770,6 +18967,63 @@ WEBAPP_HTML = r"""<!doctype html>
   .sndbar span{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;cursor:pointer;
     background:linear-gradient(180deg,#2a1e0c,#140e07);box-shadow:inset 0 0 0 1px #8a6420}
   .sndbar span.off{opacity:.45;filter:grayscale(1)}
+  /* ───── 👶 Farzand kartalari: har bosqichga alohida dunyo ───── */
+  .kidc{position:relative;overflow:hidden;border-radius:22px;padding:16px 14px 14px;margin-top:14px;isolation:isolate;
+    box-shadow:0 12px 26px rgba(0,0,0,.5),inset 0 0 0 1.5px rgba(255,214,110,.45)}
+  .kidc::before{content:"";position:absolute;inset:0;z-index:-2}
+  .kidc.st-baby::before{background:radial-gradient(120% 90% at 20% 0%,#ffd6e8 0%,#c9b6ff 45%,#6a5acd 100%)}
+  .kidc.st-kinder::before{background:linear-gradient(160deg,#ffe066 0%,#ff9f43 40%,#ee5a6f 100%)}
+  .kidc.st-school::before{background:linear-gradient(170deg,#1f5f45 0%,#164433 60%,#0f2f24 100%)}
+  .kidc.st-school::after{content:"";position:absolute;inset:0;z-index:-1;opacity:.18;
+    background:repeating-linear-gradient(0deg,transparent 0 26px,rgba(255,255,255,.5) 26px 27px)}
+  .kidc.st-college::before{background:linear-gradient(160deg,#0b3d91 0%,#08285e 60%,#061a3d 100%)}
+  .kidc.st-college::after{content:"";position:absolute;inset:0;z-index:-1;opacity:.2;
+    background-image:linear-gradient(rgba(120,200,255,.6) 1px,transparent 1px),linear-gradient(90deg,rgba(120,200,255,.6) 1px,transparent 1px);background-size:18px 18px}
+  .kidc.st-uni::before{background:radial-gradient(120% 90% at 80% 0%,#3b2a6b 0%,#1d1440 55%,#0d0a20 100%)}
+  .kidc.st-uni::after{content:"";position:absolute;left:0;right:0;top:0;height:4px;z-index:-1;background:var(--g-metal)}
+  .kidc.st-work::before{background:linear-gradient(160deg,#1c1c22 0%,#2b2410 60%,#0f0d08 100%)}
+  .kdeco{position:absolute;inset:0;z-index:-1;pointer-events:none}
+  .kdeco i{position:absolute;font-style:normal;font-size:22px;opacity:.28;animation:kfloat 6s ease-in-out infinite;animation-delay:calc(var(--i)*-1.4s)}
+  .kdeco i:nth-child(1){top:10%;right:8%}.kdeco i:nth-child(2){top:58%;right:16%;font-size:18px}
+  .kdeco i:nth-child(3){top:32%;right:34%;font-size:15px}.kdeco i:nth-child(4){bottom:12%;left:46%;font-size:16px}
+  @keyframes kfloat{50%{transform:translateY(-7px) rotate(8deg)}}
+  .ktop{display:flex;align-items:center;gap:14px}
+  .kava{position:relative;width:74px;height:74px;flex:none;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.55),rgba(255,255,255,.12));box-shadow:0 0 0 3px rgba(255,255,255,.35),0 8px 18px rgba(0,0,0,.35)}
+  .kem{font-size:44px;line-height:1;animation:kbob 3.2s ease-in-out infinite}
+  @keyframes kbob{50%{transform:translateY(-3px) scale(1.04)}}
+  .kacc{position:absolute;right:-4px;bottom:-2px;font-size:24px;filter:drop-shadow(0 2px 3px rgba(0,0,0,.45))}
+  .kname{font-size:21px;font-weight:900;color:#fff;text-shadow:0 2px 6px rgba(0,0,0,.45)}
+  .kchips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .kchip{font-size:11.5px;font-weight:800;padding:4px 9px;border-radius:999px;background:rgba(0,0,0,.28);color:#fff}
+  .kchip.st{background:rgba(255,255,255,.22)}
+  .kidc .bars .t,.kgrow .t{color:rgba(255,255,255,.88)}
+  .kgrow{margin-top:12px}.kgrow .t{display:flex;justify-content:space-between;font-size:11.5px;font-weight:700}
+  .kgrow .track{height:8px;border-radius:6px;background:rgba(0,0,0,.3);overflow:hidden;margin-top:4px}
+  .kgrow .fill{height:100%;border-radius:6px;background:var(--g-metal);box-shadow:0 0 10px rgba(255,210,74,.6)}
+  .kidc .bar .track{background:rgba(0,0,0,.3)}
+  .kblock{margin-top:8px;font-size:12px;font-weight:800;color:#fff;background:rgba(255,60,60,.35);padding:6px 10px;border-radius:10px}
+  .kinst{margin-top:8px;font-size:12.5px;color:#fff;background:rgba(0,0,0,.25);padding:7px 10px;border-radius:10px}
+  .kinst.dim{opacity:.8}
+  .kwork{margin-top:12px;font-size:13px;color:#ffe9a8;background:rgba(0,0,0,.3);padding:8px 10px;border-radius:12px}
+  .kidc .kbtns{flex-wrap:wrap}
+  .kidc .kbtn{background:rgba(0,0,0,.32);border-color:rgba(255,255,255,.28);color:#fff;flex:1 1 30%}
+  .kidc .kbtn.kfee{background:var(--g-metal);color:#2b1b02;border-color:#ffe08a;font-weight:900}
+  /* 🏫 Ta'lim yo'li */
+  .edupath{margin-top:20px}
+  .egrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .etile{text-align:center;padding:12px 4px;border-radius:16px;background:linear-gradient(180deg,#1a140a,#0f0b06);
+    box-shadow:inset 0 0 0 1px #4a3714;opacity:.55;filter:grayscale(.6)}
+  .etile.open{opacity:1;filter:none;cursor:pointer;box-shadow:inset 0 0 0 1.5px #d9a63c,0 6px 16px rgba(0,0,0,.4);animation:padglow 2.4s ease-in-out infinite}
+  .eic{font-size:28px}.enm{font-weight:900;font-size:12.5px;margin-top:4px}.esub{font-size:10.5px;color:var(--dim);margin-top:2px}
+  /* owner: muassasalar */
+  .egrp{margin:12px 0 6px;font-weight:800;font-size:13px;color:var(--gold)}
+  .erow{display:flex;gap:6px;align-items:center;margin-bottom:6px}
+  .erow.off{opacity:.5}
+  .erow input{min-width:0;background:#140e07;border:1px solid #6b4f1c;border-radius:10px;color:var(--txt);padding:8px;font-weight:700;font-size:13px;outline:none}
+  .erow .en{flex:1}.erow .ef{width:84px;text-align:right}
+  .erow span{width:32px;height:32px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:9px;cursor:pointer;
+    background:linear-gradient(180deg,#2a1e0c,#140e07);box-shadow:inset 0 0 0 1px #8a6420}
   /* ───── pastki tugmalar: kattaroq, nomli, oltin ───── */
   .tabs{gap:4px;padding:8px 8px calc(10px + env(safe-area-inset-bottom));overflow-x:auto;scrollbar-width:none;
     background:linear-gradient(180deg,rgba(28,20,8,.96),rgba(10,7,4,.98));border-top:none;
@@ -18959,34 +19213,67 @@ function render(res){
   bx.appendChild(bl);
   app.appendChild(bx);
 
-  // FARZAND — boshqaruv
+  // FARZAND — har yosh bosqichiga alohida dizayn + ta'lim yo'li
   const fz=$('<div class="sec" id="s-farzand"></div>');
   fz.appendChild($('<h2>👶 Farzandlar</h2>'));
+  const KS={ // bosqich: [o'g'il emoji, qiz emoji, aksessuar, nomi, yosh oralig'i]
+    baby:['👶','👶','🍼','Chaqaloq','0–2'], kinder:['👦','👧','🧸','Bog‘cha','3–6'], school:['🙋‍♂️','🙋‍♀️','🎒','Maktab','7–15'],
+    college:['👨‍🔬','👩‍🔬','🔬','Kollej','16–18'], uni:['👨‍🎓','👩‍🎓','📜','Universitet','19–22'], work:['👨‍💼','👩‍💼','💼','Ishchi','23+'] };
+  const KDECO={baby:['⭐','☁️','🌙','✨'],kinder:['🖍️','🎈','🧩','🌈'],school:['📐','✏️','📚','🔔'],college:['🧪','⚙️','📊','💡'],uni:['🎓','🏛️','📖','🌟'],work:['💰','📈','🏙️','💎']};
+  const BLOCKMSG={hungry:'🍔 Och — o‘smayapti',sad:'😢 Xafa — o‘smayapti',fee:'🎓 Ta‘lim to‘lovi kutilmoqda',decide:'🧭 Yo‘l tanlash kerak (botda)'};
   (d.kids_list||[]).forEach(k=>{
+    const st=KS[k.stage_key]?k.stage_key:'baby', S=KS[st], em=k.gender==='girl'?S[1]:S[0];
     const hc=k.hunger<30?'#ff6b6b':(k.hunger<60?'var(--gold)':'var(--lime)');
     const pc=k.happy<30?'#ff6b6b':(k.happy<60?'var(--gold)':'var(--lime)');
-    const card=$('<div class="kid"><div style="display:flex;justify-content:space-between">'+
-      '<b>'+esc(k.name)+'</b><span class="hsub">'+esc(k.age)+' yosh · '+esc(k.stage)+(k.working?' 💼':'')+'</span></div>'+
-      '<div class="bars"><div class="bar"><div class="t">🍔 To‘qlik</div><div class="track"><div class="fill" style="width:'+k.hunger+'%;background:'+hc+'"></div></div></div>'+
-      '<div class="bar"><div class="t">😊 Kayfiyat</div><div class="track"><div class="fill" style="width:'+k.happy+'%;background:'+pc+'"></div></div></div></div>'+
+    const deco=KDECO[st].map((e,i)=>'<i style="--i:'+i+'">'+e+'</i>').join('');
+    const instLine=(st in d.edu_default_fee)?(k.inst?'<div class="kinst">🏫 '+esc(k.inst.name)+' · <b>'+fmtMoney(k.inst.fee)+'$</b>/yil</div>'
+      :'<div class="kinst dim">🏫 Muassasa tanlanmagan · standart '+fmtMoney(d.edu_default_fee[st])+'$/yil</div>'):'';
+    const card=$('<div class="kidc st-'+st+'"><div class="kdeco">'+deco+'</div>'+
+      '<div class="ktop"><div class="kava"><span class="kem">'+em+'</span><span class="kacc">'+S[2]+'</span></div>'+
+      '<div class="kmeta"><div class="kname">'+esc(k.name)+'</div>'+
+      '<div class="kchips"><span class="kchip">'+esc(k.age)+' yosh</span><span class="kchip st">'+S[3]+' · '+S[4]+'</span></div></div></div>'+
+      (k.working?'<div class="kwork">💼 Ishlaydi · kuniga <b>'+fmtMoney(k.salary)+'$</b> (ota-onaga teng)</div>':
+      '<div class="kgrow"><div class="t"><span>🌱 Keyingi yoshgacha</span><b>'+k.growth+'%</b></div><div class="track"><div class="fill" style="width:'+k.growth+'%"></div></div></div>'+
+      (k.block?'<div class="kblock">'+BLOCKMSG[k.block]+'</div>':'')+
+      '<div class="bars"><div class="bar"><div class="t">🍔 To‘qlik '+k.hunger+'%</div><div class="track"><div class="fill" style="width:'+k.hunger+'%;background:'+hc+'"></div></div></div>'+
+      '<div class="bar"><div class="t">😊 Kayfiyat '+k.happy+'%</div><div class="track"><div class="fill" style="width:'+k.happy+'%;background:'+pc+'"></div></div></div></div>'+
+      instLine)+
       '<div class="kbtns"></div></div>');
     const btns=app_q(card,'.kbtns');
     if(!k.working){
       if((k.food||[]).length){ const fb=$('<div class="kbtn">🍔 Ovqat</div>');
         fb.onclick=()=>sheet('🍔 '+esc(k.name)+' — ovqat',k.food.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
-          (item)=>api('/app/api/kid',{kid:k.id,act:'feed',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('🍔 To‘qlik '+r.value+'%'); refresh(); } else toast(kidErr(r.error)); }));
+          (item)=>api('/app/api/kid',{kid:k.id,act:'feed',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('✅ To‘qlik '+r.value+'%'); refresh(); } else toast(kidErr(r.error)); }));
         btns.appendChild(fb); }
       if((k.toy||[]).length){ const tb=$('<div class="kbtn">🧸 O‘yinchoq</div>');
         tb.onclick=()=>sheet('🧸 '+esc(k.name)+' — o‘yinchoq',k.toy.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
-          (item)=>api('/app/api/kid',{kid:k.id,act:'toy',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('😊 Kayfiyat '+r.value+'%'); refresh(); } else toast(kidErr(r.error)); }));
+          (item)=>api('/app/api/kid',{kid:k.id,act:'toy',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('✅ Kayfiyat '+r.value+'%'); refresh(); } else toast(kidErr(r.error)); }));
         btns.appendChild(tb); }
-      if(k.fee>0){ const feb=$('<div class="kbtn" style="color:var(--gold)">🎓 Ta‘lim '+k.fee+'$</div>');
-        feb.onclick=()=>api('/app/api/kid',{kid:k.id,act:'fee'}).then(r=>{ if(r.result==='fee'){ setBal(r.balance); toast('🎓 To‘lov qilindi'); refresh(); } else toast(kidErr(r.error)); });
+      const insts=(d.edu||[]).filter(x=>x.kind===st);
+      if(insts.length){ const ib=$('<div class="kbtn">🏫 Muassasa</div>');
+        ib.onclick=()=>sheet('🏫 '+esc(k.name)+' uchun '+S[3].toLowerCase(),insts.map(x=>({label:(k.inst&&k.inst.id===x.id?'✅ ':'')+esc(x.name)+' · '+fmtMoney(x.fee)+'$/yil',value:x.id})),
+          (iid)=>api('/app/api/edu/enroll',{kid:k.id,inst:iid}).then(r=>{ if(r.result==='enrolled'){ toast('✅ '+esc(r.inst)+' ga yozildi'); refresh(); } else toast(kidErr(r.error)); }));
+        btns.appendChild(ib); }
+      if(k.fee>0){ const feb=$('<div class="kbtn kfee">🎓 Ta‘lim '+fmtMoney(k.fee)+'$</div>');
+        feb.onclick=()=>api('/app/api/kid',{kid:k.id,act:'fee'}).then(r=>{ if(r.result==='fee'){ setBal(r.balance); toast('✅ Ta‘lim to‘lovi qilindi'); refresh(); } else toast(kidErr(r.error)); });
         btns.appendChild(feb); }
     }
     fz.appendChild(card);
   });
   if(!(d.kids_list||[]).length) fz.appendChild($('<div class="card full"><div class="center">Farzandlar yo‘q.<br><span class="hsub">Botda /oila</span></div></div>'));
+  // 🏫 Ta'lim yo'li: kategoriyalar farzand yoshi yetganda ochiladi
+  const EDU_ORDER=[['kinder','🧸','Bog‘cha'],['school','🎒','Maktab'],['college','🔬','Kollej'],['uni','🎓','Institut']];
+  const maxAge=Math.max(-1,...(d.kids_list||[]).map(k=>k.age));
+  const path=$('<div class="edupath"><h2>🏫 Ta‘lim yo‘li</h2><div class="egrid"></div></div>');
+  EDU_ORDER.forEach(([kind,ic,nm])=>{
+    const need=d.edu_min_age[kind], open=maxAge>=need, list=(d.edu||[]).filter(x=>x.kind===kind);
+    const t=$('<div class="etile'+(open?' open':'')+'"><div class="eic">'+(open?ic:'🔒')+'</div><div class="enm">'+nm+'</div>'+
+      '<div class="esub">'+(open?(list.length?list.length+' ta muassasa':'Standart: '+fmtMoney(d.edu_default_fee[kind])+'$'):need+' yoshdan')+'</div></div>');
+    if(open) t.onclick=()=>{ if(!list.length){ toast('Hozircha '+nm.toLowerCase()+' muassasasi ochilmagan — standart narx: '+fmtMoney(d.edu_default_fee[kind])+'$/yil'); return; }
+      sheet(ic+' '+nm+' muassasalari',list.map(x=>({label:esc(x.name)+'<br><b>'+fmtMoney(x.fee)+'$</b>/yil',value:x.id})),()=>toast('Yozdirish: farzand kartasidagi 🏫 Muassasa tugmasi')); };
+    app_q(path,'.egrid').appendChild(t);
+  });
+  if(maxAge>=0) fz.appendChild(path);
   app.appendChild(fz);
 
   // SHOP
@@ -19099,6 +19386,31 @@ function render(res){
       card('🎰 Faol o‘yinlar', d.owner.active_games,'')+
       card('🎲 O‘yinlarda', d.owner.in_games+'$','neon')+
       '</div>'));
+    // 🏫 Ta'lim muassasalari (ownerlar: ochish, nomi/narxini o'zgartirish, yopish)
+    const KN={kinder:'🧸 Bog‘cha',school:'🎒 Maktab',college:'🔬 Kollej',uni:'🎓 Institut'};
+    const ed=$('<div class="card full oedu" style="margin-top:12px"><div class="lbl">🏫 Ta‘lim muassasalari</div>'+
+      '<div class="frow"><select class="sel" id="ekind">'+Object.keys(KN).map(k=>'<option value="'+k+'">'+KN[k]+'</option>').join('')+'</select></div>'+
+      '<div class="frow"><input class="bet" id="ename" maxlength="40" placeholder="Nomi (masalan: Prezident maktabi)" style="text-align:left"></div>'+
+      '<div class="frow"><input class="bet" id="efee" type="number" inputmode="numeric" placeholder="Yillik to‘lov, $"></div>'+
+      '<button class="btn go full" id="eadd">➕ Muassasa ochish</button><div class="elist" id="elist"></div></div>');
+    function drawEdu(all){
+      const box=app_q(ed,'#elist');
+      if(!all.length){ box.innerHTML='<div class="hsub" style="margin-top:10px">Hali muassasa yo‘q — standart narxlar ishlaydi.</div>'; return; }
+      box.innerHTML=Object.keys(KN).map(kind=>{ const rows=all.filter(x=>x.kind===kind); if(!rows.length) return '';
+        return '<div class="egrp">'+KN[kind]+'</div>'+rows.map(x=>'<div class="erow'+(x.active?'':' off')+'" data-id="'+x.id+'">'+
+          '<input class="en" value="'+esc(x.name)+'" maxlength="40"><input class="ef" type="number" inputmode="numeric" value="'+x.fee+'">'+
+          '<span class="es" title="Saqlash">💾</span><span class="et" title="Yopish/ochish">'+(x.active?'🟢':'⛔')+'</span></div>').join(''); }).join('');
+      box.querySelectorAll('.erow').forEach(r=>{ const id=+r.dataset.id;
+        app_q(r,'.es').onclick=()=>api('/app/api/edu/update',{id:id,name:app_q(r,'.en').value,fee:app_q(r,'.ef').value}).then(res=>{
+          if(res.result){ toast('✅ Saqlandi'); drawEdu(res.edu_all); } else toast(eduErr(res.error)); });
+        app_q(r,'.et').onclick=()=>api('/app/api/edu/toggle',{id:id}).then(res=>{ if(res.result){ toast('✅ Holat o‘zgardi'); drawEdu(res.edu_all); } else toast(eduErr(res.error)); });
+      });
+    }
+    app_q(ed,'#eadd').onclick=()=>api('/app/api/edu/add',{kind:app_q(ed,'#ekind').value,name:app_q(ed,'#ename').value,fee:app_q(ed,'#efee').value}).then(res=>{
+      if(res.result==='added'){ toast('✅ Muassasa ochildi'); app_q(ed,'#ename').value=''; app_q(ed,'#efee').value=''; drawEdu(res.edu_all); }
+      else toast(eduErr(res.error)); });
+    drawEdu(d.edu_all||[]);
+    o.appendChild(ed);
     app.appendChild(o);
   }
 
@@ -19877,7 +20189,16 @@ function errText(e,min){
   if(e==='bet_placed') return 'Bu raundga allaqachon tikkansiz';
   return 'Xato, qayta urining';
 }
+function eduErr(e){
+  if(e==='name') return 'Nomi kamida 2 harf bo‘lsin';
+  if(e==='fee') return 'To‘lov 0 – 1 000 000$ oralig‘ida bo‘lsin';
+  if(e==='kind') return 'Turini tanlang';
+  if(e==='owner_only') return 'Faqat bot egalari uchun';
+  return errText(e);
+}
 function kidErr(e){
+  if(e==='inst_stage') return 'Bu muassasa farzand yoshiga mos emas';
+  if(e==='inst') return 'Muassasa topilmadi yoki yopilgan';
   if(e==='full') return 'To‘la — hozircha kerak emas';
   if(e==='no_fee') return 'Hozir to‘lov kerak emas';
   if(e==='working') return 'Bu farzand ishlaydi';
@@ -19918,6 +20239,7 @@ def main():
     init_bank()
     init_birja()
     init_kids()
+    init_edu()
     init_guard()
     init_guard2()
     init_grouphelp()
@@ -19954,6 +20276,7 @@ def main():
         (["profil", "profile"], cmd_profil),
         (["oila", "family"], cmd_oila),
         (["farzand", "kids"], cmd_farzand),
+        (["far"], cmd_far),
         (["settings", "sozlamalar"], cmd_settings),
         (["warn", "unwarn", "warns", "mute", "tmute", "unmute", "ban", "tban", "unban", "kick"], cmd_mod),
         (["promote", "demote"], cmd_promote),

@@ -155,3 +155,15 @@
   `sparkle` (tugmalar: kristall arpedjio + yuqori chastotali shimmer, notalar tasodifiy), `card` (Kazino bannerlari, do'kon sovg'alari
   `data-tap`), `select` (select.sel change), `good` (toast ✅/🟢/🎉/🏆 bilan boshlansa). Umumiy `pointerdown` listener, o'yin
   bo'limlari ichida faqat `.gback` (o'yinlarning o'z effektlari bor). `bell()` — noharmonik qismli qo'ng'iroq tembri.
+- 👶 Farzand so'rovlari ownerlarga: rozilik+to'lovdan keyin (48 soat kutish boshlanganda) `notify_owners_child_request` → ownerlarga
+  xabar + "⚡ Hozir yetkazish" (`family:far:<rid>`, cb_relationship). `/far` (faqat ownerlar, `cmd_far`) — barcha `approved`
+  so'rovlarni darhol yetkazishga qo'yadi (`child_deliver_now` → `due_at=now`, `family_delivery_worker` 3 s ichida yetkazadi);
+  rozilik kutayotgan (`pending`) lar soni ham ko'rsatiladi.
+- 🏫 Ta'lim muassasalari: `edu_institutions` (kind kinder/school/college/uni, name, fee, active; `init_edu`, init_kids ichida ham).
+  Farzand `family_children.inst_id`; `kid_fee(kid)` — mos va faol muassasa narxi, aks holda `KID_FEES` (bot va web to'lovlari shu
+  bilan). Web: `/app/api/edu/enroll` (ota-ona, faqat joriy bosqich turidagi muassasa), ownerlar `/app/api/edu/{add,update,toggle}`
+  (`web_edu_admin`). Payloadda `edu`, `edu_min_age` (3/7/16/19), `edu_default_fee`, owner uchun `edu_all`; `kids_list` da
+  stage_key/gender/growth/block/inst/salary.
+- Web Farzandlar: har bosqichga alohida karta dizayni (`.kidc.st-baby|kinder|school|college|uni|work`, emoji jins bo'yicha `KS`,
+  suzuvchi bezaklar `KDECO`), o'sish progressi, "🏫 Muassasa" tanlash; "🏫 Ta'lim yo'li" — kategoriyalar eng katta farzand yoshi
+  yetganda ochiladi (🔒 N yoshdan). Owner tabida "🏫 Ta'lim muassasalari": ochish, nomi/narxini saqlash (💾), yopish/ochish.

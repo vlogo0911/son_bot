@@ -145,3 +145,9 @@
   `web_kami_settle_open` (post_shutdown). Ko'rinish: `kami_enabled_for` — standart faqat ownerlar (test), owner panel → 🌐 Web App →
   "🛩 Kamikaze: hamma uchun ochish" (`webapp_config.kami`, `panel:webapp_kami`). Payloadda `kami`, `kami_test`. Klient `initKami`
   (`window.KM`), 3D samolyot `planeKit(ctx,dpr)` — Crash bilan umumiy. Banner `webapp_assets/kamikaze.jpg` — foydalanuvchi bergan kema rasmi fonida uning biplan rasmi (OpenCV GrabCut bilan kesilgan, tungi rangga moslangan, olov/tutun/iz qo'shilgan) kemaga sho'ng'iyapti.
+- 🎵 Web o'yinlar ovozi (`SND`, WEBAPP_HTML ichida, Web Audio sintez — fayl yo'q): har o'yinga alohida sokin fon musiqasi
+  (`TR.crash` synthwave 84 BPM, `TR.frog` marimba pentatonika + suv tomchilari 72 BPM, `TR.kami` dengiz/kinematik 66 BPM), lookahead
+  scheduler (40 ms), reverb (generatsiya qilingan IR), kompressor. `setTab` → `SND.music(crash|frog|kami|null)` (crossfade).
+  Effektlar `SND.play(nom)`: chip/tick/takeoff/cash/boom (Crash), hop/plop/splash/cash/win (Hovuz), click/whoosh/cannon/splash/
+  explode/bigboom/cash (Kamikaze). Brauzer siyosati: birinchi tegishda `AudioContext` ochiladi. 🎵/🔊 tugmalar (`.sndbar`) har o'yin
+  bo'limida, tanlov `localStorage` (`snd_m`, `snd_s`).

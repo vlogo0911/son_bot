@@ -18764,6 +18764,12 @@ WEBAPP_HTML = r"""<!doctype html>
     background:#ff3b5c;color:#fff;font-weight:900;font-size:11px;letter-spacing:1px;box-shadow:0 4px 10px rgba(0,0,0,.4)}
   .g-kami .gimg{background-position:50% 60%}
   .g-kami::before{background:linear-gradient(180deg,rgba(4,10,30,.85) 0%,rgba(4,10,30,.3) 34%,rgba(0,0,0,0) 55%,rgba(0,0,0,.6) 100%)}
+  /* ───── 🎵 ovoz tugmalari (o'yinlarda) ───── */
+  #s-crash,#s-frog,#s-kami{position:relative}
+  .sndbar{position:absolute;top:0;right:0;display:flex;gap:6px;z-index:6}
+  .sndbar span{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;cursor:pointer;
+    background:linear-gradient(180deg,#2a1e0c,#140e07);box-shadow:inset 0 0 0 1px #8a6420}
+  .sndbar span.off{opacity:.45;filter:grayscale(1)}
   /* ───── pastki tugmalar: kattaroq, nomli, oltin ───── */
   .tabs{gap:4px;padding:8px 8px calc(10px + env(safe-area-inset-bottom));overflow-x:auto;scrollbar-width:none;
     background:linear-gradient(180deg,rgba(28,20,8,.96),rgba(10,7,4,.98));border-top:none;
@@ -19108,6 +19114,10 @@ function render(res){
   app.appendChild(tabs);
   app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab('casino'));
   setTab(defs.some(x=>x[0]===TAB)||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
+  ['s-crash','s-frog','s-kami'].forEach(id=>{ const sc=document.getElementById(id); if(!sc) return;
+    sc.insertAdjacentHTML('afterbegin','<div class="sndbar"><span data-snd="m">🎵</span><span data-snd="s">🔊</span></div>');
+    sc.querySelectorAll('.sndbar span').forEach(b=>b.onclick=()=>SND.toggle(b.dataset.snd)); });
+  SND.paintBars();
   initCrash(); initFrog(); initKami();
 }
 // tegilganda oltin uchqunlar (Crash'dan tashqari)
@@ -19140,6 +19150,116 @@ function sheet(title, opts, onPick){
 function api(path,body){ return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(Object.assign({initData:tg?tg.initData:''},body||{}))}).then(r=>r.json()); }
 function haptic(t){ try{tg.HapticFeedback.notificationOccurred(t);}catch(e){} }
+
+// ---- 🎵 Ovoz: har o'yinga alohida sokin fon musiqasi + effektlar (Web Audio sintez, fayl yo'q) ----
+const SND=(function(){
+  let ctx=null, master, musicBus, sfxBus, verb, cur=null, timer=0, nextT=0, step=0, want=null;
+  const pref=(k,d)=>{ try{ const v=localStorage.getItem('snd_'+k); return v==null?d:v==='1'; }catch(e){ return d; } };
+  const save=(k,v)=>{ try{ localStorage.setItem('snd_'+k,v?'1':'0'); }catch(e){} };
+  let musicOn=pref('m',true), sfxOn=pref('s',true);
+  function init(){
+    if(ctx) return true;
+    const AC=window.AudioContext||window.webkitAudioContext; if(!AC) return false;
+    ctx=new AC(); master=ctx.createGain(); master.gain.value=0.9; master.connect(ctx.destination);
+    const comp=ctx.createDynamicsCompressor(); comp.threshold.value=-18; comp.ratio.value=3; comp.connect(master);
+    musicBus=ctx.createGain(); musicBus.gain.value=0; musicBus.connect(comp);
+    sfxBus=ctx.createGain(); sfxBus.gain.value=sfxOn?0.55:0; sfxBus.connect(comp);
+    // sun'iy reverb (shovqin impulsi)
+    verb=ctx.createConvolver(); const len=ctx.sampleRate*2.6, ir=ctx.createBuffer(2,len,ctx.sampleRate);
+    for(let c=0;c<2;c++){ const d=ir.getChannelData(c); for(let i=0;i<len;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2.6); }
+    verb.buffer=ir; const vg=ctx.createGain(); vg.gain.value=0.32; verb.connect(vg); vg.connect(comp);
+    return true;
+  }
+  function unlock(){ if(!init()) return; const go=()=>{ if(want!==cur) setMusic(want); }; if(ctx.state==='suspended') ctx.resume().then(go); else go(); }
+  ['pointerdown','touchstart','keydown'].forEach(ev=>document.addEventListener(ev,unlock,{passive:true}));
+  document.addEventListener('visibilitychange',()=>{ if(!ctx) return; if(document.hidden) ctx.suspend(); else if(want) ctx.resume(); });
+  const mtof=m=>440*Math.pow(2,(m-69)/12);
+  // ---- asboblar ----
+  function voice(type,freq,t,dur,vol,opt){ opt=opt||{};
+    const o=ctx.createOscillator(), g=ctx.createGain(); o.type=type; o.frequency.setValueAtTime(freq,t);
+    if(opt.detune) o.detune.value=opt.detune;
+    if(opt.slide) o.frequency.exponentialRampToValueAtTime(opt.slide,t+dur);
+    const a=opt.a||0.01, r=opt.r||dur;
+    g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(vol,t+a); g.gain.exponentialRampToValueAtTime(0.0001,t+a+r);
+    let out=g;
+    if(opt.lp){ const f=ctx.createBiquadFilter(); f.type='lowpass'; f.frequency.value=opt.lp; f.Q.value=opt.q||0.7; g.connect(f); out=f; }
+    o.connect(g); out.connect(opt.bus||musicBus); if(opt.wet) { const w=ctx.createGain(); w.gain.value=opt.wet; out.connect(w); w.connect(verb); }
+    o.start(t); o.stop(t+a+r+0.05);
+  }
+  function noise(t,dur,vol,opt){ opt=opt||{};
+    const len=Math.ceil(ctx.sampleRate*dur), b=ctx.createBuffer(1,len,ctx.sampleRate), d=b.getChannelData(0);
+    for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
+    const s=ctx.createBufferSource(); s.buffer=b; const f=ctx.createBiquadFilter(); f.type=opt.type||'lowpass'; f.frequency.setValueAtTime(opt.f||1200,t);
+    if(opt.fTo) f.frequency.exponentialRampToValueAtTime(opt.fTo,t+dur); f.Q.value=opt.q||0.8;
+    const g=ctx.createGain(); g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(vol,t+(opt.a||0.005)); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+    s.connect(f); f.connect(g); g.connect(opt.bus||sfxBus); if(opt.wet){ const w=ctx.createGain(); w.gain.value=opt.wet; g.connect(w); w.connect(verb); }
+    s.start(t); s.stop(t+dur+0.05);
+  }
+  function pad(notes,t,dur,vol,lp){ notes.forEach(n=>[-7,7].forEach(dt=>voice('sawtooth',mtof(n),t,dur,vol,{a:dur*0.35,r:dur*0.75,lp:lp||900,detune:dt,wet:0.7}))); }
+  // ---- treklar (bar = 16 qadam) ----
+  const TR={
+    crash:{bpm:84, // sokin synthwave: Am-F-C-G
+      tick(s,t,sp){ const ch=[[57,60,64],[53,57,60],[48,52,55],[55,59,62]][Math.floor(s/32)%4];
+        if(s%32===0) pad(ch.map(n=>n-12),t,sp*32,0.035,800);
+        if(s%32===0) voice('sine',mtof(ch[0]-24),t,sp*30,0.16,{a:0.05,r:sp*30});
+        const arp=[0,1,2,1,0,2,1,2][(s>>1)%8]; if(s%2===0) voice('triangle',mtof(ch[arp]+12),t,sp*2,0.05,{a:0.005,r:sp*3,lp:2600,wet:0.5});
+        if(s%8===0) voice('sine',110,t,0.25,0.14,{a:0.002,r:0.22,slide:42});
+        if(s%4===2) noise(t,0.05,0.035,{type:'highpass',f:7000,bus:musicBus}); }},
+    frog:{bpm:72, // hovuz: marimba pentatonika + suv tomchilari
+      tick(s,t,sp){ const sc=[60,62,64,67,69,72,74,76], ch=[[48,55,64],[45,52,60],[41,48,57],[43,50,59]][Math.floor(s/32)%4];
+        if(s%32===0) pad(ch,t,sp*32,0.032,750);
+        if(s%2===0 && Math.random()<0.55){ const n=sc[Math.floor(Math.random()*sc.length)];
+          voice('sine',mtof(n),t,0.5,0.15,{a:0.003,r:0.6,wet:0.6}); voice('sine',mtof(n)*4.0,t,0.12,0.035,{a:0.002,r:0.12}); }
+        if(s%16===8 && Math.random()<0.6) voice('sine',900+Math.random()*700,t,0.12,0.04,{a:0.002,r:0.12,slide:2200+Math.random()*900,wet:0.8}); }},
+    kami:{bpm:66, // kinematik dengiz: Dm, to'lqin shovqini, uzoq baraban
+      tick(s,t,sp){ const ch=[[50,53,57],[46,50,53],[48,52,55],[45,49,52]][Math.floor(s/32)%4];
+        if(s%32===0){ pad(ch.map(n=>n-12),t,sp*32,0.03,600); voice('sine',mtof(ch[0]-24),t,sp*31,0.15,{a:0.4,r:sp*30}); }
+        if(s%16===0) noise(t,sp*14,0.05,{f:500,fTo:1400,a:sp*6,bus:musicBus,wet:0.4});      // to'lqin
+        if(s%16===0||s%16===10) voice('sine',70,t,0.6,0.2,{a:0.004,r:0.6,slide:38,wet:0.5});   // baraban
+        if(s%32===24) [0,7,12].forEach((d,i)=>voice('sine',mtof(ch[0]+12+d),t+i*sp*1.5,1.2,0.035,{a:0.003,r:1.4,wet:0.9})); }}
+  };
+  function loop(){
+    if(!cur||!ctx) return; const tr=TR[cur], sp=60/tr.bpm/4;
+    while(nextT<ctx.currentTime+0.25){ try{ tr.tick(step,nextT,sp); }catch(e){} nextT+=sp; step++; }
+  }
+  function setMusic(name){
+    want=name; if(!ctx || ctx.state!=='running') return;
+    const on=musicOn && name;
+    musicBus.gain.cancelScheduledValues(ctx.currentTime);
+    musicBus.gain.setTargetAtTime(0,ctx.currentTime,0.25);
+    clearInterval(timer);
+    if(!on){ cur=null; return; }
+    setTimeout(()=>{ if(want!==name) return; cur=name; step=0; nextT=ctx.currentTime+0.1;
+      musicBus.gain.setTargetAtTime(1.0,ctx.currentTime,0.8); timer=setInterval(loop,40); loop(); }, cur?450:0);
+  }
+  // ---- effektlar ----
+  const FX={
+    chip(t){ voice('square',1800,t,0.04,0.08,{bus:sfxBus,a:0.001,r:0.04,lp:4000}); voice('square',2400,t+0.035,0.04,0.06,{bus:sfxBus,a:0.001,r:0.05,lp:4000}); },
+    tick(t){ voice('sine',1320,t,0.06,0.08,{bus:sfxBus,a:0.001,r:0.06}); },
+    takeoff(t){ noise(t,1.2,0.12,{type:'bandpass',f:300,fTo:2400,a:0.3,q:1.2,wet:0.3}); voice('sawtooth',90,t,1.1,0.05,{bus:sfxBus,a:0.2,r:0.9,slide:220,lp:800}); },
+    cash(t){ [0,4,7,12].forEach((d,i)=>{ voice('triangle',mtof(84+d),t+i*0.06,0.3,0.09,{bus:sfxBus,a:0.002,r:0.35,wet:0.5}); voice('sine',mtof(96+d),t+i*0.06,0.2,0.03,{bus:sfxBus,a:0.002,r:0.2}); }); },
+    win(t){ [0,4,7,12,16,19,24].forEach((d,i)=>voice('triangle',mtof(72+d),t+i*0.07,0.4,0.08,{bus:sfxBus,a:0.002,r:0.5,wet:0.6})); },
+    boom(t){ noise(t,1.1,0.5,{f:1800,fTo:80,a:0.003,wet:0.5}); voice('sine',90,t,0.8,0.5,{bus:sfxBus,a:0.003,r:0.8,slide:30}); },
+    hop(t){ voice('sine',320,t,0.14,0.14,{bus:sfxBus,a:0.003,r:0.14,slide:760}); },
+    plop(t){ voice('sine',600,t,0.12,0.12,{bus:sfxBus,a:0.002,r:0.12,slide:1500,wet:0.5}); noise(t,0.08,0.05,{type:'bandpass',f:1800,q:2}); },
+    splash(t){ noise(t,0.7,0.35,{f:3500,fTo:300,a:0.004,wet:0.6}); voice('sine',260,t,0.4,0.15,{bus:sfxBus,a:0.003,r:0.4,slide:70}); },
+    click(t){ voice('triangle',900,t,0.05,0.07,{bus:sfxBus,a:0.001,r:0.05}); },
+    whoosh(t){ noise(t,0.45,0.13,{type:'bandpass',f:500,fTo:2600,a:0.15,q:1.4}); },
+    cannon(t){ noise(t,0.45,0.35,{f:900,fTo:120,a:0.002,wet:0.6}); voice('sine',70,t,0.4,0.35,{bus:sfxBus,a:0.002,r:0.4,slide:35}); },
+    explode(t){ FX.boom(t); noise(t+0.08,0.9,0.2,{type:'highpass',f:2500,fTo:600,a:0.01}); },
+    bigboom(t){ FX.boom(t); FX.boom(t+0.18); noise(t,1.8,0.3,{f:600,fTo:60,a:0.01,wet:0.8}); setTimeout(()=>play('win'),500); }
+  };
+  function play(name){ if(!sfxOn || !init() || ctx.state!=='running' || !FX[name]) return; try{ FX[name](ctx.currentTime+0.01); }catch(e){} }
+  function toggle(kind){
+    if(kind==='m'){ musicOn=!musicOn; save('m',musicOn); setMusic(want); }
+    else { sfxOn=!sfxOn; save('s',sfxOn); if(ctx) sfxBus.gain.setTargetAtTime(sfxOn?0.55:0,ctx.currentTime,0.05); }
+    paintBars();
+  }
+  function paintBars(){ document.querySelectorAll('.sndbar').forEach(b=>{
+    const m=b.querySelector('[data-snd="m"]'), s=b.querySelector('[data-snd="s"]');
+    m.classList.toggle('off',!musicOn); s.classList.toggle('off',!sfxOn); s.textContent=sfxOn?'🔊':'🔇'; }); }
+  return {music:setMusic, play, toggle, paintBars};
+})();
 
 // ---- 3D "Royal" samolyot — umumiy chizgich (Crash va Kamikaze) ----
 function planeKit(ctx,dpr){
@@ -19307,10 +19427,10 @@ function initCrash(){
       busy=false;
       if(r.balance!=null) setBal(r.balance);
       if(!r.ok||r.error){ toast(errText(r.error,r.min)); }
-      else if(r.result==='placed'){ S.me={bet:r.bet,cash:null,win:0}; haptic('success'); toast('✅ Tikildi: '+fmtMoney(r.bet)+'$'); }
-      else if(r.result==='queued'){ S.queued=r.bet; toast('⏳ Keyingi raundga tikildi: '+fmtMoney(r.bet)+'$'); }
+      else if(r.result==='placed'){ S.me={bet:r.bet,cash:null,win:0}; haptic('success'); SND.play('chip'); toast('✅ Tikildi: '+fmtMoney(r.bet)+'$'); }
+      else if(r.result==='queued'){ S.queued=r.bet; SND.play('chip'); toast('⏳ Keyingi raundga tikildi: '+fmtMoney(r.bet)+'$'); }
       else if(r.result==='cancelled'){ if(S.phase==='bet') S.me=null; S.queued=null; toast('↩️ Bekor qilindi, pul qaytdi'); }
-      else if(r.result==='win'){ S.me&&(S.me.cash=r.multiplier,S.me.win=r.win); haptic('success');
+      else if(r.result==='win'){ S.me&&(S.me.cash=r.multiplier,S.me.win=r.win); haptic('success'); SND.play('cash');
         note.textContent='✅ +'+fmtMoney(r.win)+'$ · '+r.multiplier.toFixed(2)+'x da yechdingiz'; }
       else if(r.result==='lose'){ haptic('error'); note.textContent='💥 Kech qoldingiz!'; }
       paintBtn(); poll(true);
@@ -19350,7 +19470,7 @@ function initCrash(){
         S.phase=s.phase;
         if(s.phase==='bet') S.betDur=(s.countdown||0)+s.elapsed||7;
         if(s.phase==='crash' && (prev!=='crash' || s.round!==prevRound)){ S.crash=s.crash; onCrash(prev==='fly'); }
-        if(s.phase==='fly' && prev!=='fly'){ puffs.length=0; lastTip=null; note.textContent='🚀 Uchyapti… o‘z vaqtida yeching!'; }
+        if(s.phase==='fly' && prev!=='fly'){ puffs.length=0; lastTip=null; if(cr.classList.contains('on')) SND.play('takeoff'); note.textContent='🚀 Uchyapti… o‘z vaqtida yeching!'; }
         if(s.phase==='bet' && (prev!=='bet' || s.round!==prevRound)){ note.textContent='Hamma uchun bitta raund · qachon uchib ketishi sir 🎯'; }
         if(s.balance!=null && !busy) setBal(s.balance);
         cround.textContent=s.round; renderPlayers(); paintBtn();
@@ -19359,7 +19479,7 @@ function initCrash(){
     timer=setTimeout(poll, cr.classList.contains('on')?250:2000);
   }
   function onCrash(seen){
-    crashAt=performance.now(); renderHist(chist);
+    crashAt=performance.now(); renderHist(chist); if(cr.classList.contains('on')) SND.play('boom');
     if(seen) for(let i=0;i<46;i++){ const a=Math.random()*Math.PI*2, v=(1+Math.random()*4)*dpr;
       sparks.push({x:tip[0],y:tip[1],vx:Math.cos(a)*v,vy:Math.sin(a)*v,life:1,c:i%3?'#ff4d6a':'#ffd24a'}); }
     if(S.me && S.me.cash==null){ haptic('error'); note.textContent='💥 Uchib ketdi! −'+fmtMoney(S.me.bet)+'$'; }
@@ -19429,6 +19549,7 @@ function initCrash(){
     if(S.phase==='bet'){
       box.classList.remove('bust'); mx.classList.remove('bust','fly'); wait.classList.add('on');
       const cd=Math.max(0,S.betDur-phaseEl());
+      const cdi=Math.ceil(cd); if(cdi<=3 && cdi>0 && cdi!==frame._cd){ frame._cd=cdi; SND.play('tick'); } if(cd<=0) frame._cd=0;
       cnt.textContent=cd.toFixed(1); barf.style.width=Math.min(100,cd/S.betDur*100)+'%'; mx.textContent='';
       // kutish: samolyot pastda tebranib turadi
       drawPlane(48*dpr+Math.sin(now/600)*3*dpr, H-46*dpr+Math.sin(now/300)*3*dpr, -0.22+Math.sin(now/500)*0.06, 17*dpr, Math.sin(now/700)*0.3);
@@ -19505,7 +19626,7 @@ function initKami(){
       busy=true; paint();
       api('/app/api/kami/start',{bet:betVal()}).then(r=>{ busy=false;
         if(!r.ok||r.error){ toast(errText(r.error,r.min)); paint(); return; }
-        setBal(r.balance); ladder=r.ladder||ladder; curBet=r.bet; playing=true; reset();
+        setBal(r.balance); ladder=r.ladder||ladder; curBet=r.bet; playing=true; reset(); SND.play('chip');
         note.innerHTML='Keyingi ustundan katak tanlang · <b>x'+ladder[0].toFixed(2)+'</b>'; haptic('success'); paint();
       }).catch(()=>{ busy=false; paint(); });
       return;
@@ -19513,7 +19634,7 @@ function initKami(){
     if(!step) return;
     busy=true; paint();
     api('/app/api/kami/cashout',{}).then(r=>{ busy=false;
-      if(r.result==='cashed'){ setBal(r.balance); playing=false; haptic('success');
+      if(r.result==='cashed'){ setBal(r.balance); playing=false; haptic('success'); SND.play('cash');
         flash('+'+fmtMoney(r.win)+'$<small>x'+r.multiplier.toFixed(2)+' da yechdingiz</small>');
         note.innerHTML='✅ Yutuq: <b>+'+fmtMoney(r.win)+'$</b>'; burst(plane.x,plane.y,'#ffd24a',40); }
       else toast(errText(r.error)); paint();
@@ -19526,10 +19647,10 @@ function initKami(){
     const [cx]=cellXY(step,0,g);
     if(Math.abs(px-cx)>g.T*0.55) return;
     const row=Math.floor((py-g.top)/g.T); if(row<0||row>=ROWS) return;
-    busy=true; paint(); moveTo(step,row);
+    busy=true; paint(); moveTo(step,row); SND.play('click'); SND.play('whoosh');
     api('/app/api/kami/step',{row:row}).then(r=>{
       if(!r.ok||r.error){ busy=false; toast(errText(r.error)); paint(); return; }
-      const col=r.col; shots.push({col,row:r.shot,t0:performance.now()+220,hit:r.result==='lose'});
+      const col=r.col; shots.push({col,row:r.shot,t0:performance.now()+220,hit:r.result==='lose'}); setTimeout(()=>SND.play('cannon'),220);
       setTimeout(()=>{
         busy=false;
         if(r.result==='lose'){ playing=false; plane.dead=true; plane.deadT=performance.now(); passed[col]={row,shot:r.shot};
@@ -19631,7 +19752,7 @@ function initKami(){
     // kemaga sho'ng'ish (to'liq g'alaba)
     if(plane.kamikaze){ const u=Math.min(1,(now-plane.kamikaze)/700);
       px=plane.x+(sh.x-plane.x)*u*u; py=plane.y+(sh.cy-plane.y)*u*u; ang=Math.atan2(sh.cy-plane.y,sh.x-plane.x);
-      if(u>=1 && !plane.boom){ plane.boom=true; burst(sh.x,sh.cy,'#ff8a3a',90); burst(sh.x,sh.cy,'#ffd24a',60); }
+      if(u>=1 && !plane.boom){ plane.boom=true; SND.play('bigboom'); burst(sh.x,sh.cy,'#ff8a3a',90); burst(sh.x,sh.cy,'#ffd24a',60); }
       if(u>=1) px=-9999; }
     // o'qlar
     for(const s of shots){ const u=(now-s.t0)/520; if(u<0) continue;
@@ -19639,7 +19760,7 @@ function initKami(){
       if(u<1){ const x=sx+(tx-sx)*u, y=sy+(ty-sy)*u - Math.sin(Math.PI*u)*g.T*1.2;
         ctx.fillStyle='#ffe08a'; ctx.shadowColor='#ff8a3a'; ctx.shadowBlur=14*dpr; ctx.beginPath(); ctx.arc(x,y,4*dpr,0,7); ctx.fill(); ctx.shadowBlur=0;
         if(u<0.12){ ctx.fillStyle='rgba(255,200,90,'+(1-u/0.12)+')'; ctx.beginPath(); ctx.arc(sx,sy,12*dpr,0,7); ctx.fill(); } }
-      else if(!s.done){ s.done=true; splashes.push({x:tx,y:ty,t0:now}); burst(tx,ty,s.hit?'#ff5a3a':'#9fe8ff',s.hit?70:26); } }
+      else if(!s.done){ s.done=true; splashes.push({x:tx,y:ty,t0:now}); SND.play(s.hit?'explode':'splash'); burst(tx,ty,s.hit?'#ff5a3a':'#9fe8ff',s.hit?70:26); } }
     for(let i=splashes.length-1;i>=0;i--){ const sp=splashes[i], u=(now-sp.t0)/700; if(u>1){ splashes.splice(i,1); continue; }
       ctx.strokeStyle='rgba(200,240,255,'+(1-u)+')'; ctx.lineWidth=3*dpr*(1-u);
       ctx.beginPath(); ctx.arc(sp.x,sp.y,g.T*0.15+u*g.T*0.45,0,7); ctx.stroke(); }
@@ -19687,19 +19808,19 @@ function initFrog(){
     const b=parseInt(bet.value)||0; btn.disabled=true;
     api('/app/api/frog/start',{bet:b,mode:mode}).then(r=>{
       if(!r.ok||r.error){ note.textContent=errText(r.error,r.min); btn.disabled=false; return; }
-      setBal(r.balance); rows=r.rows; cols=r.cols; step=0; playing=true;
+      setBal(r.balance); rows=r.rows; cols=r.cols; step=0; playing=true; SND.play('chip');
       btn.style.display='none'; cash.style.display='block'; cash.disabled=true;
       note.textContent='🪷 Keyingi: '+r.next_mult+'x'; grid(0);
     }).catch(()=>{ btn.disabled=false; });
   }
   function stepTo(c,cell){
-    pond.querySelectorAll('.pad').forEach(p=>p.onclick=null);
+    pond.querySelectorAll('.pad').forEach(p=>p.onclick=null); SND.play('hop');
     api('/app/api/frog/step',{col:c}).then(r=>{
-      if(r.result==='lose'){ cell.className='pad bad'; cell.textContent='🐸'; playing=false;
+      if(r.result==='lose'){ cell.className='pad bad'; cell.textContent='🐸'; playing=false; SND.play('splash');
         note.textContent='🌊 Suvga tushdingiz! Yutqazdingiz.'; haptic('error'); endGame(); }
-      else if(r.result==='win_full'){ cell.className='pad safe'; cell.textContent='✅'; setBal(r.balance); playing=false;
+      else if(r.result==='win_full'){ cell.className='pad safe'; cell.textContent='✅'; setBal(r.balance); playing=false; SND.play('win');
         note.textContent='🏆 Yakun! +'+fmtMoney(r.win)+'$ ('+r.multiplier+'x)'; haptic('success'); endGame(); }
-      else { cell.className='pad safe'; cell.textContent='✅'; step=r.step; cash.disabled=false;
+      else { cell.className='pad safe'; cell.textContent='✅'; step=r.step; cash.disabled=false; SND.play('plop');
         cash.textContent='💰 Yechib olish ('+r.multiplier+'x)';
         note.textContent='✅ '+r.multiplier+'x · keyingi: '+r.next_mult+'x'; haptic('success'); grid(step); }
     });
@@ -19707,7 +19828,7 @@ function initFrog(){
   function doCash(){
     if(!playing||step<=0) return; cash.disabled=true;
     api('/app/api/frog/cashout',{}).then(r=>{
-      if(r.result==='cashed'){ setBal(r.balance); playing=false; note.textContent='✅ +'+fmtMoney(r.win)+'$ ('+r.multiplier+'x)'; haptic('success'); endGame(); }
+      if(r.result==='cashed'){ setBal(r.balance); playing=false; SND.play('cash'); note.textContent='✅ +'+fmtMoney(r.win)+'$ ('+r.multiplier+'x)'; haptic('success'); endGame(); }
     });
   }
   function endGame(){ setTimeout(()=>{ playing=false; btn.style.display='block'; btn.disabled=false; cash.style.display='none';
@@ -19746,6 +19867,7 @@ function setTab(k){
   const tk=(k==='crash'||k==='frog'||k==='kami')?'casino':k;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===tk));
   if(k==='crash' && window.CR) window.CR.poke();
+  SND.music(k==='crash'||k==='frog'||k==='kami'?k:null);
   window.scrollTo(0,0);
 }
 function card(lbl,val,cls,full){

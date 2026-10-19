@@ -16621,8 +16621,25 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             self._send_html(200, WEBAPP_HTML)
         elif path.startswith("/app/avatar/") and path.rsplit("/", 1)[1].isdigit():
             self._avatar(int(path.rsplit("/", 1)[1]))
+        elif path.startswith("/app/a/") and path.rsplit("/", 1)[1] in WEBAPP_ASSETS:
+            self._asset(path.rsplit("/", 1)[1])
         else:
             self._send(404, {"ok": False})
+
+    def _asset(self, name):
+        """Web app rasmlari (Kazino bannerlari) — repo ichidagi webapp_assets/ dan."""
+        try:
+            with open(os.path.join(BASE_DIR, "webapp_assets", name), "rb") as f:
+                data = f.read()
+        except OSError:
+            self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", WEBAPP_ASSETS[name])
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _avatar(self, uid):
         """Telegram profil rasmi (faqat botni ishlatgan foydalanuvchilar uchun)."""
@@ -18289,6 +18306,9 @@ async def web_kid_action(uid, kid_id, act, item):
     return {"error": "act"}
 
 
+# Kazino bannerlari (faqat shu ro'yxatdagi fayllar uzatiladi)
+WEBAPP_ASSETS = {"crash.jpg": "image/jpeg", "hovuz.jpg": "image/jpeg"}
+
 WEBAPP_HTML = r"""<!doctype html>
 <html lang="uz">
 <head>
@@ -18584,6 +18604,37 @@ WEBAPP_HTML = r"""<!doctype html>
   @keyframes padglow{50%{box-shadow:0 0 26px rgba(255,210,74,.75)}}
   .pad.safe{border-color:#ffe08a;color:#ffe08a;background:radial-gradient(circle,rgba(255,210,74,.3),#140e07)}
   .pad.bad{border-color:#e04b4b;background:radial-gradient(circle,rgba(224,75,75,.3),#140e07)}
+  /* ───── 🎰 Kazino lobbisi ───── */
+  .glob{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .gcard{position:relative;aspect-ratio:.68;border-radius:22px;overflow:hidden;cursor:pointer;isolation:isolate;
+    box-shadow:0 12px 28px rgba(0,0,0,.55),inset 0 0 0 1.5px rgba(255,214,110,.55);transition:transform .15s}
+  .gcard:active{transform:scale(.96)}
+  .gimg{position:absolute;inset:0;background-size:cover;z-index:-2;animation:kb 9s ease-in-out infinite alternate}
+  .g-crash .gimg{background-position:58% 50%;background-size:auto 108%}
+  .g-hovuz .gimg{background-position:50% 100%}
+  @keyframes kb{from{transform:scale(1.02)}to{transform:scale(1.1) translateY(-2%)}}
+  .gcard::before{content:"";position:absolute;inset:0;z-index:-1;
+    background:linear-gradient(180deg,rgba(6,4,14,.78) 0%,rgba(6,4,14,.25) 34%,rgba(0,0,0,0) 55%,rgba(0,0,0,.55) 100%)}
+  .g-crash::before{background:linear-gradient(180deg,rgba(40,8,60,.85) 0%,rgba(40,8,60,.3) 34%,rgba(0,0,0,0) 55%,rgba(0,0,0,.6) 100%)}
+  .gcard::after{content:"";position:absolute;top:0;bottom:0;left:-70%;width:45%;pointer-events:none;
+    background:linear-gradient(105deg,transparent,rgba(255,240,200,.28),transparent);transform:skewX(-18deg);animation:shine 5s ease-in-out infinite}
+  .g-hovuz::after{animation-delay:2.5s}
+  .gtag{position:absolute;top:0;left:50%;transform:translateX(-50%);padding:5px 14px 6px;border-radius:0 0 12px 12px;
+    background:rgba(10,8,20,.75);backdrop-filter:blur(4px);font-size:10.5px;font-weight:800;letter-spacing:.8px;color:#e9ddff;white-space:nowrap}
+  .gtitle{position:absolute;top:30px;left:0;right:0;text-align:center;font-weight:900;font-size:27px;line-height:.98;color:#fff;
+    letter-spacing:.5px;text-shadow:0 3px 0 rgba(0,0,0,.35),0 6px 18px rgba(0,0,0,.6);font-family:-apple-system,"Segoe UI",Roboto,sans-serif}
+  .gfoot{position:absolute;left:10px;right:10px;bottom:10px;display:flex;align-items:center;justify-content:space-between}
+  .glive{font-size:11px;font-weight:800;color:#fff;background:rgba(0,0,0,.5);padding:5px 9px;border-radius:999px;display:flex;align-items:center;gap:5px}
+  .glive i{width:7px;height:7px;border-radius:50%;background:#3ef07a;box-shadow:0 0 8px #3ef07a;animation:blink 1.2s ease-in-out infinite}
+  @keyframes blink{50%{opacity:.3}}
+  .gplay{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;color:#2b1b02;
+    background:var(--g-metal);box-shadow:0 4px 12px rgba(0,0,0,.5)}
+  .gnote{text-align:center;color:var(--dim);font-size:12px;margin-top:14px}
+  .gback{display:inline-flex;align-items:center;gap:4px;margin:0 0 10px;padding:7px 14px;border-radius:999px;font-weight:800;font-size:13px;
+    color:#ffe08a;background:linear-gradient(180deg,#2a1e0c,#140e07);box-shadow:inset 0 0 0 1px #8a6420;cursor:pointer}
+  .tab .ti .cz-ico{display:block;filter:drop-shadow(0 2px 3px rgba(0,0,0,.6))}
+  .tab.on .ti .cz-ico{animation:czpulse 1.8s ease-in-out infinite}
+  @keyframes czpulse{50%{filter:drop-shadow(0 0 8px rgba(255,220,120,.9))}}
   /* ───── pastki tugmalar: kattaroq, nomli, oltin ───── */
   .tabs{gap:4px;padding:8px 8px calc(10px + env(safe-area-inset-bottom));overflow-x:auto;scrollbar-width:none;
     background:linear-gradient(180deg,rgba(28,20,8,.96),rgba(10,7,4,.98));border-top:none;
@@ -18611,6 +18662,15 @@ const tg = window.Telegram ? window.Telegram.WebApp : null;
 const $ = (h)=>{const d=document.createElement('div');d.innerHTML=h;return d.firstElementChild;};
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 let TAB='profil';
+// 🎰 Kazino logotipi: oltin fishka + toj (SVG)
+const CASINO_ICON='<svg class="cz-ico" viewBox="0 0 48 48" width="27" height="27" aria-hidden="true"><defs>'+
+  '<linearGradient id="czg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff3c0"/><stop offset=".45" stop-color="#f2c048"/><stop offset="1" stop-color="#9a6510"/></linearGradient>'+
+  '<radialGradient id="czr" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#e2384c"/><stop offset="1" stop-color="#7a0d1d"/></radialGradient></defs>'+
+  '<circle cx="24" cy="24" r="22" fill="url(#czg)"/>'+
+  [0,45,90,135,180,225,270,315].map(a=>'<rect x="21" y="2.5" width="6" height="7" rx="1.5" fill="#7a0d1d" transform="rotate('+a+' 24 24)"/>').join('')+
+  '<circle cx="24" cy="24" r="14.5" fill="url(#czr)" stroke="#ffe39a" stroke-width="1.6"/>'+
+  '<path d="M15.5 29.5 L17 19.5 L21 24 L24 17 L27 24 L31 19.5 L32.5 29.5 Z" fill="url(#czg)" stroke="#5a3a05" stroke-width=".8" stroke-linejoin="round"/>'+
+  '<rect x="15.5" y="29.5" width="17" height="2.6" rx="1" fill="url(#czg)"/></svg>';
 
 function boot(){
   if(tg){ tg.ready(); tg.expand(); try{tg.setHeaderColor('#07070d');tg.setBackgroundColor('#07070d');}catch(e){} }
@@ -18825,9 +18885,26 @@ function render(res){
   sh.appendChild(gifts);
   app.appendChild(sh);
 
+  // KAZINO — o'yinlar lobbisi
+  const cz=$('<div class="sec" id="s-casino"></div>');
+  cz.innerHTML=
+    '<h2>🎰 Kazino</h2>'+
+    '<div class="glob">'+
+      '<div class="gcard g-crash" data-go="crash"><div class="gimg" style="background-image:url(/app/a/crash.jpg)"></div>'+
+        '<div class="gtag">EMPIRE GAMES</div><div class="gtitle">ROYAL<br>CRASH</div>'+
+        '<div class="gfoot"><span class="glive"><i></i>Jonli raund</span><span class="gplay">▶</span></div></div>'+
+      '<div class="gcard g-hovuz" data-go="frog"><div class="gimg" style="background-image:url(/app/a/hovuz.jpg)"></div>'+
+        '<div class="gtag">EMPIRE GAMES</div><div class="gtitle">HOVUZ</div>'+
+        '<div class="gfoot"><span class="glive"><i></i>x4.08 gacha</span><span class="gplay">▶</span></div></div>'+
+    '</div>'+
+    '<div class="gnote">🎮 Barcha o‘yinlar virtual pul bilan · hamyoningizdan</div>';
+  cz.querySelectorAll('.gcard').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
+  app.appendChild(cz);
+
   // CRASH (Aviator — umumiy raund)
   const cr=$('<div class="sec" id="s-crash"></div>');
   cr.innerHTML=
+    '<div class="gback" data-back="1">‹ Kazino</div>'+
     '<div class="hist" id="chist"></div>'+
     '<div class="crashbox" id="cbox"><canvas id="ccanvas"></canvas>'+
       '<div class="funmode">✦ RAUND #<span id="cround">—</span> · <span id="conline">0</span> o‘yinchi ✦</div>'+
@@ -18845,10 +18922,11 @@ function render(res){
   app.appendChild(cr);
   window.CHIST=d.crash_history||[];
 
-  // FROG (Baqa)
+  // HOVUZ (avvalgi Baqa)
   const fr=$('<div class="sec" id="s-frog"></div>');
   fr.innerHTML=
-    '<h2>🐸 Baqa</h2>'+
+    '<div class="gback" data-back="1">‹ Kazino</div>'+
+    '<h2>🌊 Hovuz</h2>'+
     '<div class="seg" id="fmode">'+
       '<div class="s on" data-m="easy">🟢 Oson</div><div class="s" data-m="medium">🟡 O‘rta</div><div class="s" data-m="hard">🔴 Qiyin</div></div>'+
     '<div class="pond" id="pond"></div>'+
@@ -18874,7 +18952,7 @@ function render(res){
 
   // TABS
   const tabs=$('<div class="tabs"></div>');
-  const defs=[['profil','👤','Profil'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['bank','🏦','Bank'],['birja','📈','Birja'],['farzand','👶','Oila'],['crash','🚀','Crash'],['frog','🐸','Baqa']];
+  const defs=[['profil','👤','Profil'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['bank','🏦','Bank'],['birja','📈','Birja'],['farzand','👶','Oila'],['casino',CASINO_ICON,'Kazino']];
   if(d.is_owner&&d.owner) defs.push(['owner','👑','Owner']);
   defs.forEach(([k,t,l])=>{
     const el=$('<div class="tab" data-k="'+k+'"><span class="ti">'+t+'</span><span class="tl">'+l+'</span></div>');
@@ -18882,7 +18960,8 @@ function render(res){
     tabs.appendChild(el);
   });
   app.appendChild(tabs);
-  setTab(defs.some(x=>x[0]===TAB)?TAB:'profil');
+  app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab('casino'));
+  setTab(defs.some(x=>x[0]===TAB)||TAB==='crash'||TAB==='frog'?TAB:'profil');
   initCrash(); initFrog();
 }
 // tegilganda oltin uchqunlar (Crash'dan tashqari)
@@ -19256,7 +19335,7 @@ function initFrog(){
     pond.querySelectorAll('.pad').forEach(p=>p.onclick=null);
     api('/app/api/frog/step',{col:c}).then(r=>{
       if(r.result==='lose'){ cell.className='pad bad'; cell.textContent='🐸'; playing=false;
-        note.textContent='🐸 Baqa! Yutqazdingiz.'; haptic('error'); endGame(); }
+        note.textContent='🌊 Suvga tushdingiz! Yutqazdingiz.'; haptic('error'); endGame(); }
       else if(r.result==='win_full'){ cell.className='pad safe'; cell.textContent='✅'; setBal(r.balance); playing=false;
         note.textContent='🏆 Yakun! +'+fmtMoney(r.win)+'$ ('+r.multiplier+'x)'; haptic('success'); endGame(); }
       else { cell.className='pad safe'; cell.textContent='✅'; step=r.step; cash.disabled=false;
@@ -19303,8 +19382,10 @@ function kidErr(e){
 function setTab(k){
   TAB=k;
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==='s-'+k));
-  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===k));
+  const tk=(k==='crash'||k==='frog')?'casino':k;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===tk));
   if(k==='crash' && window.CR) window.CR.poke();
+  window.scrollTo(0,0);
 }
 function card(lbl,val,cls,full){
   return '<div class="card '+(full||'')+'"><div class="lbl">'+lbl+'</div>'+

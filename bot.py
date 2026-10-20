@@ -20404,9 +20404,9 @@ WEBAPP_HTML = r"""<!doctype html>
   .gnote{text-align:center;color:var(--dim);font-size:12px;margin-top:14px}
   /* ───── 💼 Moliya lobbisi ───── */
   .glob.wide{grid-template-columns:1fr}
-  .glob.wide .gcard{aspect-ratio:2/1}
-  .glob.wide .gcard::before{background:linear-gradient(0deg,rgba(0,0,0,.45),rgba(0,0,0,0) 35%)}
-  .glob.wide .gimg{background-position:center;background-color:#0b0805;animation-duration:12s}
+  .glob.wide .gcard{aspect-ratio:1536/510}
+  .glob.wide .gcard::before,.glob.wide .gfoot{display:none}
+  .glob.wide .gimg{background-size:cover;background-position:center;background-color:#0b0805;animation:none}
   .g-birja::after{animation-delay:2.5s}
   .gback{display:inline-flex;align-items:center;gap:4px;margin:0 0 10px;padding:7px 14px;border-radius:999px;font-weight:800;font-size:13px;
     color:#ffe08a;background:linear-gradient(180deg,#2a1e0c,#140e07);box-shadow:inset 0 0 0 1px #8a6420;cursor:pointer}
@@ -21040,9 +21040,9 @@ function render(res){
   mo.innerHTML=
     '<h2>💼 Moliya</h2>'+
     '<div class="glob wide">'+
-      '<div class="gcard g-bank" data-go="bank"><div class="gimg" style="background-image:url(/app/a/moliya_bank.jpg)"></div>'+
+      '<div class="gcard g-bank" data-go="bank"><div class="gimg" style="background-image:url(/app/a/moliya_bank.jpg?v=2)"></div>'+
         '<div class="gfoot"><span class="glive"><i></i>'+(loan?'Faol kredit':'Kredit · Omonat')+'</span><span class="gplay">▶</span></div></div>'+
-      '<div class="gcard g-birja" data-go="birja"><div class="gimg" style="background-image:url(/app/a/moliya_birja.jpg)"></div>'+
+      '<div class="gcard g-birja" data-go="birja"><div class="gimg" style="background-image:url(/app/a/moliya_birja.jpg?v=2)"></div>'+
         '<div class="gfoot"><span class="glive"><i></i>'+(btc&&btc.price?'BTC '+((btc.change||0)>=0?'▲':'▼')+esc(Math.abs(btc.change||0))+'%':'Jonli narxlar')+'</span><span class="gplay">▶</span></div></div>'+
     '</div>'+
     '<div class="gnote">🏦 Kredit va omonat · 📈 Kripto va oltin savdosi</div>';

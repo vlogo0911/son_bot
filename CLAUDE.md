@@ -229,3 +229,12 @@
   → Lottie JSON, kontent turi `_sniff_image`). API `/app/api/chat/stickers` (+`/remove`), `chat/send` kind=`tg` (text=file_unique_id,
   media=fmt; eskiz yuborilmaydi). Klient: stiker panelida tablar (😊 emoji / to'plamlar eskizi / ➕ yo'riqnoma), `tgStickerHtml`
   (webp img, webm video, tgs → `lottieLoad` cdnjs lottie-web 5.12.2 light, `tgLottieIn`, yopilganda destroy).
+- 🪙 EMP Coin (Empire premium valyutasi, test — standart faqat ownerlar; `emp_enabled_for` = webapp_config "emp" yoki owner,
+  owner panel → 🌐 Web App → "🪙 EMP Coin: hamma uchun ochish" `panel:webapp_emp`). Jadvallar: `emp_wallet`, `emp_packs`
+  (emp/stars/bonus/active; bo'sh bo'lsa `EMP_DEFAULT_PACKS`), `emp_payments` (charge_id UNIQUE — takroriy to'lov bir marta).
+  ⭐ Telegram Stars: `/app/api/emp/invoice` → `create_invoice_link(currency="XTR", payload="emp:uid:pack:stars:total")` → klient
+  `tg.openInvoice` → `on_pre_checkout` (`PreCheckoutQueryHandler`, `_emp_check_payload`: user, XTR, joriy narx/miqdor mos) →
+  `on_successful_payment` (`filters.SUCCESSFUL_PAYMENT`): payload'dagi shart bo'yicha EMP beriladi; mos kelmasa ownerlarga ogohlantirish.
+  Narxlarni ownerlar web app Owner tabida boshqaradi (`/app/api/emp/{add,update,toggle,delete}`, `web_emp_admin`, ⭐ 1–10 000).
+  Klient: Profil'da `.empc` karta, `openEmpShop` (`#empv`, coin rasmi `webapp_assets/emp_coin*.jpg` — "STATS ECONOMY"),
+  to'lovdan keyin `/app/api/emp/state` polling. Payload `emp` (balance/test/packs/history; owner uchun `admin` statistikasi).

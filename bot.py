@@ -35,6 +35,7 @@ from telegram import (
     InlineQueryResultArticle,
     InputFile,
     InputTextMessageContent,
+    LabeledPrice,
     MenuButtonWebApp,
     Update,
     WebAppInfo,
@@ -51,6 +52,7 @@ from telegram.ext import (
     Defaults,
     InlineQueryHandler,
     MessageHandler,
+    PreCheckoutQueryHandler,
     PrefixHandler,
     filters,
 )
@@ -16982,6 +16984,12 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_chat_history(uid, body.get("with"), body.get("after"))
         elif path == "/app/api/chat/send":
             coro = web_chat_send(uid, body.get("to"), body.get("text"), body.get("kind") or "text", body.get("data"))
+        elif path == "/app/api/emp/invoice":
+            coro = web_emp_invoice(uid, body.get("pack"))
+        elif path == "/app/api/emp/state":
+            coro = web_emp_state(uid)
+        elif path in ("/app/api/emp/add", "/app/api/emp/update", "/app/api/emp/toggle", "/app/api/emp/delete"):
+            coro = web_emp_admin(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/chat/stickers":
             coro = web_chat_stickers(uid)
         elif path == "/app/api/chat/stickers/remove":
@@ -17821,7 +17829,8 @@ def panel_webapp_view():
               f"👥 Hamma uchun: <b>{'✅ yoqilgan' if flags['all'] else '❌ o‘chiq'}</b>",
               f"👑 Ownerlar uchun: <b>{'✅ yoqilgan' if flags['owner'] else '❌ o‘chiq'}</b>",
               f"🛩 Kamikaze: <b>{'✅ hamma uchun' if flags.get('kami') else '🧪 faqat ownerlar (test)'}</b>",
-              f"🧍 3D avatar: <b>{'✅ hamma uchun' if flags.get('avatar') else '🧪 faqat ownerlar (test)'}</b>"]
+              f"🧍 3D avatar: <b>{'✅ hamma uchun' if flags.get('avatar') else '🧪 faqat ownerlar (test)'}</b>",
+              f"🪙 EMP Coin: <b>{'✅ hamma uchun' if flags.get('emp') else '🧪 faqat ownerlar (test)'}</b>"]
     rows = [
         [InlineKeyboardButton("🔴 Hamma uchun o‘chirish" if flags["all"] else "🟢 Hamma uchun yoqish",
                               callback_data="panel:webapp_all")],
@@ -17831,6 +17840,8 @@ def panel_webapp_view():
                               callback_data="panel:webapp_kami")],
         [InlineKeyboardButton("🧪 3D avatar: faqat ownerlarga" if flags.get("avatar") else "🧍 3D avatar: hamma uchun ochish",
                               callback_data="panel:webapp_avatar")],
+        [InlineKeyboardButton("🧪 EMP Coin: faqat ownerlarga" if flags.get("emp") else "🪙 EMP Coin: hamma uchun ochish",
+                              callback_data="panel:webapp_emp")],
         [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
     ]
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -17846,6 +17857,8 @@ async def panel_webapp_callback(query, context):
         webapp_set("kami", 0 if webapp_flags().get("kami") else 1)
     elif data == "panel:webapp_avatar":
         webapp_set("avatar", 0 if webapp_flags().get("avatar") else 1)
+    elif data == "panel:webapp_emp":
+        webapp_set("emp", 0 if webapp_flags().get("emp") else 1)
     text, kb = panel_webapp_view()
     try:
         await query.edit_message_text(text, reply_markup=kb)
@@ -17941,6 +17954,16 @@ def init_webapp():
             c.execute("ALTER TABLE web_chat_msgs ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
         if "media" not in mcols:
             c.execute("ALTER TABLE web_chat_msgs ADD COLUMN media TEXT")
+        # 🪙 EMP Coin (premium valyuta, ⭐ Telegram Stars orqali)
+        c.execute("CREATE TABLE IF NOT EXISTS emp_wallet (user_id INTEGER PRIMARY KEY, emp INTEGER NOT NULL DEFAULT 0)")
+        c.execute("""CREATE TABLE IF NOT EXISTS emp_packs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, emp INTEGER NOT NULL, stars INTEGER NOT NULL,
+            bonus INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS emp_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, pack_id INTEGER, emp INTEGER NOT NULL,
+            stars INTEGER NOT NULL, charge_id TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, refunded INTEGER NOT NULL DEFAULT 0)""")
+        if not c.execute("SELECT 1 FROM emp_packs LIMIT 1").fetchone():
+            c.executemany("INSERT INTO emp_packs(emp, stars, bonus) VALUES (?, ?, ?)", EMP_DEFAULT_PACKS)
         # 🎭 Telegram stiker to'plamlari (botga stiker yuborilganda qo'shiladi; user_id=0 — hamma uchun)
         c.execute("""CREATE TABLE IF NOT EXISTS tg_sticker_sets (
             id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, title TEXT NOT NULL,
@@ -18355,6 +18378,184 @@ async def web_chat_send(uid, peer, text, kind="text", data=None):
         except TelegramError as e:
             logger.info("Chat bildirishnomasi yetkazilmadi (%s): %s", peer, e)
     return {"result": "sent", "msg": chat_msg_json((mid, uid, text, int(now), kind, media), uid)}
+
+
+# ── 🪙 EMP Coin: premium valyuta, ⭐ Telegram Stars (XTR) bilan sotiladi — test: standart faqat ownerlar ──
+EMP_DEFAULT_PACKS = [(100, 50, 0), (300, 140, 20), (700, 300, 70), (1600, 650, 250)]   # (EMP, ⭐, bonus EMP)
+EMP_MAX_STARS = 10000           # bitta invoys uchun ⭐ chegarasi
+EMP_MAX_AMOUNT = 10_000_000
+
+
+def emp_enabled_for(uid):
+    if not web_enabled_for(uid):
+        return False
+    return bool(webapp_flags().get("emp", 0)) or uid in CAREER_OWNER_IDS
+
+
+def emp_balance(uid):
+    row = db().execute("SELECT emp FROM emp_wallet WHERE user_id=?", (uid,)).fetchone()
+    return row[0] if row else 0
+
+
+def emp_change(c, uid, delta):
+    c.execute("INSERT INTO emp_wallet(user_id, emp) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET emp=emp+excluded.emp",
+              (uid, delta))
+
+
+def emp_packs(all_=False):
+    rows = db().execute("SELECT id, emp, stars, bonus, active FROM emp_packs" + ("" if all_ else " WHERE active=1")
+                        + " ORDER BY stars, id").fetchall()
+    return [{"id": r[0], "emp": r[1], "stars": r[2], "bonus": r[3], "active": bool(r[4])} for r in rows]
+
+
+def emp_pack(pid):
+    r = db().execute("SELECT id, emp, stars, bonus, active FROM emp_packs WHERE id=?", (pid,)).fetchone()
+    return {"id": r[0], "emp": r[1], "stars": r[2], "bonus": r[3], "active": bool(r[4])} if r else None
+
+
+def emp_payload(uid):
+    if not emp_enabled_for(uid):
+        return None
+    c = db()
+    out = {"balance": emp_balance(uid), "test": not webapp_flags().get("emp", 0), "packs": emp_packs(),
+           "history": [{"emp": r[0], "stars": r[1], "at": tashkent_dt(r[2])} for r in c.execute(
+               "SELECT emp, stars, created_at FROM emp_payments WHERE user_id=? ORDER BY id DESC LIMIT 5", (uid,))]}
+    if uid in CAREER_OWNER_IDS:
+        tot = c.execute("SELECT COUNT(*), COALESCE(SUM(stars),0), COALESCE(SUM(emp),0) FROM emp_payments WHERE refunded=0").fetchone()
+        out["admin"] = {"packs": emp_packs(True), "payments": tot[0], "stars": tot[1], "emp_sold": tot[2],
+                        "emp_total": c.execute("SELECT COALESCE(SUM(emp),0) FROM emp_wallet").fetchone()[0]}
+    return out
+
+
+async def web_emp_invoice(uid, pack_id):
+    """⭐ Stars invoys havolasi (web app'da tg.openInvoice bilan ochiladi)."""
+    if not emp_enabled_for(uid):
+        return {"error": "disabled"}
+    try:
+        p = emp_pack(int(pack_id))
+    except (TypeError, ValueError):
+        p = None
+    if not p or not p["active"]:
+        return {"error": "pack"}
+    if _EXCHANGE_LOOP_BOT is None:
+        return {"error": "bot"}
+    total = p["emp"] + p["bonus"]
+    try:
+        link = await _EXCHANGE_LOOP_BOT.create_invoice_link(
+            title=f"🪙 {fmt_money(total)} EMP",
+            description=f"Empire Coin — {fmt_money(p['emp'])} EMP" + (f" + {fmt_money(p['bonus'])} bonus" if p["bonus"] else "")
+                        + ". O‘yin ichidagi premium valyuta.",
+            payload=f"emp:{uid}:{p['id']}:{p['stars']}:{total}", currency="XTR",
+            prices=[LabeledPrice(f"{total} EMP", p["stars"])])
+    except TelegramError as e:
+        logger.warning("EMP invoys yaratilmadi: %s", e)
+        return {"error": "invoice"}
+    return {"result": "ok", "link": link}
+
+
+def _emp_check_payload(payload, user_id, amount, currency):
+    """Invoys payload'ini tekshiradi → pack yoki xato matni."""
+    parts = str(payload or "").split(":")
+    if len(parts) != 5 or parts[0] != "emp" or currency != "XTR":
+        return None, "Noto‘g‘ri to‘lov"
+    try:
+        uid, pid, stars, total = int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4])
+    except ValueError:
+        return None, "Noto‘g‘ri to‘lov"
+    if uid != user_id:
+        return None, "Bu invoys boshqa foydalanuvchi uchun"
+    p = emp_pack(pid)
+    if not p or not p["active"] or p["stars"] != stars or amount != stars or p["emp"] + p["bonus"] != total:
+        return None, "Paket narxi o‘zgargan — qaytadan oching"
+    if not emp_enabled_for(uid):
+        return None, "EMP hozircha yopiq"
+    return p, None
+
+
+async def on_pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.pre_checkout_query
+    if not str(q.invoice_payload).startswith("emp:"):
+        await q.answer(ok=False, error_message="Noma’lum to‘lov")
+        return
+    p, err = _emp_check_payload(q.invoice_payload, q.from_user.id, q.total_amount, q.currency)
+    await q.answer(ok=True) if p else await q.answer(ok=False, error_message=err)
+
+
+async def on_successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, user = update.effective_message, update.effective_user
+    sp = msg.successful_payment if msg else None
+    if not sp or not str(sp.invoice_payload).startswith("emp:"):
+        return
+    parts = sp.invoice_payload.split(":")
+    try:   # payload'ni Telegram o'zgartirmaydi va pre-checkout'da tekshirilgan → to'lov paytidagi shartlar bo'yicha beramiz
+        uid, pid, stars, total = int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4])
+    except (IndexError, ValueError):
+        uid, pid, stars, total = None, None, None, None
+    if uid != user.id or stars != sp.total_amount or not total or total > EMP_MAX_AMOUNT * 2 or sp.currency != "XTR":
+        total = None
+    if total is None:
+        logger.warning("EMP: to'lov paketga mos emas (%s) — ownerlarga xabar", sp.invoice_payload)
+        for oid in CAREER_OWNER_IDS:
+            try:
+                await context.bot.send_message(oid, f"⚠️ EMP to‘lovi paketga mos kelmadi: {person_name(user.id)} · "
+                                                    f"{sp.total_amount}⭐ · <code>{escape(sp.telegram_payment_charge_id)}</code>")
+            except TelegramError:
+                pass
+        return
+    c = db()
+    try:
+        with c:
+            c.execute("""INSERT INTO emp_payments(user_id, pack_id, emp, stars, charge_id, created_at)
+                         VALUES (?, ?, ?, ?, ?, ?)""", (user.id, pid, total, sp.total_amount,
+                                                          sp.telegram_payment_charge_id, int(time.time())))
+            emp_change(c, user.id, total)
+    except sqlite3.IntegrityError:
+        return      # takroriy xabar — bir marta beriladi
+    await msg.reply_text(f"✅ To‘lov qabul qilindi: <b>+{fmt_money(total)} EMP</b> 🪙\n"
+                         f"💰 EMP balansi: <b>{fmt_money(emp_balance(user.id))}</b>")
+
+
+async def web_emp_admin(uid, act, body):
+    """Ownerlar: EMP paketlari narxini boshqarish."""
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner"}
+    def num(k, lo, hi):
+        try:
+            v = int(body.get(k))
+        except (TypeError, ValueError):
+            return None
+        return v if lo <= v <= hi else None
+    c = db()
+    if act in ("add", "update"):
+        emp, stars, bonus = num("emp", 1, EMP_MAX_AMOUNT), num("stars", 1, EMP_MAX_STARS), num("bonus", 0, EMP_MAX_AMOUNT)
+        if emp is None or stars is None or bonus is None:
+            return {"error": "values"}
+        with c:
+            if act == "add":
+                c.execute("INSERT INTO emp_packs(emp, stars, bonus) VALUES (?, ?, ?)", (emp, stars, bonus))
+            else:
+                pid = num("id", 1, 10**9)
+                if not pid or not emp_pack(pid):
+                    return {"error": "pack"}
+                c.execute("UPDATE emp_packs SET emp=?, stars=?, bonus=? WHERE id=?", (emp, stars, bonus, pid))
+    elif act in ("toggle", "delete"):
+        pid = num("id", 1, 10**9)
+        if not pid or not emp_pack(pid):
+            return {"error": "pack"}
+        with c:
+            if act == "toggle":
+                c.execute("UPDATE emp_packs SET active=1-active WHERE id=?", (pid,))
+            else:
+                c.execute("DELETE FROM emp_packs WHERE id=?", (pid,))
+    else:
+        return {"error": "act"}
+    return {"result": "ok", "emp": emp_payload(uid)}
+
+
+async def web_emp_state(uid):
+    if not emp_enabled_for(uid):
+        return {"error": "disabled"}
+    return {"result": "ok", "emp": emp_payload(uid)}
 
 
 # ── 🎭 Telegram stikerlari (web chat) ──
@@ -18773,6 +18974,7 @@ async def webapp_payload(user_id):
         "randpair": randpair_status(user_id),
         "chat_unread": chat_unread(user_id),
         "chat_stickers": list(CHAT_STICKERS),
+        "emp": emp_payload(user_id),
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -19524,6 +19726,7 @@ async def web_edu_admin(uid, act, body):
 
 # Kazino bannerlari (faqat shu ro'yxatdagi fayllar uzatiladi)
 WEBAPP_ASSETS = {"crash.jpg": "image/jpeg", "hovuz.jpg": "image/jpeg", "kamikaze.jpg": "image/jpeg",
+                 "emp_coin.jpg": "image/jpeg", "emp_coin_full.jpg": "image/jpeg",
                  }
 # 🧍 3D avatar: MakeHuman CC0 tana/kiyim/soch (skeletli) + CMU mocap harakatlar — av_*.glb (meshopt + WebP)
 try:
@@ -20050,6 +20253,33 @@ WEBAPP_HTML = r"""<!doctype html>
   .chv-ft{display:flex;gap:4px;align-items:flex-end;padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid rgba(255,210,74,.2)}
   .chv-ft textarea{flex:1;resize:none;min-height:44px;max-height:110px;padding:12px 14px;border-radius:22px;border:1px solid rgba(255,210,74,.35);background:rgba(0,0,0,.35);color:#fff;font:inherit;font-size:15px;outline:none}
   .chv-ft .btn{flex:none;width:48px;height:44px;padding:0;border-radius:50%;font-size:18px}
+  .empc{display:flex;align-items:center;gap:12px;margin-top:12px;cursor:pointer;background:radial-gradient(120% 140% at 0% 0%,rgba(255,200,60,.18),rgba(0,0,0,0) 60%)}
+  .empc .empi{width:58px;height:64px;flex:none;object-fit:cover;border-radius:14px;box-shadow:0 0 18px rgba(255,190,40,.45)}
+  .empc .empm{flex:1;min-width:0}.empc .empb{font-size:20px;margin-top:2px}.empc .empb b{background:var(--g-metal);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .empc .empbuy{flex:none;padding:10px 12px;font-size:13px}
+  #empv{position:fixed;inset:0;z-index:86;display:none;align-items:flex-end;justify-content:center;background:rgba(5,4,2,.8);backdrop-filter:blur(6px)}
+  #empv.show{display:flex}
+  .empv-in{position:relative;width:100%;max-width:540px;max-height:94vh;overflow-y:auto;border-radius:26px 26px 0 0;padding:16px 16px 26px;
+    background:radial-gradient(120% 60% at 50% 0%,#3a2a08 0%,#120d04 60%,#07070d 100%);box-shadow:0 -10px 40px rgba(255,190,40,.18)}
+  .empv-in .kst-x{position:absolute;top:12px;right:14px;z-index:2}
+  .emphero{position:relative;height:210px;display:flex;justify-content:center}
+  .emphero img{height:210px;border-radius:18px;animation:empfloat 4s ease-in-out infinite;-webkit-mask-image:radial-gradient(ellipse 60% 60% at 50% 48%,#000 70%,transparent 100%);mask-image:radial-gradient(ellipse 60% 60% at 50% 48%,#000 70%,transparent 100%)}
+  .empglow{position:absolute;inset:auto 0 0 0;height:40px;background:radial-gradient(50% 100% at 50% 100%,rgba(255,200,60,.35),transparent)}
+  @keyframes empfloat{50%{transform:translateY(-6px) rotate(-1.5deg)}}
+  .emph{text-align:center;margin-top:6px}.empt{font-family:Cinzel,serif;font-weight:900;font-size:22px;letter-spacing:.12em;background:var(--g-metal);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .empbal{font-size:18px;margin:6px 0 2px}
+  .emppk{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:16px}
+  .pk{position:relative;padding:16px 8px 12px;border-radius:18px;text-align:center;cursor:pointer;background:linear-gradient(160deg,rgba(255,210,74,.14),rgba(255,210,74,.03));box-shadow:inset 0 0 0 1px rgba(255,210,74,.38)}
+  .pk:active{transform:scale(.97)}.pk.busy{opacity:.55;pointer-events:none}
+  .pk .pki{font-size:30px}.pk .pke{font-size:26px;font-weight:900;line-height:1.1;margin-top:4px}.pk .pkl{font-size:11px;letter-spacing:.2em;opacity:.7}
+  .pk .pks{margin:10px auto 0;display:inline-block;padding:7px 14px;border-radius:999px;font-weight:800;background:var(--g-metal);color:#2b1b02}
+  .pk .pkb{position:absolute;top:-8px;right:8px;padding:3px 8px;border-radius:9px;font-size:10px;font-weight:800;background:#ff3b5c;color:#fff;box-shadow:0 0 10px rgba(255,59,92,.6)}
+  .emphist{margin-top:16px}.emphist .ehr{display:flex;justify-content:space-between;padding:8px 2px;border-bottom:1px solid rgba(255,210,74,.12);font-size:13px}
+  .oemp .ehd{display:grid;grid-template-columns:1fr 1fr 1fr 84px;gap:6px;font-size:11px;opacity:.7;margin:12px 0 4px}
+  .oemp .emprow{display:grid;grid-template-columns:1fr 1fr 1fr 28px 28px 28px;gap:6px;align-items:center;margin-top:6px}
+  .oemp .emprow.new{grid-template-columns:1fr 1fr 1fr 84px}
+  .oemp .emprow input{min-width:0;padding:9px 6px;border-radius:10px;border:1px solid rgba(255,210,74,.3);background:rgba(0,0,0,.3);color:#fff;font:inherit;text-align:center}
+  .oemp .emprow span{cursor:pointer;text-align:center;font-size:18px}.oemp .emprow.off{opacity:.55}
   .avcard{display:flex;align-items:center;gap:14px;margin-top:12px;cursor:pointer}
   .avcard .avi{width:56px;height:56px;flex:none;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:30px;background:var(--g-metal);box-shadow:0 0 18px rgba(255,210,74,.45)}
   .kpar{margin-top:8px;font-size:12px;font-weight:700;color:rgba(255,255,255,.92)}
@@ -20134,6 +20364,13 @@ function render(res){
   if(d.birja>0) extra.push('<span class="chip">📈 Birja: '+esc(d.birja)+'$</span>');
   if(d.loan) extra.push('<span class="chip" style="color:#ff6b6b;border-color:rgba(255,107,107,.4)">🏦 Faol kredit</span>');
   if(extra.length) p.appendChild($('<div style="margin-top:12px">'+extra.join(' ')+'</div>'));
+  if(d.emp){ // 🪙 EMP Coin (test: ownerlar)
+    const e=d.emp, ec=$('<div class="card full empc" data-tap="1"><img class="empi" alt="EMP" src="/app/a/emp_coin.jpg">'+
+      '<div class="empm"><div class="lbl">🪙 EMP Coin'+(e.test?' <span class="avtest">TEST</span>':'')+'</div>'+
+      '<div class="empb"><b id="empBal">'+fmtMoney(e.balance)+'</b> EMP</div><div class="hsub">Empire premium valyutasi</div></div>'+
+      '<button class="btn go empbuy">⭐ Sotib olish</button></div>');
+    ec.onclick=()=>openEmpShop(d); p.appendChild(ec);
+  }
   if(d.avatar3d){
     const av=$('<div class="card full avcard" data-tap="1"><div class="avi">🧍</div><div><div class="lbl">3D avatarim'+(d.avatar_test?' <span class="avtest">TEST</span>':'')+'</div>'+
       '<div class="hsub">Realistik 3D model · kiyim, soch, teri rangi va fonni tanlang</div></div></div>');
@@ -20513,6 +20750,29 @@ function render(res){
       else toast(eduErr(res.error)); });
     drawEdu(d.edu_all||[]);
     o.appendChild(ed);
+    if(d.emp&&d.emp.admin){ // 🪙 EMP paketlari — narxlarni ownerlar boshqaradi
+      const ea=$('<div class="card full oemp" style="margin-top:12px"></div>');
+      const drawEA=e=>{ const A=e.admin;
+        ea.innerHTML='<div class="lbl">🪙 EMP Coin — paketlar va narxlar</div>'+
+          '<div class="chips"><span class="chip">🧾 To‘lovlar: '+A.payments+'</span><span class="chip">⭐ '+fmtMoney(A.stars)+'</span>'+
+          '<span class="chip">🪙 Sotilgan: '+fmtMoney(A.emp_sold)+'</span><span class="chip">👛 Hamyonlarda: '+fmtMoney(A.emp_total)+'</span></div>'+
+          '<div class="ehd"><span>EMP</span><span>Bonus</span><span>⭐ Narx</span><span></span></div>'+
+          A.packs.map(x=>'<div class="erow emprow'+(x.active?'':' off')+'" data-id="'+x.id+'"><input class="ee" type="number" inputmode="numeric" value="'+x.emp+'">'+
+            '<input class="eb" type="number" inputmode="numeric" value="'+x.bonus+'"><input class="es2" type="number" inputmode="numeric" value="'+x.stars+'">'+
+            '<span class="es" title="Saqlash">💾</span><span class="et" title="Yoqish/o‘chirish">'+(x.active?'🟢':'⛔')+'</span><span class="ed" title="O‘chirish">🗑</span></div>').join('')+
+          '<div class="erow emprow new"><input class="ee" type="number" inputmode="numeric" placeholder="EMP"><input class="eb" type="number" inputmode="numeric" placeholder="Bonus" value="0">'+
+          '<input class="es2" type="number" inputmode="numeric" placeholder="⭐"><span class="ea" title="Qo‘shish">➕</span></div>'+
+          '<div class="hsub" style="margin-top:8px">⭐ narx — bitta to‘lov 1–10 000 Stars. ⛔ paket foydalanuvchilarga ko‘rinmaydi.</div>';
+        const val=r=>({emp:app_q(r,'.ee').value,bonus:app_q(r,'.eb').value,stars:app_q(r,'.es2').value});
+        const done=res=>{ if(res.result){ toast('✅ Saqlandi'); d.emp=res.emp; drawEA(res.emp); } else toast(res.error==='values'?'⚠️ Qiymatlar noto‘g‘ri (⭐ 1–10 000)':'⚠️ Xatolik'); };
+        ea.querySelectorAll('.emprow[data-id]').forEach(r=>{ const id=+r.dataset.id;
+          app_q(r,'.es').onclick=()=>api('/app/api/emp/update',Object.assign({id:id},val(r))).then(done);
+          app_q(r,'.et').onclick=()=>api('/app/api/emp/toggle',{id:id}).then(done);
+          app_q(r,'.ed').onclick=()=>{ if(confirm('Paket o‘chirilsinmi?')) api('/app/api/emp/delete',{id:id}).then(done); }; });
+        const nr=app_q(ea,'.emprow.new'); app_q(nr,'.ea').onclick=()=>api('/app/api/emp/add',val(nr)).then(done);
+      };
+      drawEA(d.emp); o.appendChild(ea);
+    }
     app.appendChild(o);
   }
 
@@ -20550,6 +20810,37 @@ document.addEventListener('pointerdown',e=>{
     sp.style.setProperty('--dx',Math.cos(a)*r+'px'); sp.style.setProperty('--dy',Math.sin(a)*r+'px');
     document.body.appendChild(sp); setTimeout(()=>sp.remove(),650); }
 },{passive:true});
+// ---- 🪙 EMP Coin do'koni (⭐ Telegram Stars) ----
+function openEmpShop(d){
+  let ov=document.getElementById('empv');
+  if(!ov){ ov=document.createElement('div'); ov.id='empv'; document.body.appendChild(ov); }
+  const draw=()=>{ const e=d.emp;
+    ov.innerHTML='<div class="empv-in"><span class="kst-x" id="empX">✕</span>'+
+      '<div class="emphero"><img alt="EMP" src="/app/a/emp_coin_full.jpg"><div class="empglow"></div></div>'+
+      '<div class="emph"><div class="empt">EMPIRE COIN'+(e.test?' <span class="avtest">TEST</span>':'')+'</div>'+
+      '<div class="empbal">🪙 <b>'+fmtMoney(e.balance)+'</b> EMP</div><div class="hsub">To‘lov — ⭐ Telegram Stars orqali, darhol hisobga tushadi</div></div>'+
+      '<div class="emppk">'+(e.packs.length?e.packs.map(x=>'<div class="pk" data-id="'+x.id+'" data-tap="1">'+(x.bonus?'<span class="pkb">+'+fmtMoney(x.bonus)+' bonus</span>':'')+
+        '<div class="pki">🪙</div><div class="pke">'+fmtMoney(x.emp)+'</div><div class="pkl">EMP</div><div class="pks">⭐ '+fmtMoney(x.stars)+'</div></div>').join('')
+        :'<div class="hsub center">Hozircha paket yo‘q</div>')+'</div>'+
+      (e.history&&e.history.length?'<div class="emphist"><div class="lbl">🧾 Oxirgi xaridlar</div>'+e.history.map(h=>'<div class="ehr"><span>+'+fmtMoney(h.emp)+' EMP · ⭐ '+h.stars+'</span><span class="hsub">'+esc(h.at)+'</span></div>').join('')+'</div>':'')+
+      '</div>';
+    ov.className='show';
+    document.getElementById('empX').onclick=()=>{ ov.className=''; };
+    ov.onclick=ev=>{ if(ev.target===ov) ov.className=''; };
+    ov.querySelectorAll('.pk').forEach(el=>el.onclick=()=>buy(+el.dataset.id,el));
+  };
+  const poll=(before,n)=>api('/app/api/emp/state',{}).then(r=>{ if(r.emp){ if(r.emp.balance>before||n<=0){ d.emp=r.emp; draw(); const b=document.getElementById('empBal'); if(b) b.textContent=fmtMoney(r.emp.balance);
+      if(r.emp.balance>before){ toast('🎉 +'+fmtMoney(r.emp.balance-before)+' EMP hisobingizga tushdi'); haptic('success'); } } else setTimeout(()=>poll(before,n-1),1500); } });
+  function buy(id,el){ el.classList.add('busy');
+    api('/app/api/emp/invoice',{pack:id}).then(r=>{ el.classList.remove('busy');
+      if(r.result!=='ok'){ toast({disabled:'🪙 EMP hozircha yopiq',pack:'⚠️ Paket topilmadi',invoice:'⚠️ Invoys yaratilmadi',bot:'⚠️ Bot band'}[r.error]||'⚠️ Xatolik'); return; }
+      const before=d.emp.balance;
+      if(tg&&tg.openInvoice){ tg.openInvoice(r.link,st=>{ if(st==='paid'){ toast('⏳ To‘lov tasdiqlanmoqda…'); poll(before,10); } else if(st==='failed') toast('❌ To‘lov amalga oshmadi'); }); }
+      else if(tg&&tg.openTelegramLink){ tg.openTelegramLink(r.link); setTimeout(()=>poll(before,20),4000); }
+      else window.open(r.link,'_blank');
+    }).catch(()=>{ el.classList.remove('busy'); toast('⚠️ Aloqa xatosi'); }); }
+  draw();
+}
 function setBal(v){ window.BAL=v; const b=document.getElementById('bal'); if(b) b.textContent=fmtMoney(v)+'$'; }
 function fmtMoney(n){ return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g,' '); }
 function app_q(el,sel){ return el.querySelector(sel); }
@@ -22127,6 +22418,8 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_noop))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, career_private_text))
     app.add_handler(MessageHandler(filters.Sticker.ALL & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, on_private_sticker))
+    app.add_handler(PreCheckoutQueryHandler(on_pre_checkout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_successful_payment))
 
     app.add_handler(
         MessageHandler(

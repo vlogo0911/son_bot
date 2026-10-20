@@ -214,3 +214,10 @@
   suhbat sarlavhasidagi 💍 (`pairPropose` → `/app/api/pair/propose`, `web_pair_propose`): faqat jufti yo'qlar, ikkalasining jinsi
   tanlangan va qarama-qarshi, blok yo'q, takror (24 soat) yo'q; `pair_requests.random=2`, nomzodga `user_card_text` + `rel:proposal`
   tugmalari → rozilik → bot egalari tasdig'i; javob yuboruvchiga xabar qilinadi.
+- 💬 Chat media: `web_chat_msgs.kind` (text/image/sticker) + `media` (migratsiya `init_webapp`). 📷 Rasm: klient `chatShrink`
+  (≤1280 px JPEG) → `chat/send` kind=image, data=dataURL (+ ixtiyoriy izoh ≤300); server `_chat_save_image` (Pillow verify,
+  thumbnail `CHAT_IMG_SIDE`, RGB JPEG q82 — EXIF/GPS yo'qoladi) → `CHAT_MEDIA_DIR` (volume/`chat_media`), nom 128-bit token;
+  `GET /app/chatimg/<32hex>.jpg` (`_chatimg`). Limit `CHAT_IMG_DAILY` 40/kun, `_web_api` body > 4 MB → 413. 🎭 Stiker: faqat
+  `CHAT_STICKERS` ro'yxatidagi emoji (payload `chat_stickers`), katta animatsiyali (`.msg.stk`). `chat_msg_json`, `chat_preview`
+  (ro'yxat/bildirishnomada "📷 Rasm"/"… Stiker"), rasmni bosish → `chatViewer`.
+- Web do'kon javobida `to` — oddiy ism (`_plain_person`), HTML havola emas (toast'da `&lt;a…` chiqmasin).

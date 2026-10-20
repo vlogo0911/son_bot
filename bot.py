@@ -16842,8 +16842,25 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             self._avatar(int(path.rsplit("/", 1)[1]))
         elif path.startswith("/app/a/") and path.rsplit("/", 1)[1] in WEBAPP_ASSETS:
             self._asset(path.rsplit("/", 1)[1])
+        elif re.fullmatch(r"/app/chatimg/[0-9a-f]{32}\.jpg", path):
+            self._chatimg(path.rsplit("/", 1)[1])
         else:
             self._send(404, {"ok": False})
+
+    def _chatimg(self, name):
+        """💬 Chat rasmlari: nomi 128-bitli tasodifiy token (taxmin qilib bo'lmaydi)."""
+        try:
+            with open(os.path.join(CHAT_MEDIA_DIR, name), "rb") as f:
+                data = f.read()
+        except OSError:
+            self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Cache-Control", "private, max-age=604800")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _asset(self, name):
         """Web app rasmlari (Kazino bannerlari) — repo ichidagi webapp_assets/ dan."""
@@ -16885,6 +16902,9 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
     def _web_api(self, path):
         try:
             length = int(self.headers.get("Content-Length", 0))
+            if length > 4_000_000:      # chat rasmi ~3.4 MB base64 gacha; undan kattasi qabul qilinmaydi
+                self._send(413, {"ok": False, "error": "too_large"})
+                return
             raw = self.rfile.read(length) if length else b""
             body = json.loads(raw.decode()) if raw else {}
         except (ValueError, OSError, json.JSONDecodeError):
@@ -16941,7 +16961,7 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         elif path == "/app/api/chat/history":
             coro = web_chat_history(uid, body.get("with"), body.get("after"))
         elif path == "/app/api/chat/send":
-            coro = web_chat_send(uid, body.get("to"), body.get("text"))
+            coro = web_chat_send(uid, body.get("to"), body.get("text"), body.get("kind") or "text", body.get("data"))
         elif path == "/app/api/chat/block":
             coro = web_chat_block(uid, body.get("with"), bool(body.get("on")))
         elif path == "/app/api/pair/propose":
@@ -17892,6 +17912,11 @@ def init_webapp():
             text TEXT NOT NULL, created_at INTEGER NOT NULL, read INTEGER NOT NULL DEFAULT 0)""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_wchat_pair ON web_chat_msgs(from_id, to_id, id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_wchat_unread ON web_chat_msgs(to_id, read)")
+        mcols = {r[1] for r in c.execute("PRAGMA table_info(web_chat_msgs)")}
+        if "kind" not in mcols:      # 📷 rasm / 🎭 stiker
+            c.execute("ALTER TABLE web_chat_msgs ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
+        if "media" not in mcols:
+            c.execute("ALTER TABLE web_chat_msgs ADD COLUMN media TEXT")
         c.execute("""CREATE TABLE IF NOT EXISTS web_chat_blocks (
             user_id INTEGER NOT NULL, blocked_id INTEGER NOT NULL, PRIMARY KEY(user_id, blocked_id))""")
         cols = {r[1] for r in c.execute("PRAGMA table_info(pair_requests)")}
@@ -18093,6 +18118,13 @@ CHAT_RATE = (8, 10)              # 10 s ichida ko'pi bilan 8 ta xabar
 CHAT_NOTIFY_GAP = 300            # s — bitta suhbat bo'yicha Telegram bildirishnomalari oralig'i
 CHAT_PAGE = 60
 _CHAT_SENT: dict[int, list] = {}
+CHAT_MEDIA_DIR = os.path.join(VOLUME_PATH or BASE_DIR, "chat_media")
+CHAT_IMG_MAX_BYTES = 2_500_000   # yuklanadigan rasm (base64 dan keyin)
+CHAT_IMG_SIDE = 1280             # saqlanadigan rasmning eng katta tomoni
+CHAT_IMG_DAILY = 40              # bir kunda yuboriladigan rasmlar
+CHAT_STICKERS = ("😍", "🥰", "😘", "❤️", "💖", "💞", "💍", "🌹", "😂", "🤣", "😜", "😎", "🤩", "🥳", "🎉", "🔥",
+                 "👍", "👏", "🙏", "💪", "🤝", "👋", "😇", "🤗", "😢", "😭", "😡", "😱", "🤔", "🙄", "😴", "🤯",
+                 "💰", "💸", "🎰", "🚀", "🐸", "🛩", "👑", "💎", "🍀", "⭐", "☕", "🍕", "🎂", "🎁", "🐱", "🐶")
 _CHAT_NOTIFIED: dict[tuple, float] = {}
 
 
@@ -18157,9 +18189,9 @@ async def web_chat_list(uid):
         GROUP BY peer ORDER BY last DESC LIMIT 50""", (uid, uid, uid)).fetchall()
     out = []
     for peer, last in rows:
-        m = c.execute("SELECT from_id, text, created_at FROM web_chat_msgs WHERE id=?", (last,)).fetchone()
+        m = c.execute("SELECT from_id, text, created_at, kind FROM web_chat_msgs WHERE id=?", (last,)).fetchone()
         unread = c.execute("SELECT COUNT(*) FROM web_chat_msgs WHERE from_id=? AND to_id=? AND read=0", (peer, uid)).fetchone()[0]
-        out.append({"id": peer, "name": _plain_person(peer), "last": m[1][:80], "mine": m[0] == uid,
+        out.append({"id": peer, "name": _plain_person(peer), "last": chat_preview(m[1], m[3])[:80], "mine": m[0] == uid,
                     "at": tashkent_dt(m[2]), "unread": unread})
     return {"result": "ok", "chats": out, "unread": chat_unread(uid)}
 
@@ -18172,31 +18204,73 @@ async def web_chat_history(uid, peer, after=0):
     except (TypeError, ValueError):
         return {"error": "user"}
     c = db()
-    rows = c.execute("""SELECT id, from_id, text, created_at, read FROM web_chat_msgs
+    rows = c.execute("""SELECT id, from_id, text, created_at, kind, media FROM web_chat_msgs
                         WHERE ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND id>?
                         ORDER BY id DESC LIMIT ?""", (uid, peer, peer, uid, after, CHAT_PAGE)).fetchall()[::-1]
     with c:
         c.execute("UPDATE web_chat_msgs SET read=1 WHERE from_id=? AND to_id=? AND read=0", (peer, uid))
     seen = c.execute("SELECT COALESCE(MAX(id),0) FROM web_chat_msgs WHERE from_id=? AND to_id=? AND read=1",
                      (uid, peer)).fetchone()[0]
-    res = {"result": "ok", "msgs": [{"id": r[0], "mine": r[1] == uid, "text": r[2], "at": tashkent_dt(r[3])} for r in rows],
+    res = {"result": "ok", "msgs": [chat_msg_json(r, uid) for r in rows],
            "seen": seen, "unread": chat_unread(uid)}
     if not after:
         res["peer"] = chat_peer(peer, uid)
     return res
 
 
-async def web_chat_send(uid, peer, text):
+def _chat_save_image(data):
+    """base64 (data URL) → tekshirilgan, kichraytirilgan JPEG (EXIF/GPS olib tashlanadi). Token yoki None."""
+    from PIL import Image
+    import base64, io, secrets
+    raw = str(data or "")
+    if raw.startswith("data:"):
+        raw = raw.split(",", 1)[-1]
+    if len(raw) > CHAT_IMG_MAX_BYTES * 4 // 3 + 16:
+        return None
+    try:
+        blob = base64.b64decode(raw, validate=True)
+        Image.open(io.BytesIO(blob)).verify()
+        im = Image.open(io.BytesIO(blob))
+        if im.width * im.height > 40_000_000:
+            return None
+        im.thumbnail((CHAT_IMG_SIDE, CHAT_IMG_SIDE))
+        im = im.convert("RGB")
+    except Exception:
+        return None
+    os.makedirs(CHAT_MEDIA_DIR, exist_ok=True)
+    tok = secrets.token_hex(16)
+    im.save(os.path.join(CHAT_MEDIA_DIR, tok + ".jpg"), "JPEG", quality=82, optimize=True)
+    return tok
+
+
+def chat_msg_json(row, uid):
+    """(id, from_id, text, created_at, kind, media) → klient uchun."""
+    mid, frm, text, at, kind, media = row
+    m = {"id": mid, "mine": frm == uid, "text": text, "at": tashkent_dt(at), "kind": kind or "text"}
+    if media:
+        m["img"] = f"/app/chatimg/{media}.jpg"
+    return m
+
+
+def chat_preview(text, kind):
+    return "📷 Rasm" + (f": {text}" if text else "") if kind == "image" else (f"{text} Stiker" if kind == "sticker" else text)
+
+
+async def web_chat_send(uid, peer, text, kind="text", data=None):
     if not web_enabled_for(uid):
         return {"error": "disabled"}
     try:
         peer = int(peer)
     except (TypeError, ValueError):
         return {"error": "user"}
+    kind = kind if kind in ("text", "image", "sticker") else "text"
     text = re.sub(r"[\u0000-\u0008\u000b-\u001f\u007f]", "", str(text or "")).strip()
-    if not text:
+    if kind == "sticker":
+        if text not in CHAT_STICKERS:
+            return {"error": "sticker"}
+    elif kind == "text" and not text:
         return {"error": "empty"}
-    if len(text) > CHAT_MAX_LEN:
+    if len(text) > (300 if kind == "image" else CHAT_MAX_LEN):
         return {"error": "long", "max": CHAT_MAX_LEN}
     if peer == uid:
         return {"error": "self"}
@@ -18208,11 +18282,20 @@ async def web_chat_send(uid, peer, text):
     sent = [t for t in _CHAT_SENT.get(uid, []) if now - t < CHAT_RATE[1]]
     if len(sent) >= CHAT_RATE[0]:
         return {"error": "rate"}
-    sent.append(now); _CHAT_SENT[uid] = sent
     c = db()
+    media = None
+    if kind == "image":
+        day = int(now) - 86400
+        if c.execute("SELECT COUNT(*) FROM web_chat_msgs WHERE from_id=? AND kind='image' AND created_at>?",
+                     (uid, day)).fetchone()[0] >= CHAT_IMG_DAILY:
+            return {"error": "img_daily", "max": CHAT_IMG_DAILY}
+        media = await asyncio.to_thread(_chat_save_image, data)
+        if not media:
+            return {"error": "image"}
+    sent.append(now); _CHAT_SENT[uid] = sent
     with c:
-        mid = c.execute("INSERT INTO web_chat_msgs(from_id, to_id, text, created_at) VALUES (?, ?, ?, ?)",
-                        (uid, peer, text, int(now))).lastrowid
+        mid = c.execute("INSERT INTO web_chat_msgs(from_id, to_id, text, created_at, kind, media) VALUES (?, ?, ?, ?, ?, ?)",
+                        (uid, peer, text, int(now), kind, media)).lastrowid
     # Telegram bildirishnoma (suhbat bo'yicha 5 daqiqada bir marta, o'qilmagan bo'lsa)
     key = (uid, peer)
     if _EXCHANGE_LOOP_BOT is not None and now - _CHAT_NOTIFIED.get(key, 0) > CHAT_NOTIFY_GAP:
@@ -18225,10 +18308,10 @@ async def web_chat_send(uid, peer, text):
             await _EXCHANGE_LOOP_BOT.send_message(
                 chat_id=peer, reply_markup=kb,
                 text=f"💬 <b>Yangi xabar</b> — {person_name(uid)} (ID: <code>{uid}</code>)\n\n"
-                     f"{html.escape(text[:300])}{'…' if len(text) > 300 else ''}")
+                     f"{html.escape(chat_preview(text, kind)[:300])}{'…' if len(text) > 300 else ''}")
         except TelegramError as e:
             logger.info("Chat bildirishnomasi yetkazilmadi (%s): %s", peer, e)
-    return {"result": "sent", "msg": {"id": mid, "mine": True, "text": text, "at": tashkent_dt(int(now))}}
+    return {"result": "sent", "msg": chat_msg_json((mid, uid, text, int(now), kind, media), uid)}
 
 
 async def web_chat_block(uid, peer, on):
@@ -18490,6 +18573,7 @@ async def webapp_payload(user_id):
         "avatar": avatar_get(user_id),
         "randpair": randpair_status(user_id),
         "chat_unread": chat_unread(user_id),
+        "chat_stickers": list(CHAT_STICKERS),
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -18935,7 +19019,7 @@ async def web_shop_buy(uid, gift_key, recipient):
             if not owner:
                 _wallet_add(c, uid, price)
         return {"error": "undeliverable", "balance": wallet_balance(uid)}
-    return {"result": "sent", "gift": name, "to": person_name(rid), "balance": wallet_balance(uid)}
+    return {"result": "sent", "gift": name, "to": _plain_person(rid), "balance": wallet_balance(uid)}
 
 
 # ── 🏦 Web app: Bank (kredit / omonat — faqat instant banklar) ──
@@ -19745,7 +19829,17 @@ WEBAPP_HTML = r"""<!doctype html>
   .msg.me{align-self:flex-end;border-radius:16px 16px 4px 16px;background:linear-gradient(135deg,#c99a2e,#8a6416);color:#fff}
   .msg .mt{font-size:14.5px;line-height:1.38}.msg .mm{font-size:9.5px;opacity:.7;text-align:right;margin-top:3px}.msg .tick{margin-left:5px}
   .chempty{margin-top:30%}
-  .chv-ft{display:flex;gap:8px;align-items:flex-end;padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid rgba(255,210,74,.2)}
+  .msg.stk{background:none!important;padding:0 2px}.msg.stk .se{display:block;font-size:76px;line-height:1.05;animation:stkpop .45s cubic-bezier(.2,1.6,.4,1)}
+  .msg.stk .mm{color:#fff}@keyframes stkpop{0%{transform:scale(.3) rotate(-12deg)}100%{transform:scale(1)}}
+  .msg.pic{padding:4px 4px 5px;max-width:72%}.msg.pic img{display:block;width:100%;max-height:340px;min-height:80px;object-fit:cover;border-radius:12px;cursor:zoom-in;background:rgba(0,0,0,.25)}
+  .msg.pic .mt{padding:6px 6px 0}.msg.pic .mm{padding:0 6px}
+  .chv-a{flex:none;width:40px;height:44px;display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer}
+  .chv-stk{display:none;grid-template-columns:repeat(8,1fr);gap:4px;padding:10px 10px 4px;max-height:210px;overflow-y:auto;border-top:1px solid rgba(255,210,74,.2);background:rgba(0,0,0,.35)}
+  .chv-stk.on{display:grid}.chv-stk span{font-size:30px;text-align:center;padding:5px 0;border-radius:12px;cursor:pointer}.chv-stk span:active{background:rgba(255,210,74,.2);transform:scale(1.2)}
+  #chimgv{position:fixed;inset:0;z-index:95;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.92)}
+  #chimgv.on{display:flex}#chimgv img{max-width:100%;max-height:100%;object-fit:contain}
+  #chimgv .x{position:absolute;top:14px;right:16px;font-size:26px;color:#fff;cursor:pointer}
+  .chv-ft{display:flex;gap:4px;align-items:flex-end;padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid rgba(255,210,74,.2)}
   .chv-ft textarea{flex:1;resize:none;min-height:44px;max-height:110px;padding:12px 14px;border-radius:22px;border:1px solid rgba(255,210,74,.35);background:rgba(0,0,0,.35);color:#fff;font:inherit;font-size:15px;outline:none}
   .chv-ft .btn{flex:none;width:48px;height:44px;padding:0;border-radius:50%;font-size:18px}
   .avcard{display:flex;align-items:center;gap:14px;margin-top:12px;cursor:pointer}
@@ -21183,7 +21277,16 @@ function initCrash(){
 // ---- 💬 CHAT (ID orqali shaxsiy suhbat) ----
 const CHERR={not_found:'🔎 Bunday foydalanuvchi topilmadi (botni ishlatgan bo‘lishi kerak)',self:'🙃 Bu sizning ID ingiz',
   blocked:'🚫 Bloklangan — xabar yuborib bo‘lmaydi',rate:'⏳ Juda tez yozyapsiz, biroz kuting',empty:'✍️ Xabar bo‘sh',
-  long:'📏 Xabar juda uzun (1000 belgigacha)',disabled:'🌐 Web app o‘chirilgan',user:'⚠️ Foydalanuvchi xato'};
+  long:'📏 Xabar juda uzun (1000 belgigacha)',disabled:'🌐 Web app o‘chirilgan',user:'⚠️ Foydalanuvchi xato',
+  image:'🖼 Rasmni o‘qib bo‘lmadi', img_daily:'📷 Bugungi rasm limiti tugadi (40 ta)', sticker:'🎭 Bunday stiker yo‘q', too_large:'📦 Rasm juda katta'};
+// rasmni telefonda kichraytirish (≤1280 px, JPEG) — trafik va server yuki kam
+function chatShrink(file){ return new Promise((ok,bad)=>{ const url=URL.createObjectURL(file), im=new Image();
+  im.onload=()=>{ const k=Math.min(1,1280/Math.max(im.naturalWidth,im.naturalHeight)), w=Math.round(im.naturalWidth*k), h=Math.round(im.naturalHeight*k);
+    const cv=document.createElement('canvas'); cv.width=w; cv.height=h; cv.getContext('2d').drawImage(im,0,0,w,h); URL.revokeObjectURL(url);
+    let q=.85, out=cv.toDataURL('image/jpeg',q); while(out.length>2400000&&q>.4){ q-=.15; out=cv.toDataURL('image/jpeg',q); } ok(out); };
+  im.onerror=()=>{ URL.revokeObjectURL(url); bad(); }; im.src=url; }); }
+function chatViewer(src){ let v=document.getElementById('chimgv'); if(!v){ v=document.createElement('div'); v.id='chimgv'; document.body.appendChild(v); }
+  v.innerHTML='<img alt="" src="'+esc(src)+'"><span class="x">✕</span>'; v.className='on'; v.onclick=()=>{ v.className=''; }; }
 const PAIRERR={not_found:'🔎 Foydalanuvchi topilmadi',self:'🙃 O‘zingizga taklif yubora olmaysiz',no_gender:'⚧ Avval botda jinsingizni tanlang (/start)',
   target_gender:'⚧ U hali jinsini tanlamagan',same_gender:'🚫 Faqat qarama-qarshi jins bilan juft bo‘lish mumkin',
   has_pair:'💞 Sizda allaqachon juft bor',target_pair:'💞 Uning allaqachon jufti bor',blocked:'🚫 Bloklangan',
@@ -21241,13 +21344,18 @@ function openChat(peer,name,d){
     '<div class="chv-n"><b id="chvN">'+esc(name||('ID '+peer))+'</b><div class="hsub" id="chvS">ID '+esc(peer)+'</div></div>'+
     '<span class="chv-i" id="chvP" title="Juftlik taklifi">💍</span><span class="chv-i" id="chvM" title="Ma’lumot">ⓘ</span></div>'+
     '<div class="chv-info" id="chvInfo"></div><div class="chv-msgs" id="chvL"><div class="hsub center">Yuklanmoqda…</div></div>'+
-    '<div class="chv-ft"><textarea id="chvT" rows="1" maxlength="1000" placeholder="Xabar yozing…"></textarea><button class="btn go" id="chvS2">➤</button></div></div>';
+    '<div class="chv-stk" id="chvK">'+((d&&d.chat_stickers)||[]).map(e=>'<span data-e="'+esc(e)+'">'+esc(e)+'</span>').join('')+'</div>'+
+    '<div class="chv-ft"><span class="chv-a" id="chvE" title="Stiker">😊</span><span class="chv-a" id="chvF" title="Rasm">📎</span>'+
+    '<input type="file" id="chvFile" accept="image/*" hidden><textarea id="chvT" rows="1" maxlength="1000" placeholder="Xabar yozing…"></textarea><button class="btn go" id="chvS2">➤</button></div></div>';
   const L=document.getElementById('chvL'), T=document.getElementById('chvT'), S=document.getElementById('chvS2'), info=document.getElementById('chvInfo');
   let last=0, seen=0, peerData=null, first=true;
   const close=()=>{ ov.className='chv'; clearInterval(window.CHP); window.CHP=0; if(window.CHLOAD) window.CHLOAD(); };
   document.getElementById('chvB').onclick=close;
-  const bubble=m=>'<div class="msg'+(m.mine?' me':'')+'" data-id="'+m.id+'"><div class="mt">'+esc(m.text).replace(/\n/g,'<br>')+'</div>'+
-    '<div class="mm">'+esc(m.at)+(m.mine?'<span class="tick">✓</span>':'')+'</div></div>';
+  const bubble=m=>{ const meta='<div class="mm">'+esc(m.at)+(m.mine?'<span class="tick">✓</span>':'')+'</div>';
+    if(m.kind==='sticker') return '<div class="msg stk'+(m.mine?' me':'')+'" data-id="'+m.id+'"><span class="se">'+esc(m.text)+'</span>'+meta+'</div>';
+    if(m.kind==='image') return '<div class="msg pic'+(m.mine?' me':'')+'" data-id="'+m.id+'"><img loading="lazy" alt="📷" src="'+esc(m.img)+'" data-full="'+esc(m.img)+'">'+
+      (m.text?'<div class="mt">'+esc(m.text).replace(/\n/g,'<br>')+'</div>':'')+meta+'</div>';
+    return '<div class="msg'+(m.mine?' me':'')+'" data-id="'+m.id+'"><div class="mt">'+esc(m.text).replace(/\n/g,'<br>')+'</div>'+meta+'</div>'; };
   function paintSeen(){ L.querySelectorAll('.msg.me').forEach(el=>{ const t=el.querySelector('.tick'); if(t) t.textContent=(+el.dataset.id<=seen)?'✓✓':'✓'; }); }
   function add(ms){ if(!ms.length) return; const near=L.scrollHeight-L.scrollTop-L.clientHeight<80;
     if(first){ L.innerHTML=''; } const em=L.querySelector('.chempty'); if(em) em.remove(); ms.forEach(m=>{ if(m.id>last){ L.insertAdjacentHTML('beforeend',bubble(m)); last=m.id; } });
@@ -21271,6 +21379,20 @@ function openChat(peer,name,d){
       if(r.result==='sent'){ T.value=''; T.style.height=''; if(first){ L.innerHTML=''; first=false; } add([r.msg]); paintSeen(); SND.ui&&SND.ui('select'); }
       else toast(CHERR[r.error]||'⚠️ Xatolik'); }).catch(()=>{ S.disabled=false; toast('⚠️ Aloqa xatosi'); }); };
   S.onclick=send;
+  // 🎭 stiker / 📷 rasm
+  const K=document.getElementById('chvK'), FI=document.getElementById('chvFile');
+  const post=(body,cb)=>api('/app/api/chat/send',Object.assign({to:peer},body)).then(r=>{
+      if(r.result==='sent'){ if(first){ L.innerHTML=''; first=false; } add([r.msg]); paintSeen(); if(cb) cb(); }
+      else toast(CHERR[r.error]||'⚠️ Xatolik'); return r; });
+  document.getElementById('chvE').onclick=()=>K.classList.toggle('on');
+  K.querySelectorAll('span').forEach(el=>el.onclick=()=>{ K.classList.remove('on'); post({kind:'sticker',text:el.dataset.e}).catch(()=>toast('⚠️ Aloqa xatosi')); });
+  document.getElementById('chvF').onclick=()=>FI.click();
+  FI.onchange=()=>{ const f=FI.files&&FI.files[0]; FI.value=''; if(!f) return;
+    if(!/^image\//.test(f.type)){ toast('🖼 Faqat rasm yuborish mumkin'); return; }
+    toast('📤 Rasm yuborilmoqda…');
+    chatShrink(f).then(data=>post({kind:'image',data:data,text:T.value.trim().slice(0,300)},()=>{ T.value=''; T.style.height=''; }))
+      .catch(()=>toast(CHERR.image)); };
+  L.onclick=e=>{ const im=e.target.closest('.msg.pic img'); if(im) chatViewer(im.dataset.full); };
   T.onkeydown=e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } };
   T.oninput=()=>{ T.style.height='auto'; T.style.height=Math.min(110,T.scrollHeight)+'px'; };
 }

@@ -16844,8 +16844,28 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             self._asset(path.rsplit("/", 1)[1])
         elif re.fullmatch(r"/app/chatimg/[0-9a-f]{32}\.jpg", path):
             self._chatimg(path.rsplit("/", 1)[1])
+        elif re.fullmatch(r"/app/tgs/[A-Za-z0-9_-]{6,64}", path):
+            self._tgsticker(path.rsplit("/", 1)[1])
         else:
             self._send(404, {"ok": False})
+
+    def _tgsticker(self, fuid):
+        """🎭 Telegram stikeri (bot orqali olinib keshlanadi; token oshkor bo'lmaydi)."""
+        data, ctype = b"", None
+        if _EXCHANGE_LOOP is not None:
+            try:
+                data, ctype = asyncio.run_coroutine_threadsafe(tg_sticker_bytes(fuid), _EXCHANGE_LOOP).result(timeout=20)
+            except Exception:  # noqa: BLE001
+                data = b""
+        if not data:
+            self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "public, max-age=2592000, immutable")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _chatimg(self, name):
         """💬 Chat rasmlari: nomi 128-bitli tasodifiy token (taxmin qilib bo'lmaydi)."""
@@ -16962,6 +16982,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_chat_history(uid, body.get("with"), body.get("after"))
         elif path == "/app/api/chat/send":
             coro = web_chat_send(uid, body.get("to"), body.get("text"), body.get("kind") or "text", body.get("data"))
+        elif path == "/app/api/chat/stickers":
+            coro = web_chat_stickers(uid)
+        elif path == "/app/api/chat/stickers/remove":
+            coro = web_chat_sticker_remove(uid, body.get("id"))
         elif path == "/app/api/chat/block":
             coro = web_chat_block(uid, body.get("with"), bool(body.get("on")))
         elif path == "/app/api/pair/propose":
@@ -17917,6 +17941,14 @@ def init_webapp():
             c.execute("ALTER TABLE web_chat_msgs ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
         if "media" not in mcols:
             c.execute("ALTER TABLE web_chat_msgs ADD COLUMN media TEXT")
+        # 🎭 Telegram stiker to'plamlari (botga stiker yuborilganda qo'shiladi; user_id=0 — hamma uchun)
+        c.execute("""CREATE TABLE IF NOT EXISTS tg_sticker_sets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, title TEXT NOT NULL,
+            data TEXT NOT NULL, updated_at INTEGER NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS tg_sticker_files (
+            uid TEXT PRIMARY KEY, file_id TEXT NOT NULL, fmt TEXT NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS chat_sticker_packs (
+            user_id INTEGER NOT NULL, set_id INTEGER NOT NULL, added_at INTEGER NOT NULL, PRIMARY KEY(user_id, set_id))""")
         c.execute("""CREATE TABLE IF NOT EXISTS web_chat_blocks (
             user_id INTEGER NOT NULL, blocked_id INTEGER NOT NULL, PRIMARY KEY(user_id, blocked_id))""")
         cols = {r[1] for r in c.execute("PRAGMA table_info(pair_requests)")}
@@ -18247,12 +18279,16 @@ def chat_msg_json(row, uid):
     """(id, from_id, text, created_at, kind, media) → klient uchun."""
     mid, frm, text, at, kind, media = row
     m = {"id": mid, "mine": frm == uid, "text": text, "at": tashkent_dt(at), "kind": kind or "text"}
-    if media:
+    if kind == "tg":
+        m["tg"] = {"u": text, "f": media or "webp"}
+    elif media:
         m["img"] = f"/app/chatimg/{media}.jpg"
     return m
 
 
 def chat_preview(text, kind):
+    if kind == "tg":
+        return "🎭 Stiker"
     return "📷 Rasm" + (f": {text}" if text else "") if kind == "image" else (f"{text} Stiker" if kind == "sticker" else text)
 
 
@@ -18263,11 +18299,18 @@ async def web_chat_send(uid, peer, text, kind="text", data=None):
         peer = int(peer)
     except (TypeError, ValueError):
         return {"error": "user"}
-    kind = kind if kind in ("text", "image", "sticker") else "text"
+    kind = kind if kind in ("text", "image", "sticker", "tg") else "text"
     text = re.sub(r"[\u0000-\u0008\u000b-\u001f\u007f]", "", str(text or "")).strip()
+    tg_fmt = None
     if kind == "sticker":
         if text not in CHAT_STICKERS:
             return {"error": "sticker"}
+    elif kind == "tg":
+        row = db().execute("SELECT fmt FROM tg_sticker_files WHERE uid=? AND fmt<>'thumb'", (text,)).fetchone() \
+            if re.fullmatch(r"[A-Za-z0-9_-]{6,64}", text) else None
+        if not row:
+            return {"error": "sticker"}
+        tg_fmt = row[0]
     elif kind == "text" and not text:
         return {"error": "empty"}
     if len(text) > (300 if kind == "image" else CHAT_MAX_LEN):
@@ -18283,7 +18326,7 @@ async def web_chat_send(uid, peer, text, kind="text", data=None):
     if len(sent) >= CHAT_RATE[0]:
         return {"error": "rate"}
     c = db()
-    media = None
+    media = tg_fmt
     if kind == "image":
         day = int(now) - 86400
         if c.execute("SELECT COUNT(*) FROM web_chat_msgs WHERE from_id=? AND kind='image' AND created_at>?",
@@ -18312,6 +18355,162 @@ async def web_chat_send(uid, peer, text, kind="text", data=None):
         except TelegramError as e:
             logger.info("Chat bildirishnomasi yetkazilmadi (%s): %s", peer, e)
     return {"result": "sent", "msg": chat_msg_json((mid, uid, text, int(now), kind, media), uid)}
+
+
+# ── 🎭 Telegram stikerlari (web chat) ──
+TG_STICKER_DIR = os.path.join(VOLUME_PATH or BASE_DIR, "tg_stickers")
+TG_STICKER_PACKS_MAX = 30        # bir foydalanuvchida ko'pi bilan to'plam
+TG_STICKER_SET_TTL = 86400       # to'plam ro'yxati 1 kunda bir yangilanadi
+
+
+def _tg_fmt(st):
+    return "tgs" if st.is_animated else ("webm" if st.is_video else "webp")
+
+
+async def tg_sticker_set_fetch(bot, name):
+    """Telegram'dan to'plamni olib keshlaydi → (set_id, title, soni) yoki None."""
+    c = db()
+    row = c.execute("SELECT id, title, data, updated_at FROM tg_sticker_sets WHERE name=?", (name,)).fetchone()
+    if row and time.time() - row[3] < TG_STICKER_SET_TTL:
+        return row[0], row[1], len(json.loads(row[2]))
+    try:
+        ss = await bot.get_sticker_set(name)
+    except TelegramError as e:
+        logger.info("Stiker to'plami olinmadi (%s): %s", name, e)
+        return (row[0], row[1], len(json.loads(row[2]))) if row else None
+    items, files = [], []
+    for st in ss.stickers[:200]:
+        fmt = _tg_fmt(st)
+        files.append((st.file_unique_id, st.file_id, fmt))
+        th = st.thumbnail
+        if th:
+            files.append((th.file_unique_id, th.file_id, "thumb"))
+        items.append({"u": st.file_unique_id, "f": fmt, "t": th.file_unique_id if th else None, "e": st.emoji or ""})
+    with c:
+        c.executemany("INSERT OR REPLACE INTO tg_sticker_files(uid, file_id, fmt) VALUES (?, ?, ?)", files)
+        c.execute("""INSERT INTO tg_sticker_sets(name, title, data, updated_at) VALUES (?, ?, ?, ?)
+                     ON CONFLICT(name) DO UPDATE SET title=excluded.title, data=excluded.data, updated_at=excluded.updated_at""",
+                  (name, ss.title, json.dumps(items), int(time.time())))
+    sid = c.execute("SELECT id FROM tg_sticker_sets WHERE name=?", (name,)).fetchone()[0]
+    return sid, ss.title, len(items)
+
+
+async def on_private_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Botga shaxsiy chatda stiker yuborilsa — uning to'plami web chat stikerlariga qo'shiladi."""
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not msg.sticker or not user:
+        return
+    st = msg.sticker
+    save_user(user)
+    if not st.set_name:
+        c = db()
+        with c:   # to'plamsiz stiker — yakka holda "Yuborilganlar" sifatida saqlanmaydi, lekin yuborish uchun fayl ro'yxatga olinadi
+            c.execute("INSERT OR REPLACE INTO tg_sticker_files(uid, file_id, fmt) VALUES (?, ?, ?)",
+                      (st.file_unique_id, st.file_id, _tg_fmt(st)))
+        await msg.reply_text("ℹ️ Bu stiker hech qaysi to‘plamga tegishli emas — to‘plamdagi stiker yuboring.")
+        return
+    res = await tg_sticker_set_fetch(context.bot, st.set_name)
+    if not res:
+        await msg.reply_text("⚠️ Stiker to‘plamini olib bo‘lmadi, keyinroq urinib ko‘ring.")
+        return
+    sid, title, n = res
+    c = db()
+    have = c.execute("SELECT COUNT(*) FROM chat_sticker_packs WHERE user_id=?", (user.id,)).fetchone()[0]
+    exists = c.execute("SELECT 1 FROM chat_sticker_packs WHERE user_id=? AND set_id=?", (user.id, sid)).fetchone()
+    if not exists and have >= TG_STICKER_PACKS_MAX:
+        await msg.reply_text(f"⚠️ Ko‘pi bilan {TG_STICKER_PACKS_MAX} ta to‘plam. Web app → Chat → 😊 dan keraksizini o‘chiring.")
+        return
+    with c:
+        c.execute("INSERT OR IGNORE INTO chat_sticker_packs(user_id, set_id, added_at) VALUES (?, ?, ?)", (user.id, sid, int(time.time())))
+    kb = None
+    if user.id in CAREER_OWNER_IDS:
+        glob = c.execute("SELECT 1 FROM chat_sticker_packs WHERE user_id=0 AND set_id=?", (sid,)).fetchone()
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🌍 Hamma uchun o‘chirish" if glob else "🌍 Hamma uchun qo‘shish",
+                                                         callback_data=f"stk:{'u' if glob else 'g'}:{sid}")]])
+    await msg.reply_text(
+        f"{'✅ Allaqachon bor' if exists else '✅ Qo‘shildi'}: <b>{html.escape(title)}</b> ({n} ta stiker)\n"
+        "💬 Web app → Chat → suhbatda 😊 tugmasi — endi shu stikerlarni yubora olasiz.", reply_markup=kb)
+
+
+async def cb_sticker_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if q.from_user.id not in CAREER_OWNER_IDS:
+        await q.answer("Faqat bot egalari uchun.", show_alert=True)
+        return
+    _, act, sid = q.data.split(":")
+    c = db()
+    with c:
+        if act == "g":
+            c.execute("INSERT OR IGNORE INTO chat_sticker_packs(user_id, set_id, added_at) VALUES (0, ?, ?)", (int(sid), int(time.time())))
+        else:
+            c.execute("DELETE FROM chat_sticker_packs WHERE user_id=0 AND set_id=?", (int(sid),))
+    await q.answer("🌍 Hamma uchun qo‘shildi" if act == "g" else "Olib tashlandi")
+    try:
+        await q.edit_message_reply_markup(InlineKeyboardMarkup([[InlineKeyboardButton(
+            "🌍 Hamma uchun o‘chirish" if act == "g" else "🌍 Hamma uchun qo‘shish",
+            callback_data=f"stk:{'u' if act == 'g' else 'g'}:{sid}")]]))
+    except BadRequest:
+        pass
+
+
+async def web_chat_stickers(uid):
+    rows = db().execute("""SELECT s.id, s.name, s.title, s.data, MIN(p.user_id) FROM chat_sticker_packs p
+                           JOIN tg_sticker_sets s ON s.id=p.set_id WHERE p.user_id IN (0, ?)
+                           GROUP BY s.id ORDER BY MAX(p.user_id) DESC, MAX(p.added_at) DESC""", (uid,)).fetchall()
+    own = {r[0] for r in db().execute("SELECT set_id FROM chat_sticker_packs WHERE user_id=?", (uid,))}
+    return {"result": "ok", "packs": [{"id": r[0], "title": r[2], "global": r[0] not in own, "stickers": json.loads(r[3])}
+                                      for r in rows]}
+
+
+async def web_chat_sticker_remove(uid, sid):
+    try:
+        sid = int(sid)
+    except (TypeError, ValueError):
+        return {"error": "pack"}
+    c = db()
+    with c:
+        c.execute("DELETE FROM chat_sticker_packs WHERE user_id=? AND set_id=?", (uid, sid))
+    return await web_chat_stickers(uid)
+
+
+def _sniff_image(data):
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:4] == b"\x1aE\xdf\xa3":
+        return "video/webm"
+    return "image/png"
+
+
+async def tg_sticker_bytes(fuid):
+    """Stiker/eskiz faylini Telegram'dan olib volume'da keshlaydi. TGS → ochilgan Lottie JSON. (bytes, content-type)"""
+    import gzip
+    row = db().execute("SELECT file_id, fmt FROM tg_sticker_files WHERE uid=?", (fuid,)).fetchone()
+    if not row:
+        return b"", None
+    fid, fmt = row
+    path = os.path.join(TG_STICKER_DIR, fuid + (".json" if fmt == "tgs" else ""))
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        try:
+            f = await _EXCHANGE_LOOP_BOT.get_file(fid)
+            data = bytes(await f.download_as_bytearray())
+        except TelegramError:
+            return b"", None
+        if fmt == "tgs":
+            try:
+                data = gzip.decompress(data)
+                if len(data) > 3_000_000:
+                    return b"", None
+            except OSError:
+                return b"", None
+        os.makedirs(TG_STICKER_DIR, exist_ok=True)
+        with open(path, "wb") as fo:
+            fo.write(data)
+    return data, ("application/json" if fmt == "tgs" else _sniff_image(data))
 
 
 async def web_chat_block(uid, peer, on):
@@ -19834,8 +20033,17 @@ WEBAPP_HTML = r"""<!doctype html>
   .msg.pic{padding:4px 4px 5px;max-width:72%}.msg.pic img{display:block;width:100%;max-height:340px;min-height:80px;object-fit:cover;border-radius:12px;cursor:zoom-in;background:rgba(0,0,0,.25)}
   .msg.pic .mt{padding:6px 6px 0}.msg.pic .mm{padding:0 6px}
   .chv-a{flex:none;width:40px;height:44px;display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer}
-  .chv-stk{display:none;grid-template-columns:repeat(8,1fr);gap:4px;padding:10px 10px 4px;max-height:210px;overflow-y:auto;border-top:1px solid rgba(255,210,74,.2);background:rgba(0,0,0,.35)}
-  .chv-stk.on{display:grid}.chv-stk span{font-size:30px;text-align:center;padding:5px 0;border-radius:12px;cursor:pointer}.chv-stk span:active{background:rgba(255,210,74,.2);transform:scale(1.2)}
+  .chv-stk{display:none;border-top:1px solid rgba(255,210,74,.2);background:rgba(0,0,0,.35)}.chv-stk.on{display:block}
+  .chv-stk .stabs{display:flex;gap:4px;padding:6px 8px;overflow-x:auto;scrollbar-width:none;border-bottom:1px solid rgba(255,210,74,.12)}
+  .chv-stk .stabs span{flex:none;width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer}
+  .chv-stk .stabs span.on{background:rgba(255,210,74,.2);box-shadow:inset 0 0 0 1px rgba(255,210,74,.5)}.chv-stk .stabs img{width:32px;height:32px;object-fit:contain}
+  .chv-stk .sgrid{display:grid;gap:4px;padding:8px 10px 6px;height:230px;overflow-y:auto;align-content:start}
+  .chv-stk .sgrid.emo{grid-template-columns:repeat(8,1fr)}.chv-stk .sgrid.tg{grid-template-columns:repeat(5,1fr)}
+  .chv-stk .sgrid span{font-size:30px;text-align:center;padding:5px 0;border-radius:12px;cursor:pointer}.chv-stk .sgrid span:active{background:rgba(255,210,74,.2);transform:scale(1.15)}
+  .chv-stk .sgrid.tg span img{width:100%;aspect-ratio:1;object-fit:contain}.chv-stk .sgrid.tg i{font-style:normal;font-size:34px}
+  .chv-stk .sgrid .sp{grid-column:1/-1;font-size:12px;padding:2px 2px 4px;display:flex;align-items:center;gap:6px}.chv-stk .sgrid .sp .rm{margin-left:auto;cursor:pointer;font-size:16px}
+  .chv-stk .sgrid.help{display:flex;align-items:center;justify-content:center}.chv-stk .sh{text-align:center;line-height:1.55;font-size:14px;padding:0 16px}
+  .msg.tgm .tgst{display:block;width:150px;height:150px;object-fit:contain}
   #chimgv{position:fixed;inset:0;z-index:95;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.92)}
   #chimgv.on{display:flex}#chimgv img{max-width:100%;max-height:100%;object-fit:contain}
   #chimgv .x{position:absolute;top:14px;right:16px;font-size:26px;color:#fff;cursor:pointer}
@@ -21285,6 +21493,18 @@ function chatShrink(file){ return new Promise((ok,bad)=>{ const url=URL.createOb
     const cv=document.createElement('canvas'); cv.width=w; cv.height=h; cv.getContext('2d').drawImage(im,0,0,w,h); URL.revokeObjectURL(url);
     let q=.85, out=cv.toDataURL('image/jpeg',q); while(out.length>2400000&&q>.4){ q-=.15; out=cv.toDataURL('image/jpeg',q); } ok(out); };
   im.onerror=()=>{ URL.revokeObjectURL(url); bad(); }; im.src=url; }); }
+// 🎭 Telegram stikerlari: TGS → Lottie (cdnjs, kerak bo'lganda), WEBM → video, WEBP → rasm
+let LOTTIE_P=null;
+function lottieLoad(){ if(window.lottie) return Promise.resolve(); if(LOTTIE_P) return LOTTIE_P;
+  LOTTIE_P=new Promise((ok,bad)=>{ const sc=document.createElement('script'); sc.src='https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie_light.min.js';
+    sc.onload=ok; sc.onerror=()=>{ LOTTIE_P=null; bad(); }; document.head.appendChild(sc); }); return LOTTIE_P; }
+function tgStickerHtml(t,cls){ const u='/app/tgs/'+encodeURIComponent(t.u);
+  if(t.f==='webm') return '<video class="'+cls+'" src="'+u+'" autoplay loop muted playsinline></video>';
+  if(t.f==='tgs') return '<div class="'+cls+' lot" data-src="'+u+'"></div>';
+  return '<img class="'+cls+'" loading="lazy" alt="🎭" src="'+u+'">'; }
+function tgLottieIn(root){ const els=[...root.querySelectorAll('.lot:not([data-on])')]; if(!els.length) return;
+  lottieLoad().then(()=>els.forEach(el=>{ el.dataset.on=1; try{ (window.CHLOT=window.CHLOT||[]).push(lottie.loadAnimation({container:el,renderer:'svg',loop:true,autoplay:true,path:el.dataset.src})); }catch(e){} }))
+    .catch(()=>els.forEach(el=>{ el.textContent='🎭'; })); }
 function chatViewer(src){ let v=document.getElementById('chimgv'); if(!v){ v=document.createElement('div'); v.id='chimgv'; document.body.appendChild(v); }
   v.innerHTML='<img alt="" src="'+esc(src)+'"><span class="x">✕</span>'; v.className='on'; v.onclick=()=>{ v.className=''; }; }
 const PAIRERR={not_found:'🔎 Foydalanuvchi topilmadi',self:'🙃 O‘zingizga taklif yubora olmaysiz',no_gender:'⚧ Avval botda jinsingizni tanlang (/start)',
@@ -21344,22 +21564,24 @@ function openChat(peer,name,d){
     '<div class="chv-n"><b id="chvN">'+esc(name||('ID '+peer))+'</b><div class="hsub" id="chvS">ID '+esc(peer)+'</div></div>'+
     '<span class="chv-i" id="chvP" title="Juftlik taklifi">💍</span><span class="chv-i" id="chvM" title="Ma’lumot">ⓘ</span></div>'+
     '<div class="chv-info" id="chvInfo"></div><div class="chv-msgs" id="chvL"><div class="hsub center">Yuklanmoqda…</div></div>'+
-    '<div class="chv-stk" id="chvK">'+((d&&d.chat_stickers)||[]).map(e=>'<span data-e="'+esc(e)+'">'+esc(e)+'</span>').join('')+'</div>'+
+    '<div class="chv-stk" id="chvK"><div class="stabs" id="chvKT"></div><div class="sgrid" id="chvKG"></div></div>'+
     '<div class="chv-ft"><span class="chv-a" id="chvE" title="Stiker">😊</span><span class="chv-a" id="chvF" title="Rasm">📎</span>'+
     '<input type="file" id="chvFile" accept="image/*" hidden><textarea id="chvT" rows="1" maxlength="1000" placeholder="Xabar yozing…"></textarea><button class="btn go" id="chvS2">➤</button></div></div>';
   const L=document.getElementById('chvL'), T=document.getElementById('chvT'), S=document.getElementById('chvS2'), info=document.getElementById('chvInfo');
   let last=0, seen=0, peerData=null, first=true;
-  const close=()=>{ ov.className='chv'; clearInterval(window.CHP); window.CHP=0; if(window.CHLOAD) window.CHLOAD(); };
+  const close=()=>{ ov.className='chv'; clearInterval(window.CHP); window.CHP=0; if(window.CHLOAD) window.CHLOAD();
+    (window.CHLOT||[]).forEach(a=>{ try{ a.destroy(); }catch(e){} }); window.CHLOT=[]; };
   document.getElementById('chvB').onclick=close;
   const bubble=m=>{ const meta='<div class="mm">'+esc(m.at)+(m.mine?'<span class="tick">✓</span>':'')+'</div>';
     if(m.kind==='sticker') return '<div class="msg stk'+(m.mine?' me':'')+'" data-id="'+m.id+'"><span class="se">'+esc(m.text)+'</span>'+meta+'</div>';
+    if(m.kind==='tg'&&m.tg) return '<div class="msg stk tgm'+(m.mine?' me':'')+'" data-id="'+m.id+'">'+tgStickerHtml(m.tg,'tgst')+meta+'</div>';
     if(m.kind==='image') return '<div class="msg pic'+(m.mine?' me':'')+'" data-id="'+m.id+'"><img loading="lazy" alt="📷" src="'+esc(m.img)+'" data-full="'+esc(m.img)+'">'+
       (m.text?'<div class="mt">'+esc(m.text).replace(/\n/g,'<br>')+'</div>':'')+meta+'</div>';
     return '<div class="msg'+(m.mine?' me':'')+'" data-id="'+m.id+'"><div class="mt">'+esc(m.text).replace(/\n/g,'<br>')+'</div>'+meta+'</div>'; };
   function paintSeen(){ L.querySelectorAll('.msg.me').forEach(el=>{ const t=el.querySelector('.tick'); if(t) t.textContent=(+el.dataset.id<=seen)?'✓✓':'✓'; }); }
   function add(ms){ if(!ms.length) return; const near=L.scrollHeight-L.scrollTop-L.clientHeight<80;
     if(first){ L.innerHTML=''; } const em=L.querySelector('.chempty'); if(em) em.remove(); ms.forEach(m=>{ if(m.id>last){ L.insertAdjacentHTML('beforeend',bubble(m)); last=m.id; } });
-    if(near||first) L.scrollTop=L.scrollHeight; }
+    tgLottieIn(L); if(near||first) L.scrollTop=L.scrollHeight; }
   function drawInfo(){ if(!peerData) return; const u=peerData;
     document.getElementById('chvN').textContent=u.name; document.getElementById('chvS').textContent=(u.username?'@'+u.username+' · ':'')+'ID '+u.id;
     info.innerHTML=peerInfo(u)+'<div class="chbtns"><button class="btn" id="chvBl">'+(u.blocked_by_me?'✅ Blokdan chiqarish':'🚫 Bloklash')+'</button></div>';
@@ -21384,8 +21606,26 @@ function openChat(peer,name,d){
   const post=(body,cb)=>api('/app/api/chat/send',Object.assign({to:peer},body)).then(r=>{
       if(r.result==='sent'){ if(first){ L.innerHTML=''; first=false; } add([r.msg]); paintSeen(); if(cb) cb(); }
       else toast(CHERR[r.error]||'⚠️ Xatolik'); return r; });
-  document.getElementById('chvE').onclick=()=>K.classList.toggle('on');
-  K.querySelectorAll('span').forEach(el=>el.onclick=()=>{ K.classList.remove('on'); post({kind:'sticker',text:el.dataset.e}).catch(()=>toast('⚠️ Aloqa xatosi')); });
+  const KT=document.getElementById('chvKT'), KG=document.getElementById('chvKG'); let ktab='emo';
+  function paintK(){ const packs=window.TGPACKS||[];
+    KT.innerHTML='<span data-t="emo" class="'+(ktab==='emo'?'on':'')+'">😊</span>'+packs.map(p=>{ const f=p.stickers[0]||{};
+        const th=f.t||(f.f==='webp'?f.u:null);
+        return '<span data-t="'+p.id+'" class="'+(String(ktab)===String(p.id)?'on':'')+'" title="'+esc(p.title)+'">'+(th?'<img loading="lazy" alt="" src="/app/tgs/'+encodeURIComponent(th)+'">':esc(f.e||'🎭'))+'</span>'; }).join('')+
+      '<span data-t="add" class="'+(ktab==='add'?'on':'')+'">➕</span>';
+    KT.querySelectorAll('span').forEach(el=>el.onclick=()=>{ ktab=el.dataset.t; paintK(); });
+    if(ktab==='emo'){ KG.className='sgrid emo'; KG.innerHTML=((d&&d.chat_stickers)||[]).map(e=>'<span data-e="'+esc(e)+'">'+esc(e)+'</span>').join('');
+      KG.querySelectorAll('span').forEach(el=>el.onclick=()=>{ K.classList.remove('on'); post({kind:'sticker',text:el.dataset.e}).catch(()=>toast('⚠️ Aloqa xatosi')); }); return; }
+    if(ktab==='add'){ KG.className='sgrid help'; KG.innerHTML='<div class="sh">🎭 <b>Telegram stikerlarini qo‘shish</b><br>Botga shaxsiy chatda istalgan stikerni yuboring — '+
+        'uning butun to‘plami shu yerga qo‘shiladi.<br><span class="hsub">Ko‘pi bilan 30 ta to‘plam</span></div>'; return; }
+    const p=packs.find(x=>String(x.id)===String(ktab)); if(!p){ ktab='emo'; paintK(); return; }
+    KG.className='sgrid tg'; KG.innerHTML='<div class="sp"><b>'+esc(p.title)+'</b>'+(p.global?'<span class="hsub"> · 🌍 umumiy</span>':'<span class="rm" id="chvKR">🗑</span>')+'</div>'+
+      p.stickers.map(t=>{ const th=t.t||(t.f==='webp'?t.u:null);
+        return '<span data-u="'+esc(t.u)+'">'+(th?'<img loading="lazy" alt="'+esc(t.e)+'" src="/app/tgs/'+encodeURIComponent(th)+'">':'<i>'+esc(t.e||'🎭')+'</i>')+'</span>'; }).join('');
+    KG.querySelectorAll('span[data-u]').forEach(el=>el.onclick=()=>{ K.classList.remove('on'); post({kind:'tg',text:el.dataset.u}).catch(()=>toast('⚠️ Aloqa xatosi')); });
+    const rm=document.getElementById('chvKR'); if(rm) rm.onclick=()=>api('/app/api/chat/stickers/remove',{id:p.id}).then(r=>{ if(r.packs){ window.TGPACKS=r.packs; ktab='emo'; paintK(); toast('🗑 To‘plam olib tashlandi'); } });
+  }
+  document.getElementById('chvE').onclick=()=>{ K.classList.toggle('on'); if(!K.classList.contains('on')) return; paintK();
+    if(!window.TGPACKS_T||Date.now()-window.TGPACKS_T>30000) api('/app/api/chat/stickers',{}).then(r=>{ if(r.packs){ window.TGPACKS=r.packs; window.TGPACKS_T=Date.now(); paintK(); } }).catch(()=>{}); };
   document.getElementById('chvF').onclick=()=>FI.click();
   FI.onchange=()=>{ const f=FI.files&&FI.files[0]; FI.value=''; if(!f) return;
     if(!/^image\//.test(f.type)){ toast('🖼 Faqat rasm yuborish mumkin'); return; }
@@ -21882,9 +22122,11 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_xo_move, pattern=r"^xm:[0-8]$"))
     # Boshqa barcha callback'larga ham javob beramiz (spinner qotib qolmasin)
     app.add_handler(CallbackQueryHandler(cb_relationship, pattern=r"^(rel:|family:)"))
+    app.add_handler(CallbackQueryHandler(cb_sticker_pack, pattern=r"^stk:[gu]:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_crash, pattern=r"^cr:"))
     app.add_handler(CallbackQueryHandler(cb_noop))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, career_private_text))
+    app.add_handler(MessageHandler(filters.Sticker.ALL & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, on_private_sticker))
 
     app.add_handler(
         MessageHandler(

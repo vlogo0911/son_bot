@@ -20548,12 +20548,6 @@ WEBAPP_HTML = r"""<!doctype html>
     background:var(--g-metal);box-shadow:0 4px 12px rgba(0,0,0,.5)}
   .gnote{text-align:center;color:var(--dim);font-size:12px;margin-top:14px}
   /* ───── 📰 NEWS — online gazeta ───── */
-  .nbtn{display:inline-flex;align-items:center;gap:4px;margin-top:6px;padding:4px 11px 4px 8px;border-radius:999px;cursor:pointer;position:relative;
-    font-family:Cinzel,serif;font-weight:900;font-size:11.5px;letter-spacing:1.5px;color:#2b1b02;background:var(--g-metal);
-    box-shadow:0 3px 10px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.5)}
-  .nbtn i{font-style:normal;font-size:12px}.nbtn:active{transform:scale(.94)}
-  .nbdg{position:absolute;top:-6px;right:-8px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#e0283c;color:#fff;
-    font:800 10px/17px -apple-system,sans-serif;letter-spacing:0;text-align:center;box-shadow:0 0 0 2px #1a1206}
   .npaper{border-radius:18px;padding:14px 14px 18px;background:linear-gradient(180deg,#17110a,#0e0a06);box-shadow:inset 0 0 0 1px rgba(255,210,74,.35),0 12px 30px rgba(0,0,0,.5)}
   .nmast{text-align:center;padding-bottom:8px;border-bottom:3px double rgba(255,210,74,.55);margin-bottom:12px}
   .nm-t{font-family:Cinzel,serif;font-weight:900;font-size:31px;letter-spacing:3px;line-height:1.05;background:var(--g-metal);-webkit-background-clip:text;background-clip:text;color:transparent}
@@ -20941,13 +20935,12 @@ function render(res){
     '<div class="hdr"><div class="ava">'+esc(initial)+'<img id="avimg" alt="" src="/app/avatar/'+esc(d.id)+'"></div>'+
     '<div><div class="hname">'+esc(d.name)+'</div>'+
     '<div class="hsub">'+(d.username?'@'+esc(d.username):'ID '+esc(d.id))+
-    (d.is_owner?' · 👑 Owner':'')+'</div>'+
-    '<span class="nbtn" id="nBtn"><i>📰</i>NEWS'+(d.news_unread?'<b class="nbdg">'+(d.news_unread>9?'9+':d.news_unread)+'</b>':'')+'</span></div>'+
+    (d.is_owner?' · 👑 Owner':'')+'</div></div>'+
     '<div class="bal"><div class="n" id="bal">'+esc(d.money_fmt)+'$</div>'+
       (d.emp?'<div class="hemp"><img alt="" src="/app/a/emp_face_s.png"><b id="hdrEmp">'+fmtMoney(d.emp.balance)+'</b> EMP</div>':'')+
       '<div class="wrow"><span class="wbtn" id="wBtn" title="O‘tkazmalar">👛</span><div class="l">Hamyon</div></div></div></div>'));
   document.getElementById('wBtn').onclick=e=>{ e.stopPropagation(); openTransfers(d); };
-  document.getElementById('nBtn').onclick=e=>{ e.stopPropagation(); if(TAB!=='news') window.NEWS_BACK=TAB; setTab('news'); newsSeen(d); };
+  window.DD=d;
   window.BAL=d.money;
   (function(){ const im=document.getElementById('avimg'); if(!im) return;
     const tu=tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user&&tg.initDataUnsafe.user.photo_url;
@@ -21425,7 +21418,7 @@ function render(res){
 
   // TABS
   const tabs=$('<div class="tabs"></div>');
-  const defs=[['profil','👤','Profil'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['moliya','💼','Moliya'],['farzand','👶','Oila'],['chat','💬','Chat'],['casino',CASINO_ICON,'Kazino']];
+  const defs=[['profil','👤','Profil'],['news','📰','News'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['moliya','💼','Moliya'],['farzand','👶','Oila'],['chat','💬','Chat'],['casino',CASINO_ICON,'Kazino']];
   if(d.is_owner&&d.owner) defs.push(['owner','👑','Owner']);
   defs.forEach(([k,t,l])=>{
     const el=$('<div class="tab" data-k="'+k+'"><span class="ti">'+t+'</span><span class="tl">'+l+'</span></div>');
@@ -21433,8 +21426,9 @@ function render(res){
     tabs.appendChild(el);
   });
   app.appendChild(tabs);
-  app.querySelectorAll('.gback:not([data-back=news])').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':'casino'));
-  setTab(defs.some(x=>x[0]===TAB)||TAB==='news'||TAB==='bank'||TAB==='birja'||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
+  setNewsBadge(d.news_unread||0);
+  app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':'casino'));
+  setTab(defs.some(x=>x[0]===TAB)||TAB==='bank'||TAB==='birja'||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
   ['s-crash','s-frog','s-kami'].forEach(id=>{ const sc=document.getElementById(id); if(!sc) return;
     sc.insertAdjacentHTML('afterbegin','<div class="sndbar"><span data-snd="m">🎵</span><span data-snd="s">🔊</span></div>');
     sc.querySelectorAll('.sndbar span').forEach(b=>b.onclick=()=>SND.toggle(b.dataset.snd)); });
@@ -22502,7 +22496,7 @@ function newsPage(d){
   const sec=$('<div class="sec" id="s-news"></div>');
   const all=(d.news||[]).filter(n=>n.active), news=all.filter(n=>n.kind!=='ad'), ads=all.filter(n=>n.kind==='ad');
   const lead=news[0], rest=news.slice(1);
-  let h='<div class="gback" data-back="news">‹ Orqaga</div><div class="npaper">'+
+  let h='<div class="npaper">'+
     '<div class="nmast"><div class="nm-t">EMPIRE NEWS</div><div class="nm-s"><span>'+nDate()+'</span><span>👑 Imperiya gazetasi</span><span>№ '+(all.length?Math.max(...all.map(n=>n.id)):0)+'</span></div></div>';
   if(!all.length) h+='<div class="nempty">🗞 Hozircha yangilik yo‘q.<br><span class="hsub">Birinchi son tez orada chiqadi</span></div>';
   if(lead) h+=nRow(lead,'nlead',lead.pinned?'📌 BOSH MAVZU':'⚡ SO‘NGGI XABAR');
@@ -22511,13 +22505,14 @@ function newsPage(d){
   sec.innerHTML=h+'</div>';
   sec.querySelectorAll('.nitem').forEach(el=>el.onclick=()=>{ const n=all.find(x=>x.id==el.dataset.id); if(n) openArticle(n); });
   sec.querySelectorAll('.nlink').forEach(el=>el.onclick=e=>{ e.stopPropagation(); newsOpenLink(el.dataset.u); });
-  app_q(sec,'.gback').onclick=()=>setTab(window.NEWS_BACK||'profil');
   return sec;
 }
 function newsSeen(d){
   const ids=(d.news||[]).filter(n=>n.active).map(n=>n.id); if(!d.news_unread||!ids.length) return;
-  api('/app/api/news/seen',{last:Math.max(...ids)}).then(r=>{ if(r.result){ d.news_unread=r.unread; const b=document.querySelector('.nbdg'); if(b&&!r.unread) b.remove(); } }).catch(()=>{});
+  api('/app/api/news/seen',{last:Math.max(...ids)}).then(r=>{ if(r.result){ d.news_unread=r.unread; setNewsBadge(r.unread); } }).catch(()=>{});
 }
+function setNewsBadge(n){ const t=document.querySelector('.tab[data-k="news"]'); if(!t) return;
+  let b=t.querySelector('.tbadge'); if(n>0){ if(!b){ b=document.createElement('span'); b.className='tbadge'; t.appendChild(b); } b.textContent=n>9?'9+':n; } else if(b) b.remove(); }
 function refreshNews(d){ const old=document.getElementById('s-news'); if(!old) return;
   const nw=newsPage(d); if(old.classList.contains('on')) nw.classList.add('on'); old.replaceWith(nw); }
 function openArticle(n){
@@ -23069,6 +23064,7 @@ function setTab(k){
   const tk=(k==='crash'||k==='frog'||k==='kami')?'casino':(k==='bank'||k==='birja')?'moliya':k;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===tk));
   if(k==='crash' && window.CR) window.CR.poke();
+  if(k==='news' && window.DD) newsSeen(window.DD);
   SND.music(k==='crash'||k==='frog'||k==='kami'?k:null);
   window.scrollTo(0,0);
 }

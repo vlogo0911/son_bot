@@ -1,0 +1,100 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="style.css"></head>
+<body><div id="stage"><div class="shade"></div>
+<div class="txt">
+  <svg class="crown" viewBox="0 0 120 80"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#fff3c0"/><stop offset=".45" stop-color="#f3bf45"/><stop offset=".7" stop-color="#a56d12"/><stop offset="1" stop-color="#f7d070"/></linearGradient></defs>
+    <path d="M10 66 L4 18 L32 40 L60 6 L88 40 L116 18 L110 66 Z" fill="url(#cg)" stroke="#5c3a07" stroke-width="2"/>
+    <rect x="9" y="64" width="102" height="12" rx="3" fill="url(#cg)" stroke="#5c3a07" stroke-width="2"/>
+    <circle cx="4" cy="16" r="5" fill="url(#cg)"/><circle cx="60" cy="5" r="5" fill="url(#cg)"/><circle cx="116" cy="16" r="5" fill="url(#cg)"/>
+    <circle cx="60" cy="48" r="7" fill="#d4142c" stroke="#ffe08a" stroke-width="2"/><circle cx="33" cy="54" r="4.5" fill="#1a6ee0" stroke="#ffe08a" stroke-width="1.5"/>
+    <circle cx="87" cy="54" r="4.5" fill="#1a6ee0" stroke="#ffe08a" stroke-width="1.5"/></svg>
+  <div class="t1">EMPIRE</div>
+  <div class="rule"><i></i><b></b><i></i></div>
+  <div class="t2">BANK</div>
+  <div class="t3">KREDIT<span>◆</span>OMONAT<span>◆</span>FOIZ</div>
+</div>
+</div>
+<script src="three.min.js"></script><script src="common.js"></script><script>
+(async () => {
+const {R, S} = setup((g, w, h) => {
+  // tungi osmon → ufqda oltin shafaq
+  const l = g.createLinearGradient(0, 0, 0, h);
+  l.addColorStop(0, '#05060c'); l.addColorStop(.26, '#1a1022'); l.addColorStop(.42, '#6a2c10'); l.addColorStop(.53, '#ffa035'); l.addColorStop(.58, '#2a1406'); l.addColorStop(1, '#070402');
+  g.fillStyle = l; g.fillRect(0, 0, w, h);
+  const sun = g.createRadialGradient(w * .8, h * .54, 0, w * .8, h * .54, w * .42);
+  sun.addColorStop(0, 'rgba(255,215,130,.95)'); sun.addColorStop(.35, 'rgba(255,140,40,.4)'); sun.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = sun; g.fillRect(0, 0, w, h);
+  // yulduzlar
+  for (let i = 0; i < 160; i++) { g.fillStyle = `rgba(255,240,210,${Math.random() * .7})`; g.fillRect(Math.random() * w, Math.random() * h * .3, 2, 2); }
+  // shahar siluetlari (ikki qatlam) + derazalar
+  let rnd = 7; const R2 = () => (rnd = (rnd * 9301 + 49297) % 233280) / 233280;
+  for (const [base, col, sc, win] of [[h * .565, '#2a140a', .8, .25], [h * .58, '#0a0504', 1.1, .55]]) {
+    let x = w * .28;
+    while (x < w) {
+      const bw = (30 + R2() * 70) * sc, bh = (80 + R2() * 300) * sc * (x > w * .55 ? 1.2 : .7);
+      g.fillStyle = col; g.fillRect(x, base - bh, bw, bh + 4);
+      if (R2() > .6) { g.fillRect(x + bw * .45, base - bh - 40 * sc, 4 * sc, 40 * sc); }
+      for (let yy = base - bh + 12; yy < base - 8; yy += 14 * sc) for (let xx = x + 6; xx < x + bw - 6; xx += 11 * sc)
+        if (R2() < win * .5) { g.fillStyle = `rgba(255,${180 + R2() * 60 | 0},90,${.5 + R2() * .5})`; g.fillRect(xx, yy, 4 * sc, 6 * sc); g.fillStyle = col; }
+      x += bw + R2() * 8;
+    }
+  }
+}, [[0, '#fff2c8'], [.25, '#e2a446'], [.5, '#3a2210'], [1, '#050302']]);
+const face = await loadTex('emp_face.webp');
+const cam = new THREE.PerspectiveCamera(30, W / H, .1, 100); cam.position.set(0, 1.6, 13); cam.lookAt(0, 1.25, 0);
+
+S.add(new THREE.HemisphereLight(0xffe2b0, 0x120a04, .35));
+const key = new THREE.DirectionalLight(0xfff0d0, 1.6); key.position.set(-3, 7, 6); key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048); Object.assign(key.shadow.camera, {left: -8, right: 8, top: 6, bottom: -4}); S.add(key);
+const rim = new THREE.DirectionalLight(0xff9a3a, 2.2); rim.position.set(6, 3, -6); S.add(rim);
+const fill = new THREE.PointLight(0xffc060, 1.6, 16); fill.position.set(3, 1.5, 4); S.add(fill);
+
+// pol — qora marmar (aks)
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 20), new THREE.MeshPhysicalMaterial({color: 0x050403, roughness: .2, metalness: .1, clearcoat: 1, clearcoatRoughness: .08, envMapIntensity: .25}));
+floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; S.add(floor);
+
+// ── SEYF ESHIGI (o'ngda, biroz ochiq) ──
+const vault = new THREE.Group();
+const frame = new THREE.Mesh(new THREE.TorusGeometry(2.05, .26, 24, 96), GOLD_D()); vault.add(frame);
+const wall = new THREE.Mesh(new THREE.RingGeometry(2.25, 2.75, 96), new THREE.MeshPhysicalMaterial({color: 0x0a0705, metalness: .3, roughness: .6, envMapIntensity: .2}));
+wall.position.z = -.05; vault.add(wall);
+const hole = new THREE.Mesh(new THREE.CircleGeometry(2.0, 64), new THREE.MeshBasicMaterial({color: 0x120802})); hole.position.z = -.2; vault.add(hole);
+// ichkaridan oltin nur
+const glow = new THREE.PointLight(0xffb040, 3.5, 7); glow.position.set(0, 0, -.6); vault.add(glow);
+for (let i = 0; i < 9; i++) { const b = goldBar(); b.scale.multiplyScalar(.8); b.position.set(-1 + (i % 3) * .72, -1.25 + Math.floor(i / 3) * .2, -.9 - Math.floor(i / 3) * .25); vault.add(b); }
+// eshik (ochiq, ilgakda aylangan)
+const door = new THREE.Group();
+const slab = new THREE.Mesh(new THREE.CylinderGeometry(1.95, 1.95, .55, 96), GOLD()); slab.rotation.x = Math.PI / 2; door.add(slab);
+for (const [r, t] of [[1.6, .06], [1.15, .05], [.55, .06]]) { const tr = new THREE.Mesh(new THREE.TorusGeometry(r, t, 12, 96), GOLD_D()); tr.position.z = .29; door.add(tr); }
+for (let k = 0; k < 12; k++) { // zulfinlar
+  const a = k / 12 * Math.PI * 2; const bo = new THREE.Mesh(new THREE.CylinderGeometry(.11, .11, .5, 20), STEEL());
+  bo.rotation.z = a + Math.PI / 2; bo.position.set(Math.cos(a) * 1.95, Math.sin(a) * 1.95, 0); door.add(bo);
+  const rv = new THREE.Mesh(new THREE.SphereGeometry(.07, 12, 8), GOLD()); rv.position.set(Math.cos(a) * 1.38, Math.sin(a) * 1.38, .3); door.add(rv);
+}
+const hub = new THREE.Mesh(new THREE.CylinderGeometry(.42, .5, .3, 48), GOLD()); hub.rotation.x = Math.PI / 2; hub.position.z = .42; door.add(hub);
+const wheel = new THREE.Group();
+wheel.add(new THREE.Mesh(new THREE.TorusGeometry(.95, .07, 16, 64), STEEL()));
+for (let k = 0; k < 3; k++) { const sp = new THREE.Mesh(new THREE.CylinderGeometry(.05, .05, 1.9, 12), STEEL()); sp.rotation.z = k * Math.PI / 3; wheel.add(sp);
+  for (const s of [1, -1]) { const kn = new THREE.Mesh(new THREE.SphereGeometry(.1, 16, 12), GOLD()); kn.position.set(-Math.sin(k * Math.PI / 3) * 1.08 * s, Math.cos(k * Math.PI / 3) * 1.08 * s, 0); wheel.add(kn); } }
+wheel.position.z = .62; wheel.rotation.z = .3; door.add(wheel);
+// eshik markazida EMP tamg'asi
+const em = coin(face, .38, .08); em.rotation.x = Math.PI / 2; em.position.z = .6; door.add(em);
+const hinge = new THREE.Group(); hinge.position.set(2.05, 0, .1); door.position.set(-2.05, 0, .3); hinge.add(door); hinge.rotation.y = .95; vault.add(hinge);
+for (const y of [1.2, -1.2]) { const hg = new THREE.Mesh(new THREE.CylinderGeometry(.16, .16, .55, 20), GOLD_D()); hg.position.set(2.05, y, .2); vault.add(hg); }
+vault.position.set(2.0, 2.05, -1.2); vault.rotation.y = -.32; vault.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+S.add(vault);
+
+// oltin quymalar piramidasi (eshik oldida)
+const bars = new THREE.Group();
+[[0, 0], [.95, 0], [1.9, 0], [.48, .24], [1.42, .24], [.95, .48]].forEach(([x, y]) => { const b = goldBar(); b.position.set(x, y + .12, 0); bars.add(b); });
+bars.position.set(1.0, 0, 2.4); bars.rotation.y = -.25; S.add(bars);
+
+// EMP tangalar: ustunlar + suyanib turgan katta tanga
+for (const [x, z, n] of [[4.9, 1.4, 11], [5.6, 2.5, 6], [3.3, 3.0, 4]]) { const st = coinStack(face, n); st.position.set(x, 0, z); S.add(st); }
+const big = coin(face, .95, .15); big.rotation.set(Math.PI / 2 - .22, 0, .12); big.rotation.order = 'YXZ'; big.rotation.y = -.35; big.position.set(4.25, 1.02, 3.6); S.add(big);
+// sochilgan tangalar
+for (let i = 0; i < 6; i++) { const c = coin(face, .5, .1); c.position.set(2.8 + Math.random() * 3, .05, 3.3 + Math.random() * 1.2); c.rotation.y = Math.random() * 6; S.add(c); }
+
+done(R, S, cam);
+})();
+</script></body></html>

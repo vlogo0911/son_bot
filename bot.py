@@ -20072,6 +20072,7 @@ async def web_edu_admin(uid, act, body):
 WEBAPP_ASSETS = {"crash.jpg": "image/jpeg", "hovuz.jpg": "image/jpeg", "kamikaze.jpg": "image/jpeg",
                  "emp_coin.jpg": "image/jpeg", "emp_coin_full.jpg": "image/jpeg",
                  "emp_face.webp": "image/webp", "emp_face_s.png": "image/png",
+                 "moliya_bank.jpg": "image/jpeg", "moliya_birja.jpg": "image/jpeg",
                  }
 # 🧍 3D avatar: MakeHuman CC0 tana/kiyim/soch (skeletli) + CMU mocap harakatlar — av_*.glb (meshopt + WebP)
 try:
@@ -20402,12 +20403,10 @@ WEBAPP_HTML = r"""<!doctype html>
     background:var(--g-metal);box-shadow:0 4px 12px rgba(0,0,0,.5)}
   .gnote{text-align:center;color:var(--dim);font-size:12px;margin-top:14px}
   /* ───── 💼 Moliya lobbisi ───── */
-  .g-bank .gimg{background:radial-gradient(120% 80% at 50% 70%,#6b4a12 0%,#2a1a05 55%,#0d0803 100%)}
-  .g-birja .gimg{background:radial-gradient(120% 80% at 50% 70%,#0f5a3a 0%,#06261a 55%,#020c08 100%)}
-  .gemo{position:absolute;left:0;right:0;top:44%;text-align:center;font-size:74px;z-index:-1;
-    filter:drop-shadow(0 8px 18px rgba(0,0,0,.6));animation:gfl 4s ease-in-out infinite}
-  .g-birja .gemo{animation-delay:-2s}
-  @keyframes gfl{50%{transform:translateY(-8px)}}
+  .glob.wide{grid-template-columns:1fr}
+  .glob.wide .gcard{aspect-ratio:2/1}
+  .glob.wide .gcard::before{background:linear-gradient(0deg,rgba(0,0,0,.45),rgba(0,0,0,0) 35%)}
+  .glob.wide .gimg{background-position:center;background-color:#0b0805;animation-duration:12s}
   .g-birja::after{animation-delay:2.5s}
   .gback{display:inline-flex;align-items:center;gap:4px;margin:0 0 10px;padding:7px 14px;border-radius:999px;font-weight:800;font-size:13px;
     color:#ffe08a;background:linear-gradient(180deg,#2a1e0c,#140e07);box-shadow:inset 0 0 0 1px #8a6420;cursor:pointer}
@@ -21040,12 +21039,10 @@ function render(res){
   const btc=(d.birja_market||[]).find(x=>x.asset==='BTC'), loan=d.bank&&d.bank.loan;
   mo.innerHTML=
     '<h2>💼 Moliya</h2>'+
-    '<div class="glob">'+
-      '<div class="gcard g-bank" data-go="bank"><div class="gimg"></div><div class="gemo">🏦</div>'+
-        '<div class="gtag">EMPIRE FINANCE</div><div class="gtitle">GOLD<br>BANK</div>'+
+    '<div class="glob wide">'+
+      '<div class="gcard g-bank" data-go="bank"><div class="gimg" style="background-image:url(/app/a/moliya_bank.jpg)"></div>'+
         '<div class="gfoot"><span class="glive"><i></i>'+(loan?'Faol kredit':'Kredit · Omonat')+'</span><span class="gplay">▶</span></div></div>'+
-      '<div class="gcard g-birja" data-go="birja"><div class="gimg"></div><div class="gemo">📈</div>'+
-        '<div class="gtag">EMPIRE FINANCE</div><div class="gtitle">BIRJA</div>'+
+      '<div class="gcard g-birja" data-go="birja"><div class="gimg" style="background-image:url(/app/a/moliya_birja.jpg)"></div>'+
         '<div class="gfoot"><span class="glive"><i></i>'+(btc&&btc.price?'BTC '+((btc.change||0)>=0?'▲':'▼')+esc(Math.abs(btc.change||0))+'%':'Jonli narxlar')+'</span><span class="gplay">▶</span></div></div>'+
     '</div>'+
     '<div class="gnote">🏦 Kredit va omonat · 📈 Kripto va oltin savdosi</div>';

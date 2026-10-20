@@ -20401,6 +20401,14 @@ WEBAPP_HTML = r"""<!doctype html>
   .gplay{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;color:#2b1b02;
     background:var(--g-metal);box-shadow:0 4px 12px rgba(0,0,0,.5)}
   .gnote{text-align:center;color:var(--dim);font-size:12px;margin-top:14px}
+  /* ───── 💼 Moliya lobbisi ───── */
+  .g-bank .gimg{background:radial-gradient(120% 80% at 50% 70%,#6b4a12 0%,#2a1a05 55%,#0d0803 100%)}
+  .g-birja .gimg{background:radial-gradient(120% 80% at 50% 70%,#0f5a3a 0%,#06261a 55%,#020c08 100%)}
+  .gemo{position:absolute;left:0;right:0;top:44%;text-align:center;font-size:74px;z-index:-1;
+    filter:drop-shadow(0 8px 18px rgba(0,0,0,.6));animation:gfl 4s ease-in-out infinite}
+  .g-birja .gemo{animation-delay:-2s}
+  @keyframes gfl{50%{transform:translateY(-8px)}}
+  .g-birja::after{animation-delay:2.5s}
   .gback{display:inline-flex;align-items:center;gap:4px;margin:0 0 10px;padding:7px 14px;border-radius:999px;font-weight:800;font-size:13px;
     color:#ffe08a;background:linear-gradient(180deg,#2a1e0c,#140e07);box-shadow:inset 0 0 0 1px #8a6420;cursor:pointer}
   .tab .ti .cz-ico{display:block;filter:drop-shadow(0 2px 3px rgba(0,0,0,.6))}
@@ -20784,6 +20792,7 @@ function render(res){
 
   // BANK
   const bk=$('<div class="sec" id="s-bank"></div>');
+  bk.appendChild($('<div class="gback" data-back="moliya">‹ Moliya</div>'));
   bk.appendChild($('<h2>🏦 Bank</h2>'));
   if(d.bank && d.bank.loan){
     const l=d.bank.loan;
@@ -20846,6 +20855,7 @@ function render(res){
 
   // BIRJA — savdo
   const bx=$('<div class="sec" id="s-birja"></div>');
+  bx.appendChild($('<div class="gback" data-back="moliya">‹ Moliya</div>'));
   bx.appendChild($('<h2>📈 Birja — savdo</h2>'));
   const bl=$('<div class="card full"></div>');
   (d.birja_market||[]).forEach(it=>{
@@ -21025,6 +21035,23 @@ function render(res){
   }
   app.appendChild(sh);
 
+  // MOLIYA — Bank + Birja lobbisi
+  const mo=$('<div class="sec" id="s-moliya"></div>');
+  const btc=(d.birja_market||[]).find(x=>x.asset==='BTC'), loan=d.bank&&d.bank.loan;
+  mo.innerHTML=
+    '<h2>💼 Moliya</h2>'+
+    '<div class="glob">'+
+      '<div class="gcard g-bank" data-go="bank"><div class="gimg"></div><div class="gemo">🏦</div>'+
+        '<div class="gtag">EMPIRE FINANCE</div><div class="gtitle">GOLD<br>BANK</div>'+
+        '<div class="gfoot"><span class="glive"><i></i>'+(loan?'Faol kredit':'Kredit · Omonat')+'</span><span class="gplay">▶</span></div></div>'+
+      '<div class="gcard g-birja" data-go="birja"><div class="gimg"></div><div class="gemo">📈</div>'+
+        '<div class="gtag">EMPIRE FINANCE</div><div class="gtitle">BIRJA</div>'+
+        '<div class="gfoot"><span class="glive"><i></i>'+(btc&&btc.price?'BTC '+((btc.change||0)>=0?'▲':'▼')+esc(Math.abs(btc.change||0))+'%':'Jonli narxlar')+'</span><span class="gplay">▶</span></div></div>'+
+    '</div>'+
+    '<div class="gnote">🏦 Kredit va omonat · 📈 Kripto va oltin savdosi</div>';
+  mo.querySelectorAll('.gcard').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
+  app.appendChild(mo);
+
   // KAZINO — o'yinlar lobbisi
   const cz=$('<div class="sec" id="s-casino"></div>');
   cz.innerHTML=
@@ -21180,7 +21207,7 @@ function render(res){
 
   // TABS
   const tabs=$('<div class="tabs"></div>');
-  const defs=[['profil','👤','Profil'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['bank','🏦','Bank'],['birja','📈','Birja'],['farzand','👶','Oila'],['chat','💬','Chat'],['casino',CASINO_ICON,'Kazino']];
+  const defs=[['profil','👤','Profil'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['moliya','💼','Moliya'],['farzand','👶','Oila'],['chat','💬','Chat'],['casino',CASINO_ICON,'Kazino']];
   if(d.is_owner&&d.owner) defs.push(['owner','👑','Owner']);
   defs.forEach(([k,t,l])=>{
     const el=$('<div class="tab" data-k="'+k+'"><span class="ti">'+t+'</span><span class="tl">'+l+'</span></div>');
@@ -21188,8 +21215,8 @@ function render(res){
     tabs.appendChild(el);
   });
   app.appendChild(tabs);
-  app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab('casino'));
-  setTab(defs.some(x=>x[0]===TAB)||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
+  app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':'casino'));
+  setTab(defs.some(x=>x[0]===TAB)||TAB==='bank'||TAB==='birja'||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
   ['s-crash','s-frog','s-kami'].forEach(id=>{ const sc=document.getElementById(id); if(!sc) return;
     sc.insertAdjacentHTML('afterbegin','<div class="sndbar"><span data-snd="m">🎵</span><span data-snd="s">🔊</span></div>');
     sc.querySelectorAll('.sndbar span').forEach(b=>b.onclick=()=>SND.toggle(b.dataset.snd)); });
@@ -22720,7 +22747,7 @@ function kidErr(e,wait){
 function setTab(k){
   TAB=k;
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==='s-'+k));
-  const tk=(k==='crash'||k==='frog'||k==='kami')?'casino':k;
+  const tk=(k==='crash'||k==='frog'||k==='kami')?'casino':(k==='bank'||k==='birja')?'moliya':k;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===tk));
   if(k==='crash' && window.CR) window.CR.poke();
   SND.music(k==='crash'||k==='frog'||k==='kami'?k:null);

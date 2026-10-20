@@ -262,3 +262,6 @@
   kasb almashtirish faqat /ariza, ishdan bo'shash — owner tasdig'i). Yosh `CAREER_MIN_AGE`/`CAREER_MAX_AGE` (6–100).
   `registration_next_step(bot, uid)` — keyingi bo'sh qadamni yuboradi (jins tanlangandan va ishdan bo'shash tasdiqlangandan keyin);
   `request_result_text(kind, approved)` — tasdiq/rad xabarlari; `profession_name` noma'lum id uchun "—". ID argumentlari ≤16 raqam.
+- 💼 Web app Moliya: pastki qatorda Bank/Birja o'rniga bitta "Moliya" tab. `#s-moliya` lobbisi — Kazino uslubidagi ikki banner
+  (`.gcard.g-bank` "GOLD BANK", `.g-birja` "BIRJA"; rasm kelguncha gradient + `.gemo` emoji) → `setTab('bank'|'birja')`; bo'limlarda
+  "‹ Moliya" (`.gback[data-back=moliya]`), `setTab` bank/birja uchun Moliya tabini yoritadi.

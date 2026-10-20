@@ -4232,7 +4232,7 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_random:
                 try:
                     await context.bot.send_message(row[0], f"💔 {person_name(uid)} random juftlik taklifingizni rad etdi.\n"
-                                                           "🎲 Web app → Oila bo‘limida yana random juft qidirishingiz mumkin.")
+                                                           "💍 Web app → Oila bo‘limida yana random juft qidirishingiz mumkin.")
                 except TelegramError:
                     pass
             return
@@ -17875,7 +17875,7 @@ def init_webapp():
         c.execute("CREATE TABLE IF NOT EXISTS webapp_config (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
         c.execute("CREATE TABLE IF NOT EXISTS user_avatar (user_id INTEGER PRIMARY KEY, data TEXT NOT NULL DEFAULT '{}')")
         cols = {r[1] for r in c.execute("PRAGMA table_info(pair_requests)")}
-        if cols and "random" not in cols:     # 🎲 random juft so'rovlari belgisi
+        if cols and "random" not in cols:     # 💍 random juft so'rovlari belgisi
             c.execute("ALTER TABLE pair_requests ADD COLUMN random INTEGER NOT NULL DEFAULT 0")
 
 
@@ -17898,7 +17898,7 @@ def avatar_get(uid):
         return {}
 
 
-# ── 🎲 Random juft (web app → Oila): faqat jufti yo'qlar, faqat qarama-qarshi jins ──
+# ── 💍 Random juft (web app → Oila): faqat jufti yo'qlar, faqat qarama-qarshi jins ──
 RANDPAIR_COOLDOWN = 60          # s — ketma-ket qidirishlar orasidagi minimal vaqt
 RANDPAIR_TTL = 24 * 3600        # s — javobsiz random taklif shundan keyin eskiradi
 RANDPAIR_REJECT_DAYS = 7        # rad etgan odamga shu muddat ichida qayta tushmaydi
@@ -18041,7 +18041,7 @@ async def web_randpair(uid):
         try:
             await bot.send_message(
                 chat_id=tid,
-                text="🎲 <b>Random juftlik taklifi!</b>\n"
+                text="💍 <b>Random juftlik taklifi!</b>\n"
                      f"{person_name(uid)} sizga juft bo‘lishni taklif qildi.\n\n" + user_card_text(card)
                      + "\n\nRozimisiz? Rozilikdan so‘ng juftlik bot egalari tasdig‘idan keyin tuziladi.",
                 reply_markup=kb)
@@ -19694,7 +19694,7 @@ function render(res){
 
   // FARZAND — har yosh bosqichiga alohida dizayn + ta'lim yo'li
   const fz=$('<div class="sec" id="s-farzand"></div>');
-  // 🎲 RANDOM JUFT: jufti yo'qlar uchun — yigitniki tasodifiy qizga, qizniki tasodifiy yigitga
+  // 💍 RANDOM JUFT: jufti yo'qlar uchun — yigitniki tasodifiy qizga, qizniki tasodifiy yigitga
   const rpBox=$('<div class="card full rpair"></div>'); fz.appendChild(rpBox);
   const RPERR={no_gender:'⚧ Avval botda jinsingizni tanlang (/start)',has_pair:'💞 Sizda allaqachon juft bor',
     waiting:'⏳ Oldingi taklifga javob kutilmoqda',none:'😔 Hozircha mos nomzod topilmadi, keyinroq urinib ko‘ring',
@@ -19702,18 +19702,18 @@ function render(res){
   let rpT=0;
   function drawRP(st){
     clearInterval(rpT); st=st||{};
-    let h='<div class="rph"><span class="rpi">🎲</span><div><div class="lbl">Random juft</div>'+
+    let h='<div class="rph"><span class="rpi">💍</span><div><div class="lbl">Random juft</div>'+
       '<div class="hsub">'+(st.gender==='male'?'👦 Siz — yigit · taklif tasodifiy qizga boradi':st.gender==='female'?'👧 Siz — qiz · taklif tasodifiy yigitga boradi':'Jins tanlanmagan')+'</div></div></div>';
     if(st.has_pair) h+='<div class="rpok">💞 Juftingiz: <b>'+esc(st.partner)+'</b></div>';
     else if(!st.gender) h+='<div class="hsub" style="margin-top:8px">Avval botda /start bosib jinsingizni tanlang.</div>';
     else if(st.pending) h+='<div class="rpw">⏳ <b>'+esc(st.pending.name)+'</b> javobini kutyapsiz<br><span class="hsub">Yuborildi: '+esc(st.pending.at)+'</span></div>'+
       '<button class="btn full" id="rpCancel" style="margin-top:10px">✖️ Taklifni bekor qilish</button>';
     else h+='<div class="hsub" style="margin-top:8px">Taklif bilan birga pulingiz, reytingingiz, darajangiz, kasbingiz va oilaviy tarixingiz ko‘rsatiladi. Rozi bo‘lsa — bot egalari tasdig‘idan keyin juft bo‘lasiz.</div>'+
-      '<button class="btn go full" id="rpFind" style="margin-top:10px">🎲 Random juft topish</button>';
+      '<button class="btn go full" id="rpFind" style="margin-top:10px">💍 Random juft topish</button>';
     rpBox.innerHTML=h;
     const f=app_q(rpBox,'#rpFind'), cn=app_q(rpBox,'#rpCancel');
     if(f){ let cd=st.cooldown||0;
-      const tick=()=>{ if(cd>0){ f.disabled=true; f.textContent='⏳ '+cd+' s dan keyin'; cd--; } else { f.disabled=false; f.textContent='🎲 Random juft topish'; clearInterval(rpT); } };
+      const tick=()=>{ if(cd>0){ f.disabled=true; f.textContent='⏳ '+cd+' s dan keyin'; cd--; } else { f.disabled=false; f.textContent='💍 Random juft topish'; clearInterval(rpT); } };
       tick(); if(cd>0) rpT=setInterval(tick,1000);
       f.onclick=()=>{ f.disabled=true; f.textContent='🔎 Qidirilmoqda…';
         api('/app/api/randpair/find',{}).then(r=>{

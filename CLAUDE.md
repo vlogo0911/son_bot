@@ -263,5 +263,6 @@
   `registration_next_step(bot, uid)` — keyingi bo'sh qadamni yuboradi (jins tanlangandan va ishdan bo'shash tasdiqlangandan keyin);
   `request_result_text(kind, approved)` — tasdiq/rad xabarlari; `profession_name` noma'lum id uchun "—". ID argumentlari ≤16 raqam.
 - 💼 Web app Moliya: pastki qatorda Bank/Birja o'rniga bitta "Moliya" tab. `#s-moliya` lobbisi — Kazino uslubidagi ikki banner
-  (`.gcard.g-bank` "GOLD BANK", `.g-birja` "BIRJA"; rasm kelguncha gradient + `.gemo` emoji) → `setTab('bank'|'birja')`; bo'limlarda
+  (`.glob.wide` — to'liq kenglik 2:1, `.gcard.g-bank`/`.g-birja`, rasmlar `webapp_assets/moliya_bank.jpg`/`moliya_birja.jpg` — three.js
+  render, manba `tools/moliya_banner/`; sarlavha rasm ichida, HTML'da faqat jonli chip) → `setTab('bank'|'birja')`; bo'limlarda
   "‹ Moliya" (`.gback[data-back=moliya]`), `setTab` bank/birja uchun Moliya tabini yoritadi.

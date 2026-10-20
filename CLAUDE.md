@@ -203,3 +203,14 @@
   tasdig'i. Random taklifga javob (rad/rozi) yuboruvchiga xabar qilinadi. Cheklovlar: bitta ochiq taklif, `RANDPAIR_COOLDOWN` 60 s,
   `RANDPAIR_TTL` 24 soat (eskiradi), yetkazilmasa (bloklagan) `failed` + boshqa nomzod (`RANDPAIR_TRIES`). API
   `/app/api/randpair/{find,cancel}`, payload `randpair` (`randpair_status`: gender/has_pair/partner/pending/cooldown).
+- 💬 Web Chat (pastki tab "Chat", `#s-chat`, `initChat`/`openChat` — to'liq ekranli `#chv`): ID yoki @username orqali topish
+  (`chat_resolve` — faqat botni ishlatganlar), profil chiplari (`chat_peer`: jins, yosh, pul, reyting, daraja, kasb, jufti bormi,
+  ajrashgan), shaxsiy suhbat. Jadvallar `web_chat_msgs` (from/to/text/created_at/read) va `web_chat_blocks` (`init_webapp`).
+  API `/app/api/chat/{find,list,history,send,block}`: history `after` bilan ~2.5 s polling, o'qilganlar `read=1`, yuboruvchiga
+  `seen` (✓✓); `send` — 1000 belgi, `CHAT_RATE` 10 s da 8 ta, blok bo'lsa ikkala tomon yoza olmaydi; qabul qiluvchiga Telegram
+  bildirishnoma (suhbat bo'yicha `CHAT_NOTIFY_GAP` 5 daqiqada bir) + "💬 Javob berish" WebApp tugmasi (`/app#chat=<uid>` →
+  avtomatik ochiladi). Tab badge — o'qilmaganlar (`chat_unread`, payload `chat_unread`), ro'yxat 8 s da yangilanadi.
+- 💍 ID orqali juftlik taklifi (web): Oila → Random juft kartasida "ID yoki @username" + 💌 Taklif, Chat'da topilgan profil va
+  suhbat sarlavhasidagi 💍 (`pairPropose` → `/app/api/pair/propose`, `web_pair_propose`): faqat jufti yo'qlar, ikkalasining jinsi
+  tanlangan va qarama-qarshi, blok yo'q, takror (24 soat) yo'q; `pair_requests.random=2`, nomzodga `user_card_text` + `rel:proposal`
+  tugmalari → rozilik → bot egalari tasdig'i; javob yuboruvchiga xabar qilinadi.

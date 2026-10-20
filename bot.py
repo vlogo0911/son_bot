@@ -3508,6 +3508,8 @@ async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         partner_info=partner_info,
     )
     profile_text = profile_emojify(profile_text)
+    if emp_enabled_for(user.id):
+        profile_text += f"\n🪙 EMP Coin: <b>{fmt_money(emp_balance(user.id))}</b>"
     # Received gifts are shown directly in the profile (newest first).
     gift_count = c.execute(
         "SELECT COUNT(*) FROM gift_log WHERE recipient_id=?", (user.id,)
@@ -11208,6 +11210,8 @@ async def cmd_pul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Hisobingizda yetarli pul mavjud emas.")
         return
 
+    with c:
+        transfer_log(c, sender.id, recipient.id, "usd", amount, "pul")
     await log_money_event(
         context.bot,
         "💸 <b>PUL O‘TKAZMASI</b>\n"
@@ -17073,6 +17077,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_chat_send(uid, body.get("to"), body.get("text"), body.get("kind") or "text", body.get("data"))
         elif path == "/app/api/emp/invoice":
             coro = web_emp_invoice(uid, body.get("pack"))
+        elif path == "/app/api/transfer":
+            coro = web_transfer(uid, body.get("to"), body.get("cur"), body.get("amount"))
         elif path == "/app/api/emp/swap":
             coro = web_emp_swap(uid, body.get("amount"))
         elif path == "/app/api/emp/swapcfg":
@@ -18152,6 +18158,12 @@ def init_webapp():
             c.execute("ALTER TABLE web_chat_msgs ADD COLUMN media TEXT")
         # 🪙 EMP Coin (premium valyuta, ⭐ Telegram Stars orqali)
         c.execute("CREATE TABLE IF NOT EXISTS emp_wallet (user_id INTEGER PRIMARY KEY, emp INTEGER NOT NULL DEFAULT 0)")
+        # 👛 o'tkazmalar tarixi ($ va EMP; web, /pul, /coin, /coins)
+        c.execute("""CREATE TABLE IF NOT EXISTS transfers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, from_id INTEGER, to_id INTEGER NOT NULL, cur TEXT NOT NULL,
+            amount INTEGER NOT NULL, src TEXT NOT NULL, created_at INTEGER NOT NULL)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_transfers_from ON transfers(from_id, id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_transfers_to ON transfers(to_id, id)")
         c.execute("""CREATE TABLE IF NOT EXISTS emp_packs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, emp INTEGER NOT NULL, stars INTEGER NOT NULL,
             bonus INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1)""")
@@ -18751,6 +18763,160 @@ async def web_emp_admin(uid, act, body):
     return {"result": "ok", "emp": emp_payload(uid)}
 
 
+# ── 👛 O'tkazmalar: $ va 🪙 EMP — web (ID/@username), guruhda /pul va /coin (reply), ownerlar /coins ──
+TRANSFER_MAX = 1_000_000_000
+TRANSFER_RATE = (10, 60)        # 60 s ichida ko'pi bilan 10 ta web o'tkazma
+_TRANSFER_SENT: dict[int, list] = {}
+
+
+def transfer_log(c, frm, to, cur, amount, src):
+    try:
+        c.execute("INSERT INTO transfers(from_id, to_id, cur, amount, src, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                  (frm, to, cur, amount, src, int(time.time())))
+    except sqlite3.OperationalError:
+        pass
+
+
+def emp_move(c, frm, to, amount):
+    """EMP o'tkazish (bitta tranzaksiya ichida). True — yetarli edi."""
+    cur = c.execute("UPDATE emp_wallet SET emp=emp-? WHERE user_id=? AND emp>=?", (amount, frm, amount))
+    if cur.rowcount != 1:
+        return False
+    emp_change(c, to, amount)
+    return True
+
+
+def transfers_payload(uid):
+    try:
+        rows = db().execute("""SELECT from_id, to_id, cur, amount, src, created_at FROM transfers
+                               WHERE from_id=? OR to_id=? ORDER BY id DESC LIMIT 15""", (uid, uid)).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    out = []
+    for frm, to, cur, amount, src, at in rows:
+        mine = frm == uid
+        peer = to if mine else frm
+        out.append({"out": mine, "peer": _plain_person(peer) if peer else "👑 Owner", "cur": cur, "amount": amount,
+                    "src": src, "at": tashkent_dt(at)})
+    return {"emp": emp_enabled_for(uid), "history": out}
+
+
+async def web_transfer(uid, to, cur, amount):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    cur = "emp" if cur == "emp" else "usd"
+    tid = chat_resolve(to)
+    if not tid:
+        return {"error": "not_found"}
+    if tid == uid:
+        return {"error": "self"}
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        return {"error": "amount"}
+    if amount <= 0 or amount > TRANSFER_MAX:
+        return {"error": "amount"}
+    if cur == "emp" and not emp_enabled_for(uid):
+        return {"error": "emp_closed"}
+    if cur == "emp" and not emp_enabled_for(tid):
+        return {"error": "emp_target"}
+    if cur == "usd" and active_loan(uid):
+        return {"error": "loan"}
+    now = time.time()
+    sent = [t for t in _TRANSFER_SENT.get(uid, []) if now - t < TRANSFER_RATE[1]]
+    if len(sent) >= TRANSFER_RATE[0]:
+        return {"error": "rate"}
+    c = db()
+    with c:
+        if cur == "emp":
+            ok = emp_move(c, uid, tid, amount)
+        else:
+            ok = _wallet_take(c, uid, amount)
+            if ok:
+                _wallet_add(c, tid, amount)
+        if ok:
+            transfer_log(c, uid, tid, cur, amount, "web")
+    if not ok:
+        return {"error": "funds"}
+    sent.append(now); _TRANSFER_SENT[uid] = sent
+    unit = "🪙 EMP Coin" if cur == "emp" else "$"
+    bal = emp_balance(tid) if cur == "emp" else wallet_balance(tid)
+    try:
+        await _EXCHANGE_LOOP_BOT.send_message(tid, f"👛 {person_name(uid)} sizga <b>{fmt_money(amount)} {unit}</b> o‘tkazdi!\n"
+                                                   f"💰 Balans: {fmt_money(bal)} {'EMP' if cur == 'emp' else '$'}")
+    except (TelegramError, AttributeError):
+        pass
+    await log_money_event(_EXCHANGE_LOOP_BOT, f"👛 <b>WEB O‘TKAZMA</b> ({'EMP' if cur == 'emp' else '$'})\n"
+                                              f"{person_name(uid)} → {person_name(tid)}: <b>{fmt_money(amount)}</b>")
+    return {"result": "sent", "to": _plain_person(tid), "cur": cur, "amount": amount, "balance": wallet_balance(uid),
+            "emp_balance": emp_balance(uid), "transfers": transfers_payload(uid)}
+
+
+async def cmd_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Guruhda reply: /coin 50 — EMP Coin o'tkazish."""
+    msg, sender = update.effective_message, update.effective_user
+    if not msg or not sender:
+        return
+    if msg.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await msg.reply_text("🪙 Guruhda odamning xabariga reply qilib yozing: /coin 50")
+        return
+    target = msg.reply_to_message.from_user if msg.reply_to_message else None
+    if not target:
+        await msg.reply_text("🪙 EMP Coin yuborish uchun odamning xabariga reply qiling: /coin 50")
+        return
+    try:
+        amount = int(context.args[0]) if context.args else 0
+    except (ValueError, TypeError):
+        amount = 0
+    if amount <= 0 or amount > TRANSFER_MAX:
+        await msg.reply_text("Miqdor noto‘g‘ri. Masalan: /coin 50")
+        return
+    if target.is_bot or target.id == sender.id:
+        await msg.reply_text("O‘zingizga yoki botga EMP Coin yuborib bo‘lmaydi.")
+        return
+    save_user(sender); save_user(target)
+    if not emp_enabled_for(sender.id):
+        await msg.reply_text("🪙 EMP Coin hozircha test rejimida — tez orada hamma uchun ochiladi.")
+        return
+    if not emp_enabled_for(target.id):
+        await msg.reply_text("🪙 Qabul qiluvchida EMP Coin hali ochilmagan (test rejimi).")
+        return
+    c = db()
+    with c:
+        ok = emp_move(c, sender.id, target.id, amount)
+        if ok:
+            transfer_log(c, sender.id, target.id, "emp", amount, "coin")
+    if not ok:
+        await msg.reply_text(f"💸 EMP Coin yetarli emas. Balansingiz: <b>{fmt_money(emp_balance(sender.id))} EMP</b>")
+        return
+    await log_money_event(context.bot, f"🪙 <b>EMP O‘TKAZMA</b> (/coin)\n{person_name(sender.id)} → {person_name(target.id)}: <b>{fmt_money(amount)} EMP</b>")
+    await msg.reply_text(f"🪙 {person_name(sender.id)} → {person_name(target.id)}ga <b>{fmt_money(amount)} EMP Coin</b> o‘tkazdi!")
+
+
+async def cmd_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Faqat ownerlar: /coins 1000 — hisobiga EMP qo'shiladi (reply bo'lsa — o'sha odamga)."""
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in CAREER_OWNER_IDS:
+        return          # boshqalar uchun buyruq umuman yo'qdek
+    try:
+        amount = int(context.args[0]) if context.args else 0
+    except (ValueError, TypeError):
+        amount = 0
+    if amount <= 0 or amount > EMP_MAX_AMOUNT:
+        await msg.reply_text(f"Miqdor noto‘g‘ri (1 – {fmt_money(EMP_MAX_AMOUNT)}). Masalan: /coins 1000")
+        return
+    rt = msg.reply_to_message.from_user if msg.reply_to_message and msg.reply_to_message.from_user else None
+    target = rt if rt and not rt.is_bot else user
+    save_user(target)
+    c = db()
+    with c:
+        emp_change(c, target.id, amount)
+        transfer_log(c, None, target.id, "emp", amount, "coins")
+    await log_money_event(context.bot, f"👑 <b>/coins</b> {person_name(user.id)} → {person_name(target.id)}: <b>+{fmt_money(amount)} EMP</b>")
+    who = "Hisobingizga" if target.id == user.id else f"{person_name(target.id)} hisobiga"
+    await msg.reply_text(f"🪙 {who} <b>+{fmt_money(amount)} EMP Coin</b> tushdi.\n💰 Balans: <b>{fmt_money(emp_balance(target.id))} EMP</b>")
+
+
 async def web_emp_state(uid):
     if not emp_enabled_for(uid):
         return {"error": "disabled"}
@@ -19174,6 +19340,7 @@ async def webapp_payload(user_id):
         "chat_unread": chat_unread(user_id),
         "chat_stickers": list(CHAT_STICKERS),
         "emp": emp_payload(user_id),
+        "transfers": transfers_payload(user_id),
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -19926,6 +20093,7 @@ async def web_edu_admin(uid, act, body):
 # Kazino bannerlari (faqat shu ro'yxatdagi fayllar uzatiladi)
 WEBAPP_ASSETS = {"crash.jpg": "image/jpeg", "hovuz.jpg": "image/jpeg", "kamikaze.jpg": "image/jpeg",
                  "emp_coin.jpg": "image/jpeg", "emp_coin_full.jpg": "image/jpeg",
+                 "emp_face.webp": "image/webp", "emp_face_s.png": "image/png",
                  }
 # 🧍 3D avatar: MakeHuman CC0 tana/kiyim/soch (skeletli) + CMU mocap harakatlar — av_*.glb (meshopt + WebP)
 try:
@@ -20452,6 +20620,42 @@ WEBAPP_HTML = r"""<!doctype html>
   .chv-ft{display:flex;gap:4px;align-items:flex-end;padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid rgba(255,210,74,.2)}
   .chv-ft textarea{flex:1;resize:none;min-height:44px;max-height:110px;padding:12px 14px;border-radius:22px;border:1px solid rgba(255,210,74,.35);background:rgba(0,0,0,.35);color:#fff;font:inherit;font-size:15px;outline:none}
   .chv-ft .btn{flex:none;width:48px;height:44px;padding:0;border-radius:50%;font-size:18px}
+  .hdr{position:relative}.hemp{display:flex;align-items:center;justify-content:flex-end;gap:5px;margin-top:3px;font-size:13px}
+  .hemp img{width:18px;height:18px;filter:drop-shadow(0 0 4px rgba(255,200,60,.7));animation:hempsh 3.2s ease-in-out infinite}
+  .hemp b{background:var(--g-metal);-webkit-background-clip:text;background-clip:text;color:transparent}
+  @keyframes hempsh{50%{filter:drop-shadow(0 0 7px rgba(255,220,120,1)) brightness(1.25)}}
+  .bal .wrow{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:3px}
+  #trAmt{box-sizing:border-box;width:100%}
+  .wbtn{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;cursor:pointer;
+    background:rgba(0,0,0,.35);box-shadow:inset 0 0 0 1px rgba(255,210,74,.5),0 0 10px rgba(255,210,74,.25)}
+  .wbtn:active{transform:scale(.92)}
+  .c3d{position:relative;flex:none;width:var(--s);height:var(--s);perspective:calc(var(--s)*6)}
+  .c3d .cin{position:absolute;inset:0;transform-style:preserve-3d;animation:c3sway 7s ease-in-out infinite}
+  .c3d.spin .cin{animation:c3spin 7s cubic-bezier(.45,.05,.55,.95) infinite}
+  .c3d .cin i{position:absolute;inset:1%;border-radius:50%;background:linear-gradient(90deg,#5a3604,#e2a93a 22%,#fff0b0 38%,#b07a14 55%,#ffd56a 72%,#6b4306)}
+  .c3d .cf{position:absolute;inset:0;border-radius:50%;background:url(/app/a/emp_face.webp) center/cover;backface-visibility:hidden;-webkit-backface-visibility:hidden;overflow:hidden}
+  .c3d .cf.f{transform:translateZ(calc(var(--t)/2 + .5px))}.c3d .cf.bk{transform:rotateY(180deg) translateZ(calc(var(--t)/2 + .5px))}
+  .c3d .cf::after{content:"";position:absolute;inset:-20%;background:linear-gradient(115deg,transparent 38%,rgba(255,255,255,.65) 48%,rgba(255,240,190,.25) 53%,transparent 62%);
+    transform:translateX(-120%);animation:c3shine 3.6s ease-in-out infinite;mix-blend-mode:screen}
+  .c3d .c3g{position:absolute;left:8%;right:8%;bottom:-14%;height:22%;border-radius:50%;background:radial-gradient(closest-side,rgba(255,190,40,.55),transparent);filter:blur(4px);animation:c3glow 3.6s ease-in-out infinite}
+  @keyframes c3sway{0%{transform:rotateY(-24deg) rotateX(6deg)}35%{transform:rotateY(24deg) rotateX(-4deg)}70%{transform:rotateY(-24deg) rotateX(6deg)}100%{transform:rotateY(336deg) rotateX(6deg)}}
+  @keyframes c3spin{0%{transform:rotateY(0) rotateX(8deg)}100%{transform:rotateY(360deg) rotateX(8deg)}}
+  @keyframes c3shine{0%,30%{transform:translateX(-120%)}70%,100%{transform:translateX(120%)}}
+  @keyframes c3glow{50%{opacity:.55;transform:scaleX(.85)}}
+  .emphero{align-items:center}.emphero .c3d{margin-top:6px}
+  #trv{position:fixed;inset:0;z-index:87;display:none;align-items:flex-end;justify-content:center;background:rgba(5,4,2,.8);backdrop-filter:blur(6px)}
+  #trv.show{display:flex}
+  .trv-in{position:relative;width:100%;max-width:540px;max-height:94vh;overflow-y:auto;border-radius:26px 26px 0 0;padding:18px 16px 26px;
+    background:radial-gradient(120% 60% at 50% 0%,#33260a 0%,#110c04 60%,#07070d 100%)}
+  .trv-in .kst-x{position:absolute;top:12px;right:14px}
+  .trh{font-family:Cinzel,serif;font-weight:900;font-size:20px;letter-spacing:.06em;margin-bottom:12px}
+  .trseg{display:flex;gap:8px;margin-bottom:10px}.trseg span{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:10px;border-radius:14px;cursor:pointer;font-weight:800;
+    background:rgba(255,255,255,.05);box-shadow:inset 0 0 0 1px rgba(255,210,74,.25)}.trseg span.on{background:var(--g-metal);color:#2b1b02}
+  .trseg img{width:20px;height:20px}.trbal{margin:4px 0 12px;font-size:14px}
+  .trrow{display:flex;gap:8px}.trrow .bet{flex:1;min-width:0}.trrow .btn{flex:none;padding:0 14px}
+  .trwho{min-height:18px;margin-top:6px;font-size:13px}.trq{margin-top:8px}
+  .trhist{margin-top:18px}.trhist .thr{display:flex;justify-content:space-between;gap:8px;padding:9px 2px;border-bottom:1px solid rgba(255,210,74,.12);font-size:13.5px}
+  .trhist .pos{color:#7ee08a}.trhist .neg{color:#ff8a8a}
   .empc{display:flex;align-items:center;gap:12px;margin-top:12px;cursor:pointer;background:radial-gradient(120% 140% at 0% 0%,rgba(255,200,60,.18),rgba(0,0,0,0) 60%)}
   .empc .empi{width:58px;height:64px;flex:none;object-fit:cover;border-radius:14px;box-shadow:0 0 18px rgba(255,190,40,.45)}
   .empc .empm{flex:1;min-width:0}.empc .empb{font-size:20px;margin-top:2px}.empc .empb b{background:var(--g-metal);-webkit-background-clip:text;background-clip:text;color:transparent}
@@ -20547,7 +20751,10 @@ function render(res){
     '<div><div class="hname">'+esc(d.name)+'</div>'+
     '<div class="hsub">'+(d.username?'@'+esc(d.username):'ID '+esc(d.id))+
     (d.is_owner?' · 👑 Owner':'')+'</div></div>'+
-    '<div class="bal"><div class="n" id="bal">'+esc(d.money_fmt)+'$</div><div class="l">Hamyon</div></div></div>'));
+    '<div class="bal"><div class="n" id="bal">'+esc(d.money_fmt)+'$</div>'+
+      (d.emp?'<div class="hemp"><img alt="" src="/app/a/emp_face_s.png"><b id="hdrEmp">'+fmtMoney(d.emp.balance)+'</b> EMP</div>':'')+
+      '<div class="wrow"><span class="wbtn" id="wBtn" title="O‘tkazmalar">👛</span><div class="l">Hamyon</div></div></div></div>'));
+  document.getElementById('wBtn').onclick=e=>{ e.stopPropagation(); openTransfers(d); };
   window.BAL=d.money;
   (function(){ const im=document.getElementById('avimg'); if(!im) return;
     const tu=tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user&&tg.initDataUnsafe.user.photo_url;
@@ -20569,7 +20776,7 @@ function render(res){
   if(d.loan) extra.push('<span class="chip" style="color:#ff6b6b;border-color:rgba(255,107,107,.4)">🏦 Faol kredit</span>');
   if(extra.length) p.appendChild($('<div style="margin-top:12px">'+extra.join(' ')+'</div>'));
   if(d.emp){ // 🪙 EMP Coin (test: ownerlar)
-    const e=d.emp, ec=$('<div class="card full empc" data-tap="1"><img class="empi" alt="EMP" src="/app/a/emp_coin.jpg">'+
+    const e=d.emp, ec=$('<div class="card full empc" data-tap="1">'+coin3d(58,'sway')+
       '<div class="empm"><div class="lbl">🪙 EMP Coin'+(e.test?' <span class="avtest">TEST</span>':'')+'</div>'+
       '<div class="empb"><b id="empBal">'+fmtMoney(e.balance)+'</b> EMP</div><div class="hsub">Empire premium valyutasi</div></div>'+
       '<button class="btn go empbuy">⭐ Sotib olish</button></div>');
@@ -21028,12 +21235,52 @@ document.addEventListener('pointerdown',e=>{
     document.body.appendChild(sp); setTimeout(()=>sp.remove(),650); }
 },{passive:true});
 // ---- 🪙 EMP Coin do'koni (⭐ Telegram Stars) ----
+// ---- 🪙 3D tanga: ikki yuz + qalinlik qatlamlari + yaltirash (CSS 3D) ----
+function coin3d(px,mode){ const t=Math.max(3,Math.round(px*0.075)), n=Math.max(6,Math.min(18,Math.round(t*1.6)));
+  let edge=''; for(let i=0;i<n;i++){ const z=(-t/2+t*i/(n-1)).toFixed(2); edge+='<i style="transform:translateZ('+z+'px)"></i>'; }
+  return '<div class="c3d '+(mode||'sway')+'" style="--s:'+px+'px;--t:'+t+'px"><div class="c3g"></div><div class="cin">'+edge+
+    '<b class="cf f"></b><b class="cf bk"></b></div></div>'; }
+function openTransfers(d){
+  let ov=document.getElementById('trv'); if(!ov){ ov=document.createElement('div'); ov.id='trv'; document.body.appendChild(ov); }
+  let cur='usd'; const T=d.transfers||{emp:false,history:[]};
+  const ERR={not_found:'🔎 Foydalanuvchi topilmadi (botni ishlatgan bo‘lishi kerak)',self:'🙃 O‘zingizga o‘tkaza olmaysiz',amount:'⚠️ Miqdor noto‘g‘ri',
+    funds:'💸 Hisobingizda yetarli emas',loan:'⛔ Faol kreditingiz bor — avval to‘lang',rate:'⏳ Juda tez — biroz kuting',emp_closed:'🪙 EMP hozircha yopiq',
+    emp_target:'🪙 Qabul qiluvchida EMP hali ochilmagan (test)',disabled:'🌐 Web app o‘chirilgan'};
+  const draw=()=>{ const bal=cur==='emp'?(d.emp?d.emp.balance:0):window.BAL;
+    ov.innerHTML='<div class="trv-in"><span class="kst-x" id="trX">✕</span><div class="trh">👛 O‘tkazmalar</div>'+
+      '<div class="trseg"><span data-c="usd" class="'+(cur==='usd'?'on':'')+'">💵 Pul ($)</span>'+(T.emp?'<span data-c="emp" class="'+(cur==='emp'?'on':'')+'"><img alt="" src="/app/a/emp_face_s.png"> EMP Coin</span>':'')+'</div>'+
+      '<div class="trbal">Balans: <b>'+fmtMoney(bal)+' '+(cur==='emp'?'EMP':'$')+'</b></div>'+
+      '<div class="lbl">Kimga</div><div class="trrow"><input class="bet" id="trTo" placeholder="ID yoki @username" autocomplete="off" style="text-align:left"><button class="btn" id="trChk">🔎</button></div>'+
+      '<div class="trwho" id="trWho"></div>'+
+      '<div class="lbl" style="margin-top:10px">Miqdor</div><input class="bet" id="trAmt" type="number" inputmode="numeric" placeholder="0">'+
+      '<div class="quick trq">'+[100,500,1000,5000].map(v=>'<div class="q" data-v="'+v+'">'+fmtMoney(v)+'</div>').join('')+'<div class="q" data-v="all">Hammasi</div></div>'+
+      '<button class="btn go full" id="trGo" style="margin-top:12px">📤 O‘tkazish</button>'+
+      '<div class="trhist"><div class="lbl">🧾 Oxirgi o‘tkazmalar</div>'+(T.history.length?T.history.map(h=>'<div class="thr"><span>'+(h.out?'📤 ':'📥 ')+esc(h.peer)+
+        '<small class="hsub"> · '+({web:'web',pul:'/pul',coin:'/coin',coins:'/coins'}[h.src]||h.src)+'</small></span><b class="'+(h.out?'neg':'pos')+'">'+(h.out?'−':'+')+fmtMoney(h.amount)+' '+(h.cur==='emp'?'EMP':'$')+'</b></div>').join(''):'<div class="hsub">Hali o‘tkazma yo‘q</div>')+'</div></div>';
+    ov.className='show';
+    document.getElementById('trX').onclick=()=>{ ov.className=''; }; ov.onclick=e=>{ if(e.target===ov) ov.className=''; };
+    ov.querySelectorAll('.trseg span').forEach(el=>el.onclick=()=>{ cur=el.dataset.c; const to=document.getElementById('trTo').value; draw(); document.getElementById('trTo').value=to; });
+    const to=document.getElementById('trTo'), amt=document.getElementById('trAmt'), who=document.getElementById('trWho');
+    ov.querySelectorAll('.trq .q').forEach(q=>q.onclick=()=>{ amt.value=q.dataset.v==='all'?Math.max(0,Math.floor(bal)):q.dataset.v; });
+    const check=()=>{ const v=to.value.trim(); if(!v) return; api('/app/api/chat/find',{q:v}).then(r=>{
+      who.innerHTML=r.result==='found'?'✅ <b>'+esc(r.user.name)+'</b>'+(r.user.username?' · @'+esc(r.user.username):'')+' · ID '+esc(r.user.id):'⚠️ '+(ERR[r.error]||'Topilmadi'); }); };
+    document.getElementById('trChk').onclick=check; to.onchange=check;
+    document.getElementById('trGo').onclick=e=>{ const b=e.currentTarget, v=to.value.trim(), a=parseInt(amt.value)||0;
+      if(!v){ toast('✍️ ID yoki @username yozing'); return; } if(a<=0){ toast('✍️ Miqdorni yozing'); return; }
+      b.disabled=true; api('/app/api/transfer',{to:v,cur:cur,amount:a}).then(r=>{ b.disabled=false;
+        if(r.result==='sent'){ setBal(r.balance); if(d.emp){ d.emp.balance=r.emp_balance; const h=document.getElementById('hdrEmp'); if(h) h.textContent=fmtMoney(r.emp_balance);
+            const eb=document.getElementById('empBal'); if(eb) eb.textContent=fmtMoney(r.emp_balance); }
+          d.transfers=r.transfers; Object.assign(T,r.transfers); toast('✅ '+fmtMoney(r.amount)+' '+(r.cur==='emp'?'EMP':'$')+' → '+r.to); haptic('success'); draw(); }
+        else toast(ERR[r.error]||'⚠️ Xatolik'); }).catch(()=>{ b.disabled=false; toast('⚠️ Aloqa xatosi'); }); };
+  };
+  draw();
+}
 function openEmpShop(d){
   let ov=document.getElementById('empv');
   if(!ov){ ov=document.createElement('div'); ov.id='empv'; document.body.appendChild(ov); }
   const draw=()=>{ const e=d.emp;
     ov.innerHTML='<div class="empv-in"><span class="kst-x" id="empX">✕</span>'+
-      '<div class="emphero"><img alt="EMP" src="/app/a/emp_coin_full.jpg"><div class="empglow"></div></div>'+
+      '<div class="emphero">'+coin3d(190,'spin')+'<div class="empglow"></div></div>'+
       '<div class="emph"><div class="empt">EMPIRE COIN'+(e.test?' <span class="avtest">TEST</span>':'')+'</div>'+
       '<div class="empbal">🪙 <b>'+fmtMoney(e.balance)+'</b> EMP</div><div class="hsub">To‘lov — ⭐ Telegram Stars orqali, darhol hisobga tushadi</div></div>'+
       '<div class="emppk">'+(e.packs.length?e.packs.map(x=>'<div class="pk" data-id="'+x.id+'" data-tap="1">'+(x.bonus?'<span class="pkb">+'+fmtMoney(x.bonus)+' bonus</span>':'')+
@@ -21057,7 +21304,7 @@ function openEmpShop(d){
         q.innerHTML=v>e.balance?'⚠️ EMP yetarli emas':(dm<1?'Minimal: '+S.min+' EMP':'➡️ <b>'+fmtMoney(dm)+' 💎</b> olasiz · komissiya '+fmtMoney(fee)+' EMP'); };
       sb.onclick=()=>{ const v=parseInt(sa.value)||0; if(!v) return; sb.disabled=true;
         api('/app/api/emp/swap',{amount:v}).then(r=>{ sb.disabled=false;
-          if(r.emp){ d.emp=r.emp; const b=document.getElementById('empBal'); if(b) b.textContent=fmtMoney(r.emp.balance); }
+          if(r.emp){ d.emp=r.emp; const b=document.getElementById('empBal'); if(b) b.textContent=fmtMoney(r.emp.balance); const h=document.getElementById('hdrEmp'); if(h) h.textContent=fmtMoney(r.emp.balance); }
           if(r.result==='done'){ toast('✅ '+fmtMoney(r.diamonds)+' 💎 '+S.partner+' hisobingizga tushdi'); haptic('success'); draw(); }
           else if(r.result==='pending'){ toast('⏳ Yuborildi — hamkor bot javobini kutyapmiz'); draw(); }
           else if(r.result==='failed'){ toast('😓 O‘tmadi — EMP qaytarildi'); draw(); }
@@ -21066,6 +21313,7 @@ function openEmpShop(d){
         }).catch(()=>{ sb.disabled=false; toast('⚠️ Aloqa xatosi'); }); }; }
   };
   const poll=(before,n)=>api('/app/api/emp/state',{}).then(r=>{ if(r.emp){ if(r.emp.balance>before||n<=0){ d.emp=r.emp; draw(); const b=document.getElementById('empBal'); if(b) b.textContent=fmtMoney(r.emp.balance);
+      const h=document.getElementById('hdrEmp'); if(h) h.textContent=fmtMoney(r.emp.balance);
       if(r.emp.balance>before){ toast('🎉 +'+fmtMoney(r.emp.balance-before)+' EMP hisobingizga tushdi'); haptic('success'); } } else setTimeout(()=>poll(before,n-1),1500); } });
   function buy(id,el){ el.classList.add('busy');
     api('/app/api/emp/invoice',{pack:id}).then(r=>{ el.classList.remove('busy');
@@ -22583,6 +22831,8 @@ def main():
         (["setlog"], cmd_setlog),
         (["shop"], cmd_shop),
         (["pul"], cmd_pul),
+        (["coin"], cmd_coin),
+        (["coins"], cmd_coins),
         (["hisob"], cmd_hisob),
         (["hadya"], cmd_hadya),
         (["crash"], cmd_crash),

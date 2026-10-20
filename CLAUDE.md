@@ -246,3 +246,12 @@
   idempotent txid, `emp_enabled_for`, limit_in). Ownerlar web app Owner → EMP bo'limida kurs/komissiya/limit/yoqish
   (`/app/api/emp/swapcfg`, `web_emp_swapcfg`), statistika `swap_stats`. Payload `emp.swap` (`swap_payload`). Hamkor uchun protokol va
   namuna: `tools/partner_bridge/`.
+- 👛 O'tkazmalar: web app sarlavha kartasida EMP balansi (`#hdrEmp`, `emp_face_s.png`) va 👛 tugma (`#wBtn` → `openTransfers`, `#trv`):
+  $ yoki 🪙 EMP ni ID/@username ga (`chat_resolve`), `/app/api/transfer` → `web_transfer` (kredit bo'lsa $ yo'q, EMP test rejimida
+  ikkala tomonda `emp_enabled_for`, `TRANSFER_RATE` 60 s da 10 ta, qabul qiluvchiga bot xabari). Tarix `transfers` jadvali
+  (from/to/cur usd|emp/amount/src web|pul|coin|coins; `transfer_log`, payload `transfers` → `transfers_payload`). Guruhda reply
+  `/coin N` (`cmd_coin`, `emp_move`) — "X → Yga N EMP Coin o'tkazdi"; ownerlar `/coins N` (`cmd_coins`, o'ziga yoki reply'dagi
+  odamga; boshqalar uchun jim). Bot /profil'da "🪙 EMP Coin" qatori (`emp_enabled_for` bo'lsa).
+- 🪙 3D tanga: `webapp_assets/emp_face.webp` (fon olib tashlangan, perspektiva tekislangan tanga yuzi — ichki halqa ellipsi bo'yicha
+  remap) + `coin3d(px, 'sway'|'spin')` (CSS preserve-3d: ikki yuz, qalinlik qatlamlari `<i>`, `c3shine` yaltirash, `c3g` nur).
+  Profil EMP kartasi va EMP do'koni sarlavhasida.

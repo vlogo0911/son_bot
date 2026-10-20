@@ -18159,6 +18159,10 @@ def init_webapp():
         cols = {r[1] for r in c.execute("PRAGMA table_info(pair_requests)")}
         if cols and "random" not in cols:     # 💍 random juft so'rovlari belgisi
             c.execute("ALTER TABLE pair_requests ADD COLUMN random INTEGER NOT NULL DEFAULT 0")
+        # 🪙 EMP Coin test rejimdan chiqdi: bir marta hamma uchun yoqiladi (keyin owner panelda o'chirsa, o'sha qoladi)
+        if c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('emp_launch', 1)").rowcount:
+            c.execute("INSERT INTO webapp_config(key, value) VALUES ('emp', 1) "
+                      "ON CONFLICT(key) DO UPDATE SET value=1")
 
 
 # ── 🧍 Realistik 3D avatar (web app) — test: standart faqat ownerlar ──
@@ -18571,7 +18575,7 @@ EMP_MAX_AMOUNT = 10_000_000
 def emp_enabled_for(uid):
     if not web_enabled_for(uid):
         return False
-    return bool(webapp_flags().get("emp", 0)) or uid in CAREER_OWNER_IDS
+    return bool(webapp_flags().get("emp", 1)) or uid in CAREER_OWNER_IDS
 
 
 def emp_balance(uid):
@@ -18599,7 +18603,7 @@ def emp_payload(uid):
     if not emp_enabled_for(uid):
         return None
     c = db()
-    out = {"balance": emp_balance(uid), "test": not webapp_flags().get("emp", 0), "packs": emp_packs(),
+    out = {"balance": emp_balance(uid), "test": not webapp_flags().get("emp", 1), "packs": emp_packs(),
            "history": [{"emp": r[0], "stars": r[1], "at": tashkent_dt(r[2])} for r in c.execute(
                "SELECT emp, stars, created_at FROM emp_payments WHERE user_id=? ORDER BY id DESC LIMIT 5", (uid,))],
            "swap": swap_payload(uid)}
@@ -19131,7 +19135,7 @@ async def web_avatar_save(uid, data):
 
 
 def webapp_flags():
-    d = {"all": 1, "owner": 1}
+    d = {"all": 1, "owner": 1, "emp": 1}
     for k, v in db().execute("SELECT key, value FROM webapp_config"):
         d[k] = v
     return d

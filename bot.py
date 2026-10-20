@@ -16906,6 +16906,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_kami_step(uid, body.get("row"))
         elif path == "/app/api/kami/cashout":
             coro = web_kami_cashout(uid)
+        elif path == "/app/api/kami/state":
+            coro = web_kami_state(uid)
         elif path == "/app/api/shop/buy":
             coro = web_shop_buy(uid, body.get("gift"), body.get("to"))
         elif path == "/app/api/bank/loan":
@@ -18065,6 +18067,7 @@ async def webapp_payload(user_id):
         "edu_all": edu_list(False) if is_owner else [],
         "kami": kami_enabled_for(user_id),
         "kami_test": not webapp_flags().get("kami", 0),
+        "kami_game": web_kami_view(user_id),
         "avatar3d": avatar_enabled_for(user_id),
         "avatar_test": not webapp_flags().get("avatar", 0),
         "avatar": avatar_get(user_id),
@@ -18381,11 +18384,28 @@ def kami_enabled_for(uid):
     return bool(webapp_flags().get("kami", 0)) or uid in CAREER_OWNER_IDS
 
 
+def web_kami_view(uid):
+    """Ochiq o'yin holati (yopilgan/uzilgan web app'ni davom ettirish uchun). Dushman o'qlari faqat o'tilgan ustunlar uchun."""
+    g = WEB_KAMI.get(uid)
+    if not g:
+        return None
+    step = g["step"]
+    return {"bet": g["bet"], "step": step, "cols": KAMI_COLS, "rows": KAMI_ROWS,
+            "ladder": [kami_mult(i) for i in range(1, KAMI_COLS + 1)],
+            "passed": [{"col": c, "row": r, "shot": g["shots"][c]} for c, r in enumerate(g.get("picks", [])[:step])],
+            "multiplier": kami_mult(step) if step else 0, "win": kami_win(g["bet"], step) if step else 0}
+
+
+async def web_kami_state(uid):
+    v = web_kami_view(uid)
+    return {"active": bool(v), "game": v, "balance": wallet_balance(uid)}
+
+
 async def web_kami_start(uid, bet):
     if not kami_enabled_for(uid):
         return {"error": "disabled"}
-    if uid in WEB_KAMI:
-        return {"error": "bet_placed"}
+    if uid in WEB_KAMI:      # oldingi o'yin ochiq qolgan (web app yopilgan/aloqa uzilgan) — bloklamasdan davom ettiramiz
+        return {"resumed": True, "game": web_kami_view(uid), "balance": wallet_balance(uid)}
     try:
         bet = int(bet)
     except (TypeError, ValueError):
@@ -18399,7 +18419,7 @@ async def web_kami_start(uid, bet):
         if not _wallet_take(c, uid, bet):
             return {"error": "funds", "balance": wallet_balance(uid)}
     shots = [_KAMI_RNG.randrange(KAMI_ROWS) for _ in range(KAMI_COLS)]
-    WEB_KAMI[uid] = {"bet": bet, "shots": shots, "step": 0}
+    WEB_KAMI[uid] = {"bet": bet, "shots": shots, "step": 0, "picks": []}
     return {"started": True, "cols": KAMI_COLS, "rows": KAMI_ROWS, "bet": bet,
             "ladder": [kami_mult(i) for i in range(1, KAMI_COLS + 1)], "balance": wallet_balance(uid)}
 
@@ -18420,6 +18440,7 @@ async def web_kami_step(uid, row):
         WEB_KAMI.pop(uid, None)
         return {"result": "lose", "col": col, "row": row, "shot": shot, "balance": wallet_balance(uid)}
     g["step"] += 1
+    g.setdefault("picks", []).append(row)
     mult = kami_mult(g["step"])
     if g["step"] >= KAMI_COLS:
         WEB_KAMI.pop(uid, None)
@@ -19715,6 +19736,7 @@ function render(res){
     sc.insertAdjacentHTML('afterbegin','<div class="sndbar"><span data-snd="m">🎵</span><span data-snd="s">🔊</span></div>');
     sc.querySelectorAll('.sndbar span').forEach(b=>b.onclick=()=>SND.toggle(b.dataset.snd)); });
   SND.paintBars();
+  window.D_KAMI_GAME=d.kami_game||null;
   initCrash(); initFrog(); initKami();
 }
 // tegilganda oltin uchqunlar (Crash'dan tashqari)
@@ -19749,8 +19771,10 @@ function sheet(title, opts, onPick){
   ov.onclick=(e)=>{ if(e.target===ov) close(); };
   ov.querySelectorAll('.opt').forEach(el=>el.onclick=()=>{ close(); onPick(opts[+el.dataset.i].value); });
 }
-function api(path,body){ return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify(Object.assign({initData:tg?tg.initData:''},body||{}))}).then(r=>r.json()); }
+function api(path,body){ // 20 s timeout: osilib qolgan so'rov tugmalarni "band" holatda qoldirmasin
+  const ac=typeof AbortController!=='undefined'?new AbortController():null, t=ac?setTimeout(()=>ac.abort(),20000):0;
+  return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},signal:ac?ac.signal:undefined,
+  body:JSON.stringify(Object.assign({initData:tg?tg.initData:''},body||{}))}).then(r=>r.json()).finally(()=>clearTimeout(t)); }
 function haptic(t){ try{tg.HapticFeedback.notificationOccurred(t);}catch(e){} }
 
 // ---- 🎵 Ovoz: har o'yinga alohida sokin fon musiqasi + effektlar (Web Audio sintez, fayl yo'q) ----
@@ -20669,7 +20693,7 @@ function initKami(){
   const box=document.getElementById('kbox'), sec=document.getElementById('s-kami'),
         btn=document.getElementById('kbtn'), bet=document.getElementById('kbet'), note=document.getElementById('knote'),
         msg=document.getElementById('kmsg');
-  const ctx=cv.getContext('2d'), dpr=window.devicePixelRatio||1, drawPlane=planeKit(ctx,dpr);
+  const ctx=cv.getContext('2d'), dpr=Math.min(2,window.devicePixelRatio||1), drawPlane=planeKit(ctx,dpr);
   const COLS=12, ROWS=5;
   let ladder=Array.from({length:COLS},(_,i)=>Math.floor(0.92*Math.pow(1.25,i+1)*100)/100);
   document.getElementById('kmax').textContent=Math.floor(ladder[COLS-1]);
@@ -20705,6 +20729,19 @@ function initKami(){
     msg._t=setTimeout(()=>msg.className='kmsg'+(bad?' bad':''),ms||1300); }
   function reset(){ step=0; lane=2; passed={}; shots=[]; camX=0; const g=geo();
     const [x,y]=cellXY(-1,lane,g); Object.assign(plane,{x,y,fx:x,fy:y,t0:0,dur:0,dead:false,gone:false}); }
+  // ochiq qolgan o'yinni davom ettirish (server holati bo'yicha)
+  function resume(v){
+    ladder=v.ladder||ladder; curBet=v.bet; playing=true; reset(); passed={};
+    (v.passed||[]).forEach(p=>{ passed[p.col]={row:p.row,shot:p.shot}; lane=p.row; });
+    step=v.step; const g=geo(), [x,y]=cellXY(step-1,lane,g); Object.assign(plane,{x,y,fx:x,fy:y,tx:null});
+    note.innerHTML=step?('♻️ O‘yin davom etmoqda · hozir <b>x'+v.multiplier.toFixed(2)+'</b> · keyingisi <b>x'+ladder[step].toFixed(2)+'</b>')
+      :('♻️ O‘yin davom etmoqda · <b>x'+ladder[0].toFixed(2)+'</b>');
+    bet.value=v.bet; paint();
+  }
+  function resync(){ // aloqa uzilsa: server holatiga qaytamiz
+    api('/app/api/kami/state',{}).then(r=>{ if(r.balance!=null) setBal(r.balance);
+      if(r.active&&r.game) resume(r.game); else { playing=false; plane.tx=null; reset(); paint(); } }).catch(()=>{});
+  }
   function moveTo(col,row){ const g=geo(); const [x,y]=cellXY(col,row,g);
     plane.fx=plane.x; plane.fy=plane.y; plane.tx=x; plane.ty=y; plane.t0=performance.now(); plane.dur=480; lane=row; }
   btn.onclick=()=>{
@@ -20713,9 +20750,10 @@ function initKami(){
       busy=true; paint();
       api('/app/api/kami/start',{bet:betVal()}).then(r=>{ busy=false;
         if(!r.ok||r.error){ toast(errText(r.error,r.min)); paint(); return; }
+        if(r.resumed){ setBal(r.balance); resume(r.game); toast('♻️ Oldingi o‘yin davom ettirildi'); return; }
         setBal(r.balance); ladder=r.ladder||ladder; curBet=r.bet; playing=true; reset(); SND.play('chip');
         note.innerHTML='Keyingi ustundan katak tanlang · <b>x'+ladder[0].toFixed(2)+'</b>'; haptic('success'); paint();
-      }).catch(()=>{ busy=false; paint(); });
+      }).catch(()=>{ busy=false; paint(); resync(); });
       return;
     }
     if(!step) return;
@@ -20724,8 +20762,8 @@ function initKami(){
       if(r.result==='cashed'){ setBal(r.balance); playing=false; haptic('success'); SND.play('cash');
         flash('+'+fmtMoney(r.win)+'$<small>x'+r.multiplier.toFixed(2)+' da yechdingiz</small>');
         note.innerHTML='✅ Yutuq: <b>+'+fmtMoney(r.win)+'$</b>'; burst(plane.x,plane.y,'#ffd24a',40); }
-      else toast(errText(r.error)); paint();
-    }).catch(()=>{ busy=false; paint(); });
+      else { toast(errText(r.error)); resync(); } paint();
+    }).catch(()=>{ busy=false; paint(); resync(); });
   };
   // katak tanlash
   cv.addEventListener('pointerdown',e=>{
@@ -20736,7 +20774,7 @@ function initKami(){
     const row=Math.floor((py-g.top)/g.T); if(row<0||row>=ROWS) return;
     busy=true; paint(); moveTo(step,row); SND.play('click'); SND.play('whoosh');
     api('/app/api/kami/step',{row:row}).then(r=>{
-      if(!r.ok||r.error){ busy=false; toast(errText(r.error)); paint(); return; }
+      if(!r.ok||r.error){ busy=false; toast(errText(r.error)); paint(); resync(); return; }
       const col=r.col; shots.push({col,row:r.shot,t0:performance.now()+220,hit:r.result==='lose'}); setTimeout(()=>SND.play('cannon'),220);
       setTimeout(()=>{
         busy=false;
@@ -20750,7 +20788,7 @@ function initKami(){
           else { note.innerHTML='Zo‘r! Hozir: <b>x'+r.multiplier.toFixed(2)+'</b> · keyingisi <b>x'+ladder[step].toFixed(2)+'</b>'; haptic('success'); } }
         paint();
       },720);
-    }).catch(()=>{ busy=false; paint(); });
+    }).catch(()=>{ busy=false; paint(); resync(); });
   });
   function burst(x,y,c,n){ for(let i=0;i<n;i++){ const a=Math.random()*Math.PI*2,v=(1+Math.random()*4)*dpr;
     sparks.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v-1.5*dpr,life:1,c:Math.random()<.5?c:'#ffffff'}); } }
@@ -20773,8 +20811,10 @@ function initKami(){
     ctx.fillStyle='rgba(255,140,60,.10)'; ctx.fillRect(0,hy-2*dpr,W,4*dpr);
     // to'lqinlar
     ctx.strokeStyle='rgba(150,210,255,.16)'; ctx.lineWidth=1.4*dpr;
+    ctx.beginPath();
     for(const w of waves){ const x=((w.x*W*1.3-camX*.8+now*0.012*dpr)%(W*1.3)+W*1.3)%(W*1.3)-W*.15, y=hy+8*dpr+w.y*(H-hy);
-      ctx.beginPath(); ctx.moveTo(x,y); ctx.quadraticCurveTo(x+w.l*W*.5,y-3*dpr*Math.sin(now/400+w.p),x+w.l*W,y); ctx.stroke(); }
+      ctx.moveTo(x,y); ctx.quadraticCurveTo(x+w.l*W*.5,y-3*dpr*Math.sin(now/400+w.p),x+w.l*W,y); }
+    ctx.stroke();
   }
   function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
   function board(g,now){
@@ -20819,14 +20859,20 @@ function initKami(){
     ctx.restore();
     return {x,cy};
   }
+  let lastDraw=0;
   function frame(){
     if(!alive) return; raf=requestAnimationFrame(frame);
-    if(!sec.classList.contains('on')) return;
-    size(); const g=geo(), now=performance.now();
+    if(!sec.classList.contains('on')||document.hidden) return;
+    const now=performance.now();
+    const calm=!playing&&!busy&&!plane.dead&&!plane.kamikaze&&plane.tx==null&&!shots.length&&!sparks.length&&!splashes.length&&!puffs.length;
+    if(calm && now-lastDraw<66) return;           // kutish paytida ~15 fps — zaif telefonlarda qizib, qotib qolmasin
+    lastDraw=now;
+    size(); const g=geo();
     // kamera: keyingi ustun ekranning ~45% ida
     const target=Math.max(0, g.x0+(step+0.5)*g.T - g.W*0.45);
     camX+=(target-camX)*0.08;
     if(!playing && !plane.dead && !plane.kamikaze && step===0){ const [x,y]=cellXY(-1,lane,g); plane.x=x; plane.y=y; plane.tx=undefined; }
+    else if(playing && !busy && !plane.dead && plane.tx==null){ const [x,y]=cellXY(step-1,lane,g); plane.x=x; plane.y=y; }  // o'lcham o'zgarsa/davom ettirilsa ham joyida
     ctx.clearRect(0,0,g.W,g.H); sea(g,now); ctx.save(); ctx.translate(-camX,0); board(g,now); const sh=battleship(g,now);
     // samolyot harakati
     let px=plane.x, py=plane.y, ang=0;
@@ -20848,6 +20894,7 @@ function initKami(){
         ctx.fillStyle='#ffe08a'; ctx.shadowColor='#ff8a3a'; ctx.shadowBlur=14*dpr; ctx.beginPath(); ctx.arc(x,y,4*dpr,0,7); ctx.fill(); ctx.shadowBlur=0;
         if(u<0.12){ ctx.fillStyle='rgba(255,200,90,'+(1-u/0.12)+')'; ctx.beginPath(); ctx.arc(sx,sy,12*dpr,0,7); ctx.fill(); } }
       else if(!s.done){ s.done=true; splashes.push({x:tx,y:ty,t0:now}); SND.play(s.hit?'explode':'splash'); burst(tx,ty,s.hit?'#ff5a3a':'#9fe8ff',s.hit?70:26); } }
+    for(let i=shots.length-1;i>=0;i--) if(shots[i].done) shots.splice(i,1);
     for(let i=splashes.length-1;i>=0;i--){ const sp=splashes[i], u=(now-sp.t0)/700; if(u>1){ splashes.splice(i,1); continue; }
       ctx.strokeStyle='rgba(200,240,255,'+(1-u)+')'; ctx.lineWidth=3*dpr*(1-u);
       ctx.beginPath(); ctx.arc(sp.x,sp.y,g.T*0.15+u*g.T*0.45,0,7); ctx.stroke(); }
@@ -20869,6 +20916,7 @@ function initKami(){
   window.KM={stop(){ alive=false; cancelAnimationFrame(raf); },
     cell(r){ const g=geo(), [x,y]=cellXY(step,r,g); return [(x-camX)/dpr,y/dpr]; }};
   size(); reset(); paint(); raf=requestAnimationFrame(frame);
+  if(window.D_KAMI_GAME){ resume(window.D_KAMI_GAME); window.D_KAMI_GAME=null; }
 }
 
 // ---- FROG (Baqa) ----

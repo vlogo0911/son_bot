@@ -230,7 +230,8 @@
   → Lottie JSON, kontent turi `_sniff_image`). API `/app/api/chat/stickers` (+`/remove`), `chat/send` kind=`tg` (text=file_unique_id,
   media=fmt; eskiz yuborilmaydi). Klient: stiker panelida tablar (😊 emoji / to'plamlar eskizi / ➕ yo'riqnoma), `tgStickerHtml`
   (webp img, webm video, tgs → `lottieLoad` cdnjs lottie-web 5.12.2 light, `tgLottieIn`, yopilganda destroy).
-- 🪙 EMP Coin (Empire premium valyutasi, test — standart faqat ownerlar; `emp_enabled_for` = webapp_config "emp" yoki owner,
+- 🪙 EMP Coin (Empire premium valyutasi; test rejimdan chiqdi — standart hamma uchun: `webapp_flags` default emp=1, `init_webapp` da
+  bir martalik `emp_launch` belgisi bilan emp=1; `emp_enabled_for` = webapp_config "emp" yoki owner,
   owner panel → 🌐 Web App → "🪙 EMP Coin: hamma uchun ochish" `panel:webapp_emp`). Jadvallar: `emp_wallet`, `emp_packs`
   (emp/stars/bonus/active; bo'sh bo'lsa `EMP_DEFAULT_PACKS`), `emp_payments` (charge_id UNIQUE — takroriy to'lov bir marta).
   ⭐ Telegram Stars: `/app/api/emp/invoice` → `create_invoice_link(currency="XTR", payload="emp:uid:pack:stars:total")` → klient

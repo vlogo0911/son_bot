@@ -266,10 +266,10 @@
   (`.glob.wide` — to'liq kenglik, `.gcard.g-bank`/`.g-birja`, rasmlar `webapp_assets/moliya_bank.jpg`/`moliya_birja.jpg` —
   foydalanuvchi bergan rasm (1536×510, 3:1, `?v=2`); sarlavha rasm ichida, HTML overlay/chip yashirilgan) → `setTab('bank'|'birja')`; bo'limlarda
   "‹ Moliya" (`.gback[data-back=moliya]`), `setTab` bank/birja uchun Moliya tabini yoritadi.
-- 📰 NEWS (online gazeta): sarlavha kartasida "📰 NEWS" tugmasi (`#nBtn`, o'qilmaganlar badge `.nbdg` — `news_unread`/`news_seen`
-  jadvali, `/app/api/news/seen`) → `#s-news` (`newsPage`): "EMPIRE NEWS" mastheadi, bosh maqola (`.nlead`) va yangiliklar
+- 📰 NEWS (online gazeta): pastki qatorda "📰 News" tab (Profil'dan keyin; o'qilmaganlar `.tbadge` — `setNewsBadge`, `news_unread`/
+  `news_seen` jadvali; `setTab('news')` → `newsSeen` → `/app/api/news/seen`) → `#s-news` (`newsPage`): "EMPIRE NEWS" mastheadi, bosh maqola (`.nlead`) va yangiliklar
   (`.nrow`) — chapda rasm, o'ngda maqola; pastda "📢 E'lonlar" (`.nad`), har post tagida havolalar (`.nlink` → `newsOpenLink`,
-  t.me → `openTelegramLink`). Bosilganda `openArticle` (`#nwv`). "‹ Orqaga" → `NEWS_BACK`. Jadval `news_posts` (kind news|ad,
+  t.me → `openTelegramLink`). Bosilganda `openArticle` (`#nwv`). Jadval `news_posts` (kind news|ad,
   title ≤120, body ≤5000, img token, links JSON ≤6 — `_news_links`: faqat https/http/tg, @kanal → t.me, pinned, active).
   Rasm `_chat_save_image(data, NEWS_MEDIA_DIR, 1600)` → `GET /app/newsimg/<32hex>.jpg`. Ownerlar: `/app/api/news/{add,update,
   delete,pin,toggle}` (`web_news_admin`), payload `news` (ownerlarga yashirinlari ham).

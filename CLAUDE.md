@@ -194,3 +194,12 @@
   `user_avatar` jadvali, `/app/api/avatar/save` (`web_avatar_save`), payload `avatar3d`/`avatar_test`/`avatar`. `avatar_enabled_for` =
   webapp_config "avatar" yoki owner; owner panel → 🌐 Web App → "🧍 3D avatar: hamma uchun ochish" (`panel:webapp_avatar`).
   Qayta yig'ish: `tools/avatar/` (README).
+- 🎲 Random juft (web app → Oila tabi yuqorisida `.rpair` karta, `drawRP`): faqat jufti yo'q va jinsi tanlangan (`user_gender`)
+  foydalanuvchilar; yigitniki tasodifiy qizga, qizniki tasodifiy yigitga (bir jinsli juftlashmaydi). `web_randpair` →
+  `randpair_candidate` (qarama-qarshi jins, `started`/`birth_confirmed`, faol juftligi yo'q, ochiq taklif yo'q, 7 kun ichida rad
+  etmagan; `ORDER BY RANDOM()`), `pair_requests` ga `random=1`, `status='proposal'` (ustun `init_webapp` migratsiyasida).
+  Nomzodga bot xabari: `user_card`/`user_card_text` (jins, yosh, pul, reyting, daraja/ball/o'yinlar, kasb, oldin ajrashganmi —
+  `pairs.status='ended'` soni, farzandlar) + mavjud `rel:proposal:yes|no` tugmalari → rozilikdan keyin odatdagidek bot egalari
+  tasdig'i. Random taklifga javob (rad/rozi) yuboruvchiga xabar qilinadi. Cheklovlar: bitta ochiq taklif, `RANDPAIR_COOLDOWN` 60 s,
+  `RANDPAIR_TTL` 24 soat (eskiradi), yetkazilmasa (bloklagan) `failed` + boshqa nomzod (`RANDPAIR_TRIES`). API
+  `/app/api/randpair/{find,cancel}`, payload `randpair` (`randpair_status`: gender/has_pair/partner/pending/cooldown).

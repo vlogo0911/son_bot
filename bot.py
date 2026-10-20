@@ -10,7 +10,7 @@ import json
 import math
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import os
 import random
 import sqlite3
@@ -4222,11 +4222,19 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not row or row[1] != uid or row[3] != "proposal":
             await q.answer("Bu taklif eskirgan.", show_alert=True)
             return
+        is_random = (c.execute("SELECT random FROM pair_requests WHERE id=?", (rid,)).fetchone() or [0])[0] \
+            if "random" in {r[1] for r in c.execute("PRAGMA table_info(pair_requests)")} else 0
         if answer == "no":
             with c:
                 c.execute("UPDATE pair_requests SET status='rejected' WHERE id=?", (rid,))
             await q.answer("Taklif rad etildi.")
             await q.edit_message_text("❌ Taklif rad etildi.")
+            if is_random:
+                try:
+                    await context.bot.send_message(row[0], f"💔 {person_name(uid)} random juftlik taklifingizni rad etdi.\n"
+                                                           "🎲 Web app → Oila bo‘limida yana random juft qidirishingiz mumkin.")
+                except TelegramError:
+                    pass
             return
         if active_pair(uid) or active_pair(row[0]):
             await q.answer("Sizlardan biri allaqachon juftlikda.", show_alert=True)
@@ -4238,6 +4246,12 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         await q.answer("Roziligingiz saqlandi.")
         await q.edit_message_text("✅ Roziligingiz saqlandi. Endi bot egalari tasdig‘i kutilmoqda.")
+        if is_random:
+            try:
+                await context.bot.send_message(row[0], f"💞 {person_name(uid)} random juftlik taklifingizga rozi bo‘ldi!\n"
+                                                       "⏳ Endi bot egalari tasdig‘i kutilmoqda.")
+            except TelegramError:
+                pass
         await notify_pair_owners(
             context.application, rid, "💞 Juftlashish arizasi"
         )
@@ -16920,6 +16934,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_birja_buy(uid, body.get("asset"), body.get("usd"))
         elif path == "/app/api/birja/sell":
             coro = web_birja_sell(uid, body.get("asset"), body.get("pct"))
+        elif path == "/app/api/randpair/find":
+            coro = web_randpair(uid)
+        elif path == "/app/api/randpair/cancel":
+            coro = web_randpair_cancel(uid)
         elif path == "/app/api/avatar/save":
             coro = web_avatar_save(uid, body.get("avatar"))
         elif path == "/app/api/kid/outfit":
@@ -17856,6 +17874,9 @@ def init_webapp():
     with db() as c:
         c.execute("CREATE TABLE IF NOT EXISTS webapp_config (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
         c.execute("CREATE TABLE IF NOT EXISTS user_avatar (user_id INTEGER PRIMARY KEY, data TEXT NOT NULL DEFAULT '{}')")
+        cols = {r[1] for r in c.execute("PRAGMA table_info(pair_requests)")}
+        if cols and "random" not in cols:     # 🎲 random juft so'rovlari belgisi
+            c.execute("ALTER TABLE pair_requests ADD COLUMN random INTEGER NOT NULL DEFAULT 0")
 
 
 # ── 🧍 Realistik 3D avatar (web app) — test: standart faqat ownerlar ──
@@ -17875,6 +17896,175 @@ def avatar_get(uid):
         return {k: v for k, v in d.items() if k in AVATAR_SLOTS and isinstance(v, str)}
     except (ValueError, TypeError):
         return {}
+
+
+# ── 🎲 Random juft (web app → Oila): faqat jufti yo'qlar, faqat qarama-qarshi jins ──
+RANDPAIR_COOLDOWN = 60          # s — ketma-ket qidirishlar orasidagi minimal vaqt
+RANDPAIR_TTL = 24 * 3600        # s — javobsiz random taklif shundan keyin eskiradi
+RANDPAIR_REJECT_DAYS = 7        # rad etgan odamga shu muddat ichida qayta tushmaydi
+RANDPAIR_TRIES = 3              # yetkazib bo'lmasa (botni bloklagan) — boshqa nomzod
+
+
+def _iso_ago(sec):
+    return (datetime.now() - timedelta(seconds=sec)).isoformat(timespec="seconds")
+
+
+def user_card(uid):
+    """Juftlik so'rovidagi ma'lumot kartasi: pul, reyting, daraja, kasb, yosh, ajrashganlik, farzandlar."""
+    c = db()
+    row = c.execute("SELECT first_name, username, birth_date, profession_id FROM users WHERE user_id=?", (uid,)).fetchone()
+    name = (row[0] if row else None) or (row[1] if row else None) or str(uid)
+    age = None
+    if row and row[2]:
+        try:
+            b = date.fromisoformat(row[2]); t = date.today()
+            age = t.year - b.year - ((t.month, t.day) < (b.month, b.day))
+        except (ValueError, TypeError):
+            age = None
+    money = wallet_balance(uid)
+    owners = tuple(CAREER_OWNER_IDS)
+    marks = ",".join("?" * len(owners)) or "NULL"
+    rank = None if uid in CAREER_OWNER_IDS else c.execute(
+        f"SELECT COUNT(*)+1 FROM user_wallet WHERE money > ? AND user_id NOT IN ({marks})", (money, *owners)).fetchone()[0]
+    points, games, wins, _l, _d = get_stats(None, uid, True)
+    pid = row[3] if row else None
+    divorces = c.execute("SELECT COUNT(*) FROM pairs WHERE status='ended' AND (user1_id=? OR user2_id=?)",
+                         (uid, uid)).fetchone()[0]
+    kids = c.execute("SELECT COUNT(*) FROM family_children WHERE parent1_id=? OR parent2_id=?", (uid, uid)).fetchone()[0]
+    return {"id": uid, "name": name, "username": row[1] if row else None, "gender": parent_role(uid), "age": age,
+            "money": money, "money_fmt": fmt_money(money), "rank": rank, "level": level_name(None, points),
+            "points": points, "games": games, "wins": wins,
+            "profession": profession_name(pid, uid) if pid in PROFESSION_NAMES else None,
+            "divorces": divorces, "kids": kids}
+
+
+def user_card_text(card):
+    g = {"male": "👦 Yigit", "female": "👧 Qiz"}.get(card["gender"], "—")
+    lines = ["👤 <b>Taklif qiluvchi haqida:</b>", f"⚧ Jinsi: <b>{g}</b>"]
+    if card["age"] is not None:
+        lines.append(f"🎂 Yoshi: <b>{card['age']}</b>")
+    lines += [f"💰 Puli: <b>{card['money_fmt']}$</b>",
+              f"🏆 Reytingi: <b>{'#' + str(card['rank']) if card['rank'] else '👑 Bot egasi'}</b>",
+              f"⭐ Darajasi: <b>{html.escape(str(card['level']))}</b> · 📈 {card['points']} ball · "
+              f"🎮 {card['games']} o‘yin (✅ {card['wins']})",
+              f"💼 Kasbi: <b>{html.escape(card['profession']) if card['profession'] else 'yo‘q'}</b>",
+              "💔 Oldin ajrashgan: " + (f"<b>Ha, {card['divorces']} marta</b>" if card["divorces"] else "<b>Yo‘q</b>")]
+    if card["kids"]:
+        lines.append(f"👶 Farzandlari: <b>{card['kids']}</b>")
+    return "\n".join(lines)
+
+
+def randpair_open(uid):
+    """Foydalanuvchining javob kutayotgan random taklifi (eskirganlari 'expired' bo'ladi)."""
+    c = db()
+    with c:
+        c.execute("""UPDATE pair_requests SET status='expired' WHERE random=1 AND status='proposal'
+                     AND requester_id=? AND created_at < ?""", (uid, _iso_ago(RANDPAIR_TTL)))
+    return c.execute("""SELECT id, target_id, created_at FROM pair_requests
+                        WHERE random=1 AND status='proposal' AND requester_id=? ORDER BY id DESC LIMIT 1""",
+                     (uid,)).fetchone()
+
+
+def randpair_candidate(uid, want, skip=()):
+    owners = tuple(skip)
+    extra = (" AND u.user_id NOT IN (" + ",".join("?" * len(owners)) + ")") if owners else ""
+    row = db().execute(
+        f"""SELECT u.user_id FROM users u JOIN user_gender g ON g.user_id=u.user_id
+            WHERE g.gender=? AND u.user_id<>? AND (u.started=1 OR u.birth_confirmed=1)
+              AND NOT EXISTS (SELECT 1 FROM pairs p WHERE p.status='active' AND (p.user1_id=u.user_id OR p.user2_id=u.user_id))
+              AND NOT EXISTS (SELECT 1 FROM pair_requests r WHERE r.request_type='pair'
+                    AND ((r.requester_id=? AND r.target_id=u.user_id) OR (r.requester_id=u.user_id AND r.target_id=?))
+                    AND (r.status IN ('proposal','pending') OR (r.status='rejected' AND r.created_at > ?))){extra}
+            ORDER BY RANDOM() LIMIT 1""",
+        (want, uid, uid, uid, _iso_ago(RANDPAIR_REJECT_DAYS * 86400), *owners)).fetchone()
+    return row[0] if row else None
+
+
+def randpair_status(uid):
+    g = parent_role(uid)
+    pair = active_pair(uid)
+    st = {"gender": g, "has_pair": bool(pair), "partner": None, "pending": None, "cooldown": 0}
+    if pair:
+        st["partner"] = _plain_person(pair[2] if pair[1] == uid else pair[1])
+        return st
+    op = randpair_open(uid)
+    if op:
+        st["pending"] = {"id": op[0], "name": _plain_person(op[1]), "at": tashkent_dt(int(datetime.fromisoformat(op[2]).timestamp()))}
+    last = db().execute("SELECT MAX(created_at) FROM pair_requests WHERE random=1 AND requester_id=?", (uid,)).fetchone()[0]
+    if last:
+        try:
+            st["cooldown"] = max(0, RANDPAIR_COOLDOWN - int((datetime.now() - datetime.fromisoformat(last)).total_seconds()))
+        except ValueError:
+            pass
+    return st
+
+
+def _plain_person(uid):
+    row = db().execute("SELECT first_name, username FROM users WHERE user_id=?", (uid,)).fetchone()
+    return (row[0] if row else None) or (row[1] if row else None) or str(uid)
+
+
+async def web_randpair(uid):
+    """Tasodifiy qarama-qarshi jinsli, jufti yo'q foydalanuvchiga juftlik taklifi (ma'lumot kartasi bilan)."""
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    me = parent_role(uid)
+    if me not in ("male", "female"):
+        return {"error": "no_gender"}
+    if active_pair(uid):
+        return {"error": "has_pair"}
+    if randpair_open(uid):
+        return {"error": "waiting", "status": randpair_status(uid)}
+    cd = randpair_status(uid)["cooldown"]
+    if cd:
+        return {"error": "cooldown", "wait": cd}
+    bot = _EXCHANGE_LOOP_BOT
+    if bot is None:
+        return {"error": "bot"}
+    want = "female" if me == "male" else "male"
+    card = user_card(uid)
+    tried = []
+    for _ in range(RANDPAIR_TRIES):
+        tid = randpair_candidate(uid, want, tried)
+        if not tid:
+            break
+        tried.append(tid)
+        now = datetime.now().isoformat(timespec="seconds")
+        c = db()
+        with c:
+            rid = c.execute("""INSERT INTO pair_requests (request_type, requester_id, target_id, group_id, status, created_at, random)
+                               VALUES ('pair', ?, ?, 0, 'proposal', ?, 1)""", (uid, tid, now)).lastrowid
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("💞 Roziman", callback_data=f"rel:proposal:yes:{rid}"),
+            InlineKeyboardButton("❌ Rad etish", callback_data=f"rel:proposal:no:{rid}"),
+        ]])
+        try:
+            await bot.send_message(
+                chat_id=tid,
+                text="🎲 <b>Random juftlik taklifi!</b>\n"
+                     f"{person_name(uid)} sizga juft bo‘lishni taklif qildi.\n\n" + user_card_text(card)
+                     + "\n\nRozimisiz? Rozilikdan so‘ng juftlik bot egalari tasdig‘idan keyin tuziladi.",
+                reply_markup=kb)
+        except TelegramError as e:
+            logger.info("Random juft taklifi yetkazilmadi (%s): %s", tid, e)
+            with c:
+                c.execute("UPDATE pair_requests SET status='failed' WHERE id=?", (rid,))
+            continue
+        tc = user_card(tid)
+        return {"result": "sent", "target": {"name": tc["name"], "gender": tc["gender"], "age": tc["age"],
+                                             "level": tc["level"], "profession": tc["profession"]},
+                "status": randpair_status(uid)}
+    return {"error": "none"}
+
+
+async def web_randpair_cancel(uid):
+    op = randpair_open(uid)
+    if not op:
+        return {"error": "no_request"}
+    c = db()
+    with c:
+        c.execute("UPDATE pair_requests SET status='cancelled' WHERE id=? AND status='proposal'", (op[0],))
+    return {"result": "cancelled", "status": randpair_status(uid)}
 
 
 async def web_avatar_save(uid, data):
@@ -18071,6 +18261,7 @@ async def webapp_payload(user_id):
         "avatar3d": avatar_enabled_for(user_id),
         "avatar_test": not webapp_flags().get("avatar", 0),
         "avatar": avatar_get(user_id),
+        "randpair": randpair_status(user_id),
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -19298,6 +19489,10 @@ WEBAPP_HTML = r"""<!doctype html>
   .avg span.on{background:var(--g-metal);color:#2b1b02;box-shadow:0 0 14px rgba(255,210,74,.6)}
   .avtest{font-size:10px;padding:2px 7px;border-radius:8px;background:#ff4d6d;color:#fff;vertical-align:middle;letter-spacing:.06em}
   #astZ.on{background:var(--g-metal);color:#2b1b02}
+  .rpair{margin-bottom:14px;background:linear-gradient(150deg,rgba(255,92,138,.16),rgba(255,210,74,.08))}
+  .rpair .rph{display:flex;align-items:center;gap:12px}
+  .rpair .rpi{width:48px;height:48px;flex:none;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:26px;background:var(--g-metal);box-shadow:0 0 16px rgba(255,210,74,.45)}
+  .rpair .rpok,.rpair .rpw{margin-top:10px;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.25);line-height:1.45}
   .avcard{display:flex;align-items:center;gap:14px;margin-top:12px;cursor:pointer}
   .avcard .avi{width:56px;height:56px;flex:none;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:30px;background:var(--g-metal);box-shadow:0 0 18px rgba(255,210,74,.45)}
   .kpar{margin-top:8px;font-size:12px;font-weight:700;color:rgba(255,255,255,.92)}
@@ -19499,6 +19694,36 @@ function render(res){
 
   // FARZAND — har yosh bosqichiga alohida dizayn + ta'lim yo'li
   const fz=$('<div class="sec" id="s-farzand"></div>');
+  // 🎲 RANDOM JUFT: jufti yo'qlar uchun — yigitniki tasodifiy qizga, qizniki tasodifiy yigitga
+  const rpBox=$('<div class="card full rpair"></div>'); fz.appendChild(rpBox);
+  const RPERR={no_gender:'⚧ Avval botda jinsingizni tanlang (/start)',has_pair:'💞 Sizda allaqachon juft bor',
+    waiting:'⏳ Oldingi taklifga javob kutilmoqda',none:'😔 Hozircha mos nomzod topilmadi, keyinroq urinib ko‘ring',
+    disabled:'🌐 Web app o‘chirilgan',bot:'⚠️ Bot hozir band, qayta urining',no_request:'Taklif topilmadi'};
+  let rpT=0;
+  function drawRP(st){
+    clearInterval(rpT); st=st||{};
+    let h='<div class="rph"><span class="rpi">🎲</span><div><div class="lbl">Random juft</div>'+
+      '<div class="hsub">'+(st.gender==='male'?'👦 Siz — yigit · taklif tasodifiy qizga boradi':st.gender==='female'?'👧 Siz — qiz · taklif tasodifiy yigitga boradi':'Jins tanlanmagan')+'</div></div></div>';
+    if(st.has_pair) h+='<div class="rpok">💞 Juftingiz: <b>'+esc(st.partner)+'</b></div>';
+    else if(!st.gender) h+='<div class="hsub" style="margin-top:8px">Avval botda /start bosib jinsingizni tanlang.</div>';
+    else if(st.pending) h+='<div class="rpw">⏳ <b>'+esc(st.pending.name)+'</b> javobini kutyapsiz<br><span class="hsub">Yuborildi: '+esc(st.pending.at)+'</span></div>'+
+      '<button class="btn full" id="rpCancel" style="margin-top:10px">✖️ Taklifni bekor qilish</button>';
+    else h+='<div class="hsub" style="margin-top:8px">Taklif bilan birga pulingiz, reytingingiz, darajangiz, kasbingiz va oilaviy tarixingiz ko‘rsatiladi. Rozi bo‘lsa — bot egalari tasdig‘idan keyin juft bo‘lasiz.</div>'+
+      '<button class="btn go full" id="rpFind" style="margin-top:10px">🎲 Random juft topish</button>';
+    rpBox.innerHTML=h;
+    const f=app_q(rpBox,'#rpFind'), cn=app_q(rpBox,'#rpCancel');
+    if(f){ let cd=st.cooldown||0;
+      const tick=()=>{ if(cd>0){ f.disabled=true; f.textContent='⏳ '+cd+' s dan keyin'; cd--; } else { f.disabled=false; f.textContent='🎲 Random juft topish'; clearInterval(rpT); } };
+      tick(); if(cd>0) rpT=setInterval(tick,1000);
+      f.onclick=()=>{ f.disabled=true; f.textContent='🔎 Qidirilmoqda…';
+        api('/app/api/randpair/find',{}).then(r=>{
+          if(r.result==='sent'){ const t=r.target||{};
+            toast('💌 Taklif '+(t.gender==='female'?'👧 ':'👦 ')+t.name+' ga yuborildi'); haptic('success'); d.randpair=r.status; drawRP(r.status); }
+          else { toast(r.error==='cooldown'?('⏳ '+r.wait+' s kuting'):(RPERR[r.error]||'⚠️ Xatolik')); drawRP(r.status||st); }
+        }).catch(()=>{ toast('⚠️ Aloqa xatosi'); drawRP(st); }); }; }
+    if(cn) cn.onclick=()=>api('/app/api/randpair/cancel',{}).then(r=>{ if(r.result){ toast('✖️ Taklif bekor qilindi'); d.randpair=r.status; drawRP(r.status); } else toast(RPERR[r.error]||'⚠️ Xatolik'); });
+  }
+  drawRP(d.randpair);
   fz.appendChild($('<h2>👶 Farzandlar</h2>'));
   const KS={ // bosqich: [o'g'il emoji, qiz emoji, aksessuar, nomi, yosh oralig'i]
     baby:['👶','👶','🍼','Chaqaloq','0–2'], kinder:['👦','👧','🧸','Bog‘cha','3–6'], school:['🙋‍♂️','🙋‍♀️','🎒','Maktab','7–15'],

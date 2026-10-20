@@ -17857,7 +17857,7 @@ def init_webapp():
 
 
 # ── 🧍 Realistik 3D avatar (web app) — test: standart faqat ownerlar ──
-AVATAR_SLOTS = ("g", "top", "bottom", "shoes", "hair", "skin", "bg")
+AVATAR_SLOTS = ("g", "outfit", "shoes", "hat", "hair", "hcol", "skin", "bg")
 
 
 def avatar_enabled_for(uid):
@@ -18801,8 +18801,13 @@ async def web_edu_admin(uid, act, body):
 
 # Kazino bannerlari (faqat shu ro'yxatdagi fayllar uzatiladi)
 WEBAPP_ASSETS = {"crash.jpg": "image/jpeg", "hovuz.jpg": "image/jpeg", "kamikaze.jpg": "image/jpeg",
-                 # 3D avatarlar: Innerscene CC0 (MakeHuman CC0 asosida), meshopt + WebP bilan siqilgan
-                 "avatar_m.glb": "model/gltf-binary", "avatar_f.glb": "model/gltf-binary"}
+                 }
+# 🧍 3D avatar: MakeHuman CC0 tana/kiyim/soch (skeletli) + CMU mocap harakatlar — av_*.glb (meshopt + WebP)
+try:
+    WEBAPP_ASSETS.update({n: "model/gltf-binary" for n in os.listdir(os.path.join(BASE_DIR, "webapp_assets"))
+                          if n.startswith("av_") and n.endswith(".glb")})
+except OSError:
+    pass
 
 WEBAPP_HTML = r"""<!doctype html>
 <html lang="uz">
@@ -19259,6 +19264,13 @@ WEBAPP_HTML = r"""<!doctype html>
   .asw{display:block;width:18px;height:18px;border-radius:50%;margin-top:3px;box-shadow:inset 0 0 0 2px rgba(255,255,255,.75),0 1px 4px rgba(0,0,0,.5)}
   .asw.big{width:30px;height:30px;margin:0 auto}
   .kslot .asw{position:absolute;right:5px;top:5px;width:14px;height:14px;margin:0}
+  .kslot .kv{position:absolute;right:3px;top:2px;font-size:14px}
+  .avbusy{position:absolute;left:50%;top:12px;transform:translateX(-50%);display:none;align-items:center;justify-content:center;width:34px;height:34px;border-radius:50%;background:rgba(0,0,0,.45);font-size:16px}
+  .kst-opts.emo{display:grid;grid-auto-flow:column;grid-template-rows:repeat(2,auto);grid-auto-columns:64px;gap:8px;overflow-x:auto}
+  .kst-opts.emo .kopt{width:64px}
+  .kst-in.st-av .kst-rot{gap:8px}.kst-in.st-av .kst-rot b{min-width:84px;font-size:12px}.kst-in.st-av .kst-rot span{width:38px;height:38px;font-size:19px}
+  .kst-rot .ave{background:var(--g-metal);color:#2b1b02;box-shadow:0 0 16px rgba(255,210,74,.6)}
+  .kst-rot span.on{box-shadow:inset 0 0 0 2px #ffd24a,0 0 14px rgba(255,210,74,.7)}
   .kst-in.st-av .kslot{position:relative}
   .avg{display:flex;gap:8px;justify-content:center;padding:2px 0 4px}
   .avg span{padding:7px 16px;border-radius:999px;font-size:13px;font-weight:800;color:#fff;cursor:pointer;background:rgba(0,0,0,.35);box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
@@ -20107,7 +20119,7 @@ function openKidStudio(k){
     .catch(()=>{ document.getElementById('kstLoad').textContent='⚠️ 3D yuklanmadi. Internetni tekshiring.'; });
 }
 
-// ---- 🧍 Realistik 3D avatar (glTF, PBR, HDR yoritish) — test: faqat ownerlar ----
+// ---- 🧍 Realistik 3D avatar: skeletli (MakeHuman cmu_mb), almashtiriladigan kiyimlar, mocap harakatlar — test: ownerlar ----
 const AV3D=(function(){
   const EX='https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/';
   let ld=null;
@@ -20117,36 +20129,68 @@ const AV3D=(function(){
       window.MeshoptDecoder?0:sc(EX+'libs/meshopt_decoder.js'), THREE.RoomEnvironment?0:sc(EX+'environments/RoomEnvironment.js')]))
       .catch(e=>{ ld=null; throw e; });
     return ld; }
-  // rang: [kalit, nomi, namuna, ton(°), to'yinganlik, yorqinlik]
-  const CLOTH=[['orig','Asl','linear-gradient(135deg,#6b7280,#2563eb)'],['black','Qora','#15161a',220,.06,.09],['white','Oq','#f1f1ee',40,.06,.86],
-    ['navy','To‘q ko‘k','#1d2f5e',222,.5,.2],['red','Qizil','#b3172b',353,.72,.34],['gold','Oltin','#d4a62a',43,.7,.5],
-    ['green','Yashil','#2f6b48',148,.4,.3],['purple','Binafsha','#5b2d86',275,.48,.33],['beige','Bej','#cdb38f',35,.35,.68],['gray','Kulrang','#7b7d82',220,.04,.5]];
+  const MO=['male_casualsuit01','male_casualsuit02','male_casualsuit03','male_casualsuit04','male_casualsuit05','male_casualsuit06','male_elegantsuit01','male_worksuit01'];
+  const FO=['female_casualsuit01','female_casualsuit02','female_elegantsuit01','female_sportsuit01'];
+  const SH=['shoes01','shoes02','shoes03','shoes04','shoes05','shoes06'];
+  const BIT={}; MO.concat(FO,SH).forEach((n,i)=>BIT[n]=i);       // tanani yashirish bitlari (build.py tartibi)
+  const NM={male_casualsuit01:['Ko‘k ko‘ylak','👔'],male_casualsuit02:['Logo futbolka','👕'],male_casualsuit03:['Chiziqli ko‘ylak','👔'],
+    male_casualsuit04:['Futbolka + jinsi','👕'],male_casualsuit05:['Kurtka + jinsi','🧥'],male_casualsuit06:['Oq futbolka','👕'],
+    male_elegantsuit01:['Klassik kostyum','🤵'],male_worksuit01:['Kombinezon','👷'],female_casualsuit01:['Futbolka + jinsi','👚'],
+    female_casualsuit02:['Futbolka + shorti','🩳'],female_elegantsuit01:['Ofis uslubi','👗'],female_sportsuit01:['Sport kostyum','🏃‍♀️'],
+    shoes01:['Jigarrang tufli','👞'],shoes02:['Krossovka','👟'],shoes03:['Etik','🥾'],shoes04:['Qora tufli','👞'],shoes05:['Oq krossovka','👟'],shoes06:['Ko‘k krossovka','👟'],
+    none:['Yo‘q','🚫'],fedora01:['Fedora','🎩'],fedora_cocked:['Qiyshiq fedora','🎩'],
+    afro01:['Afro','🧑‍🦱'],bob01:['Bob','💇'],bob02:['Oq bob','💇‍♀️'],braid01:['O‘rim','👩'],long01:['Uzun','👱‍♀️'],ponytail01:['Dumcha','👧'],
+    short01:['Qisqa 1','💇‍♂️'],short02:['Qisqa 2','💇‍♂️'],short03:['Qisqa 3','💇‍♂️'],short04:['Qisqa 4','💇‍♂️']};
+  const HAIRS=['short01','short02','short03','short04','afro01','bob01','bob02','braid01','long01','ponytail01'];
+  const it=k=>[k,NM[k][0],NM[k][1]];
   const CAT={
-    top:{n:'Ustki kiyim',ic:'🧥',o:CLOTH},
-    bottom:{n:'Shim',ic:'👖',o:CLOTH},
-    shoes:{n:'Oyoq kiyim',ic:'👟',o:[CLOTH[0],CLOTH[1],CLOTH[2],['brown','Jigarrang','#6b3f1f',24,.5,.25],CLOTH[4],CLOTH[5],CLOTH[3]]},
-    hair:{n:'Soch',ic:'💇',o:[['orig','Asl','#3b2a1e'],['black','Qora','#0f0d0c',25,.15,.07],['brown','Jigarrang','#4a2c17',24,.45,.2],
+    outfit:{n:'Kiyim',ic:'👕',o:g=>(g==='f'?FO.concat(['male_casualsuit02','male_casualsuit04','male_casualsuit06','male_worksuit01']):MO).map(it)},
+    shoes:{n:'Poyabzal',ic:'👟',o:()=>SH.map(it)},
+    hat:{n:'Shlyapa',ic:'🎩',o:()=>['none','fedora01','fedora_cocked'].map(it)},
+    hair:{n:'Soch',ic:'💇',o:g=>(g==='f'?['ponytail01','long01','bob01','bob02','braid01','afro01','short02','short04']:HAIRS).map(it)},
+    hcol:{n:'Soch rangi',ic:'🎨',sw:1,o:()=>[['orig','Asl','#3b2a1e'],['black','Qora','#0f0d0c',25,.15,.07],['brown','Jigarrang','#4a2c17',24,.45,.2],
       ['chest','Kashtan','#6e3518',16,.6,.27],['blonde','Sariq','#d9b26a',40,.55,.58],['red','Malla','#a3401d',14,.68,.36],['gray','Oq-kul','#b9b9b9',30,.04,.66]]},
-    skin:{n:'Teri rangi',ic:'🖐',o:[['orig','Asl','#e9c4a6'],['light','Oqish','#f3d6c4',[1.05,1.0,.98]],['wheat','Bug‘doy','#d3a47c',[.88,.7,.56]],
+    skin:{n:'Teri rangi',ic:'🖐',sw:1,o:()=>[['orig','Asl','#e9c4a6'],['light','Oqish','#f3d6c4',[1.05,1.0,.98]],['wheat','Bug‘doy','#d3a47c',[.88,.7,.56]],
       ['tan','Qoramtir','#a8764f',[.76,.58,.45]],['dark','Qora','#5e3b27',[.48,.34,.27]]]},
-    bg:{n:'Fon',ic:'🏛',o:[['gold','Oltin zal','radial-gradient(#7a5a1c,#1a1206)'],['night','Tungi shahar','radial-gradient(#26407a,#05070f)'],
+    bg:{n:'Fon',ic:'🏛',sw:1,o:()=>[['gold','Oltin zal','radial-gradient(#7a5a1c,#1a1206)'],['night','Tungi shahar','radial-gradient(#26407a,#05070f)'],
       ['studio','Studiya','radial-gradient(#9a9a9a,#2a2a2a)'],['sunset','Shafaq','radial-gradient(#f2994a,#5b1d3a)'],['emerald','Zumrad','radial-gradient(#1f7a5a,#04150f)']]}
   };
-  const DEF={g:'m',top:'orig',bottom:'orig',shoes:'orig',hair:'orig',skin:'orig',bg:'gold'};
-  const fit=a=>{ const o={}; for(const k in DEF){ const v=(a||{})[k]; o[k]=(k==='g'?(v==='f'?'f':'m'):(CAT[k].o.some(x=>x[0]===v)?v:DEF[k])); } return o; };
-  const opt=(s,v)=>CAT[s].o.find(x=>x[0]===v)||CAT[s].o[0];
-  // HSL yordamchilari
+  // PUBG lobbisidagidek harakatlar (CMU mocap → MakeHuman skeleti)
+  const EMOTES=[['wave','👋','Salom'],['dance','💃','Raqs'],['salsa','🌶','Salsa'],['chicken','🐔','Tovuq raqsi'],['moonwalk','🌙','Moonwalk'],
+    ['break','🤸','Breyk-dans'],['kazachok','🪗','Kazachok'],['party','🎉','Bayram'],['flex','💪','Kuch'],['happy','🥳','Xursand'],
+    ['laugh','😂','Kulgi'],['cry','😭','Yig‘i'],['sad','😔','Xafa'],['boxing','🥊','Boks'],['kick','🦵','Zarba'],['backflip','🔄','Salto'],
+    ['cartwheel','🤸‍♀️','G‘ildirak'],['jacks','⭐','Sakrash'],['bow','🙇','Ta‘zim'],['shrug','🤷','Bilmadim'],['taichi','🧘','Tay-chi']];
+  const DEF={m:{outfit:'male_casualsuit04',shoes:'shoes02',hat:'none',hair:'short02'},f:{outfit:'female_casualsuit01',shoes:'shoes05',hat:'none',hair:'ponytail01'}};
+  const opts=(s,g)=>CAT[s].o(g);
+  const opt=(s,v,g)=>opts(s,g).find(x=>x[0]===v)||opts(s,g)[0];
+  function fit(a){ a=a||{}; const g=a.g==='f'?'f':'m', o={g};
+    for(const s in CAT){ const v=a[s], ok=opts(s,g).some(x=>x[0]===v); o[s]=ok?v:(DEF[g][s]||opts(s,g)[0][0]); } return o; }
   function hsl(r,g,b){ const mx=Math.max(r,g,b), mn=Math.min(r,g,b), l=(mx+mn)/2; let h=0,s=0;
     if(mx!==mn){ const d=mx-mn; s=l>.5?d/(2-mx-mn):d/(mx+mn); h=mx===r?(g-b)/d+(g<b?6:0):mx===g?(b-r)/d+2:(r-g)/d+4; h*=60; } return [h,s,l]; }
   function rgb(h,s,l){ const k=n=>(n+h/30)%12, a=s*Math.min(l,1-l), f=n=>l-a*Math.max(-1,Math.min(k(n)-3,9-k(n),1)); return [f(0),f(8),f(4)]; }
-  // kiyim teksturasidagi qism maskalari (model + slot)
-  const MASK={
-    m:{top:(h,s,l)=>!(h>185&&h<255&&s>.12)&&s<.38&&l<.62, bottom:(h,s,l)=>h>185&&h<255&&s>.12},
-    f:{top:(h,s,l)=>h>195&&h<250&&s>.28, bottom:(h,s,l)=>l<.3&&s<.3}
-  };
-  const all=()=>true;
-  let R=null,S=null,CAM=null,cvs=null,raf=0,cur=null,curG=null,rot=0,tRot=0,zoom=0,tZoom=0,t0=0;
-  const MODELS={}, TEX=new Map();
+  const TEX=new Map();
+  function recolor(mt,op){   // teksturani qayta bo'yash: ton/to'yinganlik almashadi, yorug'lik detali qoladi
+    if(!mt.map) return;
+    let t=TEX.get(mt);
+    if(op[3]==null){ if(t){ mt.map=t.src; mt.needsUpdate=true; } return; }
+    if(!t){ const img=mt.map.image, c=document.createElement('canvas'); c.width=img.width; c.height=img.height;
+      const x=c.getContext('2d'); x.drawImage(img,0,0); const ct=new THREE.CanvasTexture(c); ct.flipY=mt.map.flipY; ct.encoding=THREE.sRGBEncoding;
+      t={c,x,orig:x.getImageData(0,0,c.width,c.height),ct,src:mt.map,key:''}; TEX.set(mt,t); }
+    if(t.key!==op[0]){ const o=t.orig.data, out=new ImageData(new Uint8ClampedArray(o),t.orig.width,t.orig.height), d=out.data;
+      let sum=0,cnt=0; for(let i=0;i<o.length;i+=4){ if(o[i+3]<8) continue; sum+=hsl(o[i]/255,o[i+1]/255,o[i+2]/255)[2]; cnt++; }
+      const mean=cnt?sum/cnt:.5;
+      for(let i=0;i<o.length;i+=4){ if(o[i+3]<8) continue; const l=hsl(o[i]/255,o[i+1]/255,o[i+2]/255)[2];
+        const c=rgb(op[3],op[4],Math.max(.02,Math.min(.97,op[5]+(l-mean)*.9))); d[i]=c[0]*255; d[i+1]=c[1]*255; d[i+2]=c[2]*255; }
+      t.x.putImageData(out,0,0); t.ct.needsUpdate=true; t.key=op[0]; }
+    mt.map=t.ct; mt.needsUpdate=true;
+  }
+  let R=null,S=null,CAM=null,cvs=null,raf=0,rot=0,tRot=0,zoom=0,tZoom=0,last=0,lw=0,lh=0,holder=null,cur=null,busy=null;
+  const BASES={}, ITEMS={}, ANIMS={}, gl=()=>{ const L=new THREE.GLTFLoader(); L.setMeshoptDecoder(MeshoptDecoder); return L; };
+  const get=u=>new Promise((ok,bad)=>gl().load(u,ok,undefined,bad));
+  function fixMat(o){ const m=o.material, n=(m.name||'').toLowerCase(); o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false;
+    if(/eyebrow|eyelash/.test(n)||HAIRS.some(h=>n.indexOf(h)>=0)){ m.transparent=false; m.alphaTest=.5; m.side=THREE.DoubleSide; }
+    else { m.transparent=false; m.alphaTest=0; }
+    m.depthWrite=true; if(/body/.test(n)) m.roughness=.55; if(/low-poly|eye/.test(n)&&!/brow|lash/.test(n)) m.roughness=.08; m.needsUpdate=true; }
   function init(canvas){
     cvs=canvas; lw=lh=0; R=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});
     R.setPixelRatio(Math.min(2,window.devicePixelRatio||1)); R.outputEncoding=THREE.sRGBEncoding;
@@ -20154,95 +20198,109 @@ const AV3D=(function(){
     R.shadowMap.enabled=true; R.shadowMap.type=THREE.PCFSoftShadowMap;
     S=new THREE.Scene(); const pm=new THREE.PMREMGenerator(R); S.environment=pm.fromScene(new THREE.RoomEnvironment(),.04).texture; pm.dispose();
     const key=new THREE.DirectionalLight(0xfff1e0,2.3); key.position.set(2,4,3); key.castShadow=true; key.shadow.mapSize.set(2048,2048);
-    Object.assign(key.shadow.camera,{left:-1,right:1,top:2.1,bottom:-.2}); key.shadow.bias=-.0005; key.shadow.radius=4; S.add(key);
+    Object.assign(key.shadow.camera,{left:-1.6,right:1.6,top:2.3,bottom:-.4}); key.shadow.bias=-.0005; key.shadow.radius=4; S.add(key);
     const rim=new THREE.DirectionalLight(0xffd59a,1.7); rim.position.set(-3,2.6,-3); S.add(rim);
-    const fill=new THREE.DirectionalLight(0xbcd2ff,.5); fill.position.set(-3,1.5,2.5); S.add(fill);
-    // oltin hoshiyali poydevor
+    const fill=new THREE.DirectionalLight(0xbcd2ff,.6); fill.position.set(-3,1.5,2.5); S.add(fill);
     const gold=new THREE.MeshStandardMaterial({color:0xd4a33b,metalness:1,roughness:.28});
-    const base=new THREE.Mesh(new THREE.CylinderGeometry(.62,.66,.08,72),new THREE.MeshStandardMaterial({color:0x17130d,metalness:.4,roughness:.35}));
+    const base=new THREE.Mesh(new THREE.CylinderGeometry(.9,.95,.08,72),new THREE.MeshStandardMaterial({color:0x17130d,metalness:.4,roughness:.35}));
     base.position.y=-.04; base.receiveShadow=true; S.add(base);
-    const ring=new THREE.Mesh(new THREE.TorusGeometry(.645,.016,12,96),gold); ring.rotation.x=Math.PI/2; ring.position.y=-.002; S.add(ring);
+    const ring=new THREE.Mesh(new THREE.TorusGeometry(.93,.018,12,96),gold); ring.rotation.x=Math.PI/2; ring.position.y=-.002; S.add(ring);
+    holder=new THREE.Group(); S.add(holder);
     CAM=new THREE.PerspectiveCamera(28,1,.05,50);
   }
-  let lw=0,lh=0;
   function size(){ const w=cvs.clientWidth||300, h=cvs.clientHeight||400; if(w===lw&&h===lh) return; lw=w; lh=h; R.setSize(w,h,false); CAM.aspect=w/h; CAM.updateProjectionMatrix(); }
-  function getModel(g){
-    if(MODELS[g]) return MODELS[g];
-    return MODELS[g]=new Promise((ok,bad)=>{ const L=new THREE.GLTFLoader(); L.setMeshoptDecoder(MeshoptDecoder);
-      L.load('/app/a/avatar_'+g+'.glb',gl=>{ const m=gl.scene;
-        m.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; const mt=o.material;
-          if(/skin/.test(mt.name)){ mt.roughness=.55; } if(/eyes/.test(mt.name)){ mt.roughness=.05; mt.alphaTest=.5; mt.needsUpdate=true; } } });   // shox parda (alfa≈0) iris'ni yopmasin
-        const bb=new THREE.Box3().setFromObject(m), h=bb.max.y-bb.min.y, k=1.75/h; m.scale.setScalar(k); m.position.y=-bb.min.y*k;
-        const c=new THREE.Box3().setFromObject(m).getCenter(new THREE.Vector3()); m.position.x-=c.x; m.position.z-=c.z;
-        const g2=new THREE.Group(); g2.add(m); ok(g2); },undefined,e=>{ delete MODELS[g]; bad(e); }); });
+  async function base(g){
+    if(!BASES[g]) BASES[g]=get('/app/a/av_base_'+g+'.glb').then(x=>{ const root=x.scene, bones={}; let body=null;
+      root.traverse(o=>{ if(o.isBone) bones[o.name]=o; if(o.isMesh){ fixMat(o); if(o.geometry.attributes._hide) body=o; } });
+      return {g,root,bones,body,idx:body?body.geometry.index.array.slice():null,slots:{},mixer:new THREE.AnimationMixer(root),act:null,idle:null}; })
+      .catch(e=>{ delete BASES[g]; throw e; });
+    return BASES[g];
   }
-  // teksturani qayta bo'yash: asl piksellar saqlanadi, mask bo'yicha ton/to'yinganlik almashadi, detal (yorug'lik farqi) qoladi
-  function texOf(mt){
-    let t=TEX.get(mt); if(t) return t;
-    const img=mt.map.image, c=document.createElement('canvas'); c.width=img.width; c.height=img.height;
-    const x=c.getContext('2d'); x.drawImage(img,0,0); const orig=x.getImageData(0,0,c.width,c.height);
-    const ct=new THREE.CanvasTexture(c); ct.flipY=mt.map.flipY; ct.encoding=THREE.sRGBEncoding; ct.wrapS=mt.map.wrapS; ct.wrapT=mt.map.wrapT;
-    ct.anisotropy=4; t={c,x,orig,ct,src:mt.map,key:''}; TEX.set(mt,t); return t;
+  async function item(b,name){
+    const k=b.g+'_'+name;
+    if(!ITEMS[k]) ITEMS[k]=get('/app/a/av_'+k+'.glb').then(x=>{ const ms=[];
+      x.scene.traverse(o=>{ if(o.isSkinnedMesh) ms.push(o); });
+      return ms.map(m=>{ const sk=new THREE.Skeleton(m.skeleton.bones.map(bn=>b.bones[bn.name]),m.skeleton.boneInverses);
+        const par=b.root.getObjectByName(m.parent.name)||b.root; const mesh=m; par.add(mesh); mesh.bind(sk,m.bindMatrix); fixMat(mesh); mesh.visible=false; return mesh; }); })
+      .catch(e=>{ delete ITEMS[k]; throw e; });
+    return ITEMS[k];
   }
-  function recolor(mt,parts){ // parts: [[mask, opt]]
-    const act=parts.filter(p=>p[1][3]!=null), key=act.map(p=>p[1][0]).join('|');
-    if(!act.length){ const t=TEX.get(mt); if(t){ mt.map=t.src; mt.needsUpdate=true; t.key=''; } return; }
-    const t=texOf(mt); if(t.key===key){ mt.map=t.ct; return; }
-    const o=t.orig.data, out=new ImageData(new Uint8ClampedArray(o),t.orig.width,t.orig.height), d=out.data, n=o.length;
-    for(const [mask,op] of act){ let sum=0,cnt=0; const hit=new Uint8Array(n>>2);
-      for(let i=0,p=0;i<n;i+=4,p++){ if(o[i+3]<8) continue; const v=hsl(o[i]/255,o[i+1]/255,o[i+2]/255); if(mask(v[0],v[1],v[2])){ hit[p]=1; sum+=v[2]; cnt++; } }
-      const mean=cnt?sum/cnt:.5;
-      for(let i=0,p=0;i<n;i+=4,p++){ if(!hit[p]) continue; const l=hsl(o[i]/255,o[i+1]/255,o[i+2]/255)[2];
-        const c=rgb(op[3],op[4],Math.max(.02,Math.min(.97,op[5]+(l-mean)*.9))); d[i]=c[0]*255; d[i+1]=c[1]*255; d[i+2]=c[2]*255; } }
-    t.x.putImageData(out,0,0); t.ct.needsUpdate=true; t.key=key; mt.map=t.ct; mt.needsUpdate=true;
+  function hideBody(b,a){
+    if(!b.body) return; const mask=(BIT[a.outfit]!=null?1<<BIT[a.outfit]:0)|(BIT[a.shoes]!=null?1<<BIT[a.shoes]:0);
+    const h=b.body.geometry.attributes._hide.array, idx=b.idx, keep=[];
+    for(let i=0;i<idx.length;i+=3){ const x=idx[i],y=idx[i+1],z=idx[i+2]; if((h[x]&mask)&&(h[y]&mask)&&(h[z]&mask)) continue; keep.push(x,y,z); }
+    b.body.geometry.setIndex(keep);
   }
-  function apply(a){
-    if(!cur) return; const M=MASK[a.g];
-    cur.traverse(o=>{ if(!o.isMesh) return; const mt=o.material, nm=mt.name||'';
-      if(/suit/.test(nm)) recolor(mt,[[M.top,opt('top',a.top)],[M.bottom,opt('bottom',a.bottom)]]);
-      else if(/shoes/.test(nm)) recolor(mt,[[all,opt('shoes',a.shoes)]]);
-      else if(/hair|eyebrow/.test(nm)) recolor(mt,[[all,opt('hair',a.hair)]]);
-      else if(/skin/.test(nm)){ const tn=opt('skin',a.skin)[3]||[1,1,1]; mt.color.setRGB(tn[0],tn[1],tn[2]); } });
+  async function anims(b){
+    if(!ANIMS[b.g]) ANIMS[b.g]=get('/app/a/av_anims_'+b.g+'.glb').then(x=>x.animations).catch(e=>{ delete ANIMS[b.g]; throw e; });
+    const list=await ANIMS[b.g];
+    if(!b.idle){ const c=list.find(x=>x.name==='idle'); if(c){ b.idle=b.mixer.clipAction(c); b.idle.setLoop(THREE.LoopPingPong); b.idle.play(); }
+      b.mixer.addEventListener('finished',e=>{ if(e.action!==b.idle&&b.idle){ b.idle.reset().play(); e.action.crossFadeTo(b.idle,.45,false); b.act=null; if(b.onEnd) b.onEnd(); } }); }
+    return list;
+  }
+  async function apply(a){
+    const b=await base(a.g);
+    if(cur!==b){ if(cur) holder.remove(cur.root); holder.add(b.root); cur=b; }
+    const want={outfit:a.outfit,shoes:a.shoes,hat:a.hat==='none'?null:a.hat,hair:a.hair};
+    await Promise.all(Object.entries(want).map(async([s,n])=>{
+      const ms=n?await item(b,n):[];
+      if(b.slots[s]&&b.slots[s]!==ms) b.slots[s].forEach(m=>m.visible=false);
+      ms.forEach(m=>m.visible=true); b.slots[s]=ms; }));
+    hideBody(b,a);
+    const hc=opt('hcol',a.hcol,a.g), tn=opt('skin',a.skin,a.g)[3]||[1,1,1];
+    b.root.traverse(o=>{ if(!o.isMesh) return; const n=(o.material.name||'').toLowerCase();
+      if(/eyebrow/.test(n)||HAIRS.some(h=>n.indexOf(h)>=0)) recolor(o.material,hc);
+      else if(/body/.test(n)) o.material.color.setRGB(tn[0],tn[1],tn[2]); });
   }
   function frame(now){
-    raf=requestAnimationFrame(frame); if(!R||!cur) return; size();
-    const t=(now-t0)/1000; rot+=(tRot-rot)*.12; zoom+=(tZoom-zoom)*.1;
-    cur.rotation.y=rot+Math.sin(t*.45)*.04; cur.scale.set(1,1+Math.sin(t*1.6)*.0035,1);   // nafas olish + yengil tebranish
-    const y=1.0+zoom*.62, z=4.3-zoom*3.45, ly=.9+zoom*.72; CAM.position.set(Math.sin(t*.3)*.05,y,z); CAM.lookAt(0,ly,0);
+    raf=requestAnimationFrame(frame); if(!R) return; size();
+    const dt=Math.min(.05,(now-(last||now))/1000); last=now;
+    rot+=(tRot-rot)*.12; zoom+=(tZoom-zoom)*.1; if(holder) holder.rotation.y=rot;
+    if(cur) cur.mixer.update(dt);
+    const y=1.0+zoom*.62, z=5.0-zoom*4.15, ly=.92+zoom*.7; CAM.position.set(0,y,z); CAM.lookAt(0,ly,0);
     R.render(S,CAM);
   }
   return {
-    CAT, fit, opt,
+    CAT, EMOTES, fit, opt, opts,
     async open(canvas,a){ await load(); if(R&&cvs!==canvas){ R.dispose(); R.forceContextLoss(); R=null; } if(!R) init(canvas);
-      t0=performance.now(); rot=tRot=0; await this.set(a); cancelAnimationFrame(raf); raf=requestAnimationFrame(frame); },
-    async set(a){ const m=await getModel(a.g); if(curG!==a.g){ if(cur) S.remove(cur); cur=m; curG=a.g; S.add(m); } apply(a); },
+      rot=tRot=0; last=0; await apply(a); cancelAnimationFrame(raf); raf=requestAnimationFrame(frame);
+      anims(cur).catch(()=>{}); },
+    set(a){ busy=(busy||Promise.resolve()).then(()=>apply(a)).then(()=>{ anims(cur).catch(()=>{}); }); return busy; },
+    async emote(name,onEnd){ const b=cur; if(!b) return; const list=await anims(b); const c=list.find(x=>x.name===name); if(!c) return;
+      const ac=b.mixer.clipAction(c); const from=b.act||b.idle; ac.reset(); ac.setLoop(THREE.LoopRepeat,c.duration<4?2:1); ac.clampWhenFinished=false;
+      ac.play(); if(from&&from!==ac) from.crossFadeTo(ac,.35,false); b.act=ac; b.onEnd=onEnd; },
     turn(d){ tRot+=d; }, drag(d){ tRot+=d; rot+=d; }, zoom(){ tZoom=tZoom?0:1; return !!tZoom; },
     view(){ const a=((tRot%(Math.PI*2))+Math.PI*2)%(Math.PI*2); return ['Old tomoni','O‘ng yon','Orqa tomoni','Chap yon'][Math.round(a/(Math.PI/2))%4]; },
-    close(){ cancelAnimationFrame(raf); raf=0; if(R){ R.dispose(); R.forceContextLoss(); R=null; cvs=null; } if(cur&&S) S.remove(cur); cur=null; curG=null; tZoom=zoom=0; }
+    close(){ cancelAnimationFrame(raf); raf=0; if(cur){ holder.remove(cur.root); cur.mixer.stopAllAction(); cur.idle=null; cur.act=null; }
+      cur=null; if(R){ R.dispose(); R.forceContextLoss(); R=null; cvs=null; } tZoom=zoom=0; }
   };
 })();
 
-// ---- 🧍 Avatar studiyasi (Profil → 3D avatarim) ----
+// ---- 🧍 Avatar studiyasi (Profil → 3D avatarim): kiyim almashtirish + harakatlar ----
 function openAvatarStudio(d){
   let ov=document.getElementById('ast');
   if(!ov){ ov=document.createElement('div'); ov.id='ast'; document.body.appendChild(ov); }
-  const a=AV3D.fit(d.avatar), L=['top','bottom','shoes'], Rr=['hair','skin','bg'];
-  const sw=(s,v)=>{ const o=AV3D.opt(s,v); return '<i class="asw" style="background:'+o[2]+'"></i>'; };
-  const slotHtml=s=>'<div class="kslot" data-s="'+s+'"><span class="ki">'+AV3D.CAT[s].ic+'</span>'+sw(s,a[s])+'<span class="kn">'+AV3D.CAT[s].n+'</span></div>';
+  let a=AV3D.fit(d.avatar);
+  const L=['outfit','shoes','hat'], Rr=['hair','hcol','skin'];
+  const ico=s=>{ const o=AV3D.opt(s,a[s],a.g); return AV3D.CAT[s].sw?'<i class="asw" style="background:'+o[2]+'"></i>':'<span class="kv">'+o[2]+'</span>'; };
+  const slotHtml=s=>'<div class="kslot" data-s="'+s+'"><span class="ki">'+AV3D.CAT[s].ic+'</span>'+ico(s)+'<span class="kn">'+AV3D.CAT[s].n+'</span></div>';
   ov.innerHTML='<div class="kst-in st-av bg-'+a.bg+'">'+
     '<div class="kst-hd"><div><div class="kst-name">🧍 '+esc(d.name)+(d.avatar_test?' <span class="avtest">TEST</span>':'')+'</div>'+
       '<div class="kst-sub">Realistik 3D avatar · ⭐ '+esc(d.level)+' · 💰 '+esc(d.money_fmt)+'$</div></div><span class="kst-x" id="astX">✕</span></div>'+
     '<div class="avg"><span data-g="m">👨 Erkak</span><span data-g="f">👩 Ayol</span></div>'+
     '<div class="kst-stage"><canvas id="astCv"></canvas>'+
       '<div class="kst-col l">'+L.map(slotHtml).join('')+'</div><div class="kst-col r">'+Rr.map(slotHtml).join('')+'</div>'+
-      '<div class="kst-load" id="astLoad">⏳ 3D model yuklanmoqda…</div></div>'+
-    '<div class="kst-rot"><span id="astL">⟲</span><b id="astV">Old tomoni</b><span id="astR">⟳</span><span id="astZ">🔍</span></div>'+
-    '<div class="kst-pick" id="astPick"><div class="kst-hint">👆 Chekkadagi kataklardan rang tanlang · modelni barmoq bilan aylantiring · 🔍 yuzga yaqinlashtirish</div></div></div>';
+      '<div class="kst-load" id="astLoad">⏳ 3D model yuklanmoqda…</div><div class="avbusy" id="astBusy">⏳</div></div>'+
+    '<div class="kst-rot"><span id="astL">⟲</span><b id="astV">Old tomoni</b><span id="astR">⟳</span><span id="astZ">🔍</span><span id="astBg">🏛</span><span id="astE" class="ave">🕺</span></div>'+
+    '<div class="kst-pick" id="astPick"><div class="kst-hint">🕺 — harakatlar (raqs, salto, salom…) · chekkadagi kataklar — kiyim, soch, teri · barmoq bilan aylantiring</div></div></div>';
   ov.className='kst show';
-  const box=ov.querySelector('.kst-in'), cv=document.getElementById('astCv'), pick=document.getElementById('astPick'), vlab=document.getElementById('astV'), ldl=document.getElementById('astLoad');
+  const box=ov.querySelector('.kst-in'), cv=document.getElementById('astCv'), pick=document.getElementById('astPick'), vlab=document.getElementById('astV'),
+    ldl=document.getElementById('astLoad'), bz=document.getElementById('astBusy');
   let saveT=0;
   const save=()=>{ d.avatar=Object.assign({},a); clearTimeout(saveT);
     saveT=setTimeout(()=>api('/app/api/avatar/save',{avatar:a}).then(r=>{ if(!r||r.error) toast('⚠️ Saqlanmadi'); }),600); };
+  const refresh=()=>{ bz.style.display='flex'; return AV3D.set(a).then(()=>{ bz.style.display='none'; })
+    .catch(()=>{ bz.style.display='none'; toast('⚠️ Model yuklanmadi'); }); };
   const close=()=>{ ov.className='kst'; AV3D.close(); };
   document.getElementById('astX').onclick=close;
   ov.onclick=e=>{ if(e.target===ov) close(); };
@@ -20250,24 +20308,39 @@ function openAvatarStudio(d){
   document.getElementById('astL').onclick=()=>{ AV3D.turn(-Math.PI/2); setTimeout(upd,10); };
   document.getElementById('astR').onclick=()=>{ AV3D.turn(Math.PI/2); setTimeout(upd,10); };
   document.getElementById('astZ').onclick=e=>{ e.currentTarget.classList.toggle('on',AV3D.zoom()); };
+  document.getElementById('astBg').onclick=()=>showPick('bg');
+  document.getElementById('astE').onclick=()=>showEmotes();
   let dragX=null;
   cv.addEventListener('pointerdown',e=>{ dragX=e.clientX; cv.setPointerCapture(e.pointerId); });
   cv.addEventListener('pointermove',e=>{ if(dragX==null) return; AV3D.drag((e.clientX-dragX)*.012); dragX=e.clientX; upd(); });
   cv.addEventListener('pointerup',()=>{ dragX=null; });
+  const paintSlots=()=>{ ov.querySelectorAll('.kslot').forEach(el=>{ const s=el.dataset.s; el.outerHTML=slotHtml(s); });
+    ov.querySelectorAll('.kslot').forEach(el=>el.onclick=()=>showPick(el.dataset.s)); };
   const paintG=()=>ov.querySelectorAll('.avg span').forEach(x=>x.classList.toggle('on',x.dataset.g===a.g));
-  ov.querySelectorAll('.avg span').forEach(el=>el.onclick=()=>{ if(a.g===el.dataset.g) return; a.g=el.dataset.g; paintG();
+  ov.querySelectorAll('.avg span').forEach(el=>el.onclick=()=>{ if(a.g===el.dataset.g) return;
+    const keep={hcol:a.hcol,skin:a.skin,bg:a.bg}; a=AV3D.fit(Object.assign({g:el.dataset.g},keep)); paintG(); paintSlots(); pick.innerHTML='';
     ldl.style.display='flex'; ldl.textContent='⏳ 3D model yuklanmoqda…';
     AV3D.set(a).then(()=>{ ldl.style.display='none'; }).catch(()=>{ ldl.textContent='⚠️ Model yuklanmadi'; }); save(); });
   paintG();
   function showPick(s){
-    ov.querySelectorAll('.kslot').forEach(x=>x.classList.toggle('on',x.dataset.s===s));
-    pick.innerHTML='<div class="kst-pt">'+AV3D.CAT[s].ic+' '+AV3D.CAT[s].n+'</div><div class="kst-opts">'+
-      AV3D.CAT[s].o.map(o=>'<div class="kopt'+(a[s]===o[0]?' on':'')+'" data-v="'+o[0]+'"><span class="asw big" style="background:'+o[2]+'"></span><small>'+o[1]+'</small></div>').join('')+'</div>';
+    ov.querySelectorAll('.kslot,.kst-rot span').forEach(x=>x.classList.remove('on'));
+    const sl=ov.querySelector('.kslot[data-s="'+s+'"]'); if(sl) sl.classList.add('on');
+    const cat=AV3D.CAT[s];
+    pick.innerHTML='<div class="kst-pt">'+cat.ic+' '+cat.n+'</div><div class="kst-opts">'+
+      AV3D.opts(s,a.g).map(o=>'<div class="kopt'+(a[s]===o[0]?' on':'')+'" data-v="'+o[0]+'">'+(cat.sw?'<span class="asw big" style="background:'+o[2]+'"></span>':'<span>'+o[2]+'</span>')+'<small>'+o[1]+'</small></div>').join('')+'</div>';
     pick.querySelectorAll('.kopt').forEach(el=>el.onclick=()=>{
       a[s]=el.dataset.v; pick.querySelectorAll('.kopt').forEach(x=>x.classList.toggle('on',x===el));
-      ov.querySelector('.kslot[data-s="'+s+'"] .asw').style.background=AV3D.opt(s,a[s])[2];
-      if(s==='bg') box.className='kst-in st-av bg-'+a.bg; else AV3D.set(a);
+      if(s==='bg') box.className='kst-in st-av bg-'+a.bg; else { paintSlots(); ov.querySelector('.kslot[data-s="'+s+'"]').classList.add('on'); refresh(); }
       save();
+    });
+  }
+  function showEmotes(){
+    ov.querySelectorAll('.kslot,.kst-rot span').forEach(x=>x.classList.remove('on')); document.getElementById('astE').classList.add('on');
+    pick.innerHTML='<div class="kst-pt">🕺 Harakatlar</div><div class="kst-opts emo">'+
+      AV3D.EMOTES.map(e=>'<div class="kopt" data-v="'+e[0]+'"><span>'+e[1]+'</span><small>'+e[2]+'</small></div>').join('')+'</div>';
+    pick.querySelectorAll('.kopt').forEach(el=>el.onclick=()=>{
+      pick.querySelectorAll('.kopt').forEach(x=>x.classList.toggle('on',x===el));
+      AV3D.emote(el.dataset.v,()=>el.classList.remove('on')).catch(()=>toast('⚠️ Harakat yuklanmadi'));
     });
   }
   ov.querySelectorAll('.kslot').forEach(el=>el.onclick=()=>showPick(el.dataset.s));

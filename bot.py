@@ -16911,6 +16911,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             self._asset(path.rsplit("/", 1)[1])
         elif re.fullmatch(r"/app/chatimg/[0-9a-f]{32}\.jpg", path):
             self._chatimg(path.rsplit("/", 1)[1])
+        elif re.fullmatch(r"/app/newsimg/[0-9a-f]{32}\.jpg", path):
+            self._chatimg(path.rsplit("/", 1)[1], NEWS_MEDIA_DIR, public=True)
         elif re.fullmatch(r"/app/tgs/[A-Za-z0-9_-]{6,64}", path):
             self._tgsticker(path.rsplit("/", 1)[1])
         else:
@@ -16934,17 +16936,17 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _chatimg(self, name):
-        """💬 Chat rasmlari: nomi 128-bitli tasodifiy token (taxmin qilib bo'lmaydi)."""
+    def _chatimg(self, name, folder=None, public=False):
+        """💬 Chat / 📰 yangilik rasmlari: nomi 128-bitli tasodifiy token (taxmin qilib bo'lmaydi)."""
         try:
-            with open(os.path.join(CHAT_MEDIA_DIR, name), "rb") as f:
+            with open(os.path.join(folder or CHAT_MEDIA_DIR, name), "rb") as f:
                 data = f.read()
         except OSError:
             self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
             return
         self.send_response(200)
         self.send_header("Content-Type", "image/jpeg")
-        self.send_header("Cache-Control", "private, max-age=604800")
+        self.send_header("Cache-Control", ("public" if public else "private") + ", max-age=604800")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -17081,6 +17083,12 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_edu_enroll(uid, body.get("kid"), body.get("inst"))
         elif path in ("/app/api/edu/add", "/app/api/edu/update", "/app/api/edu/toggle"):
             coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
+        elif path == "/app/api/news/seen":
+            coro = web_news_seen(uid, body.get("last"))
+        elif path in ("/app/api/news/add", "/app/api/news/update", "/app/api/news/delete", "/app/api/news/pin", "/app/api/news/toggle"):
+            coro = web_news_admin(uid, path.rsplit("/", 1)[1], body)
+        elif path == "/app/api/owner/flag":
+            coro = web_owner_flag(uid, body.get("key"))
         elif path == "/app/api/kid":
             coro = web_kid_action(uid, body.get("kid"), body.get("act"), body.get("item"))
         else:
@@ -18159,6 +18167,12 @@ def init_webapp():
         cols = {r[1] for r in c.execute("PRAGMA table_info(pair_requests)")}
         if cols and "random" not in cols:     # 💍 random juft so'rovlari belgisi
             c.execute("ALTER TABLE pair_requests ADD COLUMN random INTEGER NOT NULL DEFAULT 0")
+        # 📰 NEWS: yangiliklar (kind=news) va e'lonlar (kind=ad); links — JSON [{t,u}]
+        c.execute("""CREATE TABLE IF NOT EXISTS news_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL DEFAULT 'news', title TEXT NOT NULL,
+            body TEXT NOT NULL DEFAULT '', img TEXT, links TEXT NOT NULL DEFAULT '[]', pinned INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1, author_id INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""")
+        c.execute("CREATE TABLE IF NOT EXISTS news_seen (user_id INTEGER PRIMARY KEY, last_id INTEGER NOT NULL DEFAULT 0)")
         # 🪙 EMP Coin test rejimdan chiqdi: bir marta hamma uchun yoqiladi (keyin owner panelda o'chirsa, o'sha qoladi)
         if c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('emp_launch', 1)").rowcount:
             c.execute("INSERT INTO webapp_config(key, value) VALUES ('emp', 1) "
@@ -18459,7 +18473,7 @@ async def web_chat_history(uid, peer, after=0):
     return res
 
 
-def _chat_save_image(data):
+def _chat_save_image(data, folder=None, side=None):
     """base64 (data URL) → tekshirilgan, kichraytirilgan JPEG (EXIF/GPS olib tashlanadi). Token yoki None."""
     from PIL import Image
     import base64, io, secrets
@@ -18474,13 +18488,14 @@ def _chat_save_image(data):
         im = Image.open(io.BytesIO(blob))
         if im.width * im.height > 40_000_000:
             return None
-        im.thumbnail((CHAT_IMG_SIDE, CHAT_IMG_SIDE))
+        im.thumbnail((side or CHAT_IMG_SIDE, side or CHAT_IMG_SIDE))
         im = im.convert("RGB")
     except Exception:
         return None
-    os.makedirs(CHAT_MEDIA_DIR, exist_ok=True)
+    folder = folder or CHAT_MEDIA_DIR
+    os.makedirs(folder, exist_ok=True)
     tok = secrets.token_hex(16)
-    im.save(os.path.join(CHAT_MEDIA_DIR, tok + ".jpg"), "JPEG", quality=82, optimize=True)
+    im.save(os.path.join(folder, tok + ".jpg"), "JPEG", quality=84, optimize=True)
     return tok
 
 
@@ -19177,6 +19192,133 @@ def webapp_check_init_data(init_data, max_age=86400):
     return user if user.get("id") else None
 
 
+# ── 📰 NEWS (online gazeta): ownerlar web app'dan yangilik / e'lon qo'yadi ──
+NEWS_MEDIA_DIR = os.path.join(VOLUME_PATH or BASE_DIR, "news_media")
+NEWS_IMG_SIDE = 1600
+NEWS_KINDS = ("news", "ad")
+NEWS_LIMIT = 40          # payload'da ko'rsatiladigan oxirgi postlar
+NEWS_MAX_LINKS = 6
+
+
+def _news_links(raw):
+    """[{t,u}] → tozalangan havolalar (faqat https/http/tg; t.me ham https orqali)."""
+    out = []
+    for it in (raw if isinstance(raw, list) else [])[:NEWS_MAX_LINKS]:
+        if not isinstance(it, dict):
+            continue
+        u = str(it.get("u") or "").strip()[:300]
+        t = str(it.get("t") or "").strip()[:40]
+        if u.startswith("@") and re.fullmatch(r"@[A-Za-z0-9_]{4,32}", u):
+            u = "https://t.me/" + u[1:]
+        if not re.match(r"^(https?://|tg://)[^\s<>\"']+$", u):
+            continue
+        out.append({"t": t or re.sub(r"^\w+://", "", u)[:40], "u": u})
+    return out
+
+
+def news_list(include_hidden=False, limit=NEWS_LIMIT):
+    rows = db().execute(
+        "SELECT id, kind, title, body, img, links, pinned, active, created_at FROM news_posts"
+        + ("" if include_hidden else " WHERE active=1")
+        + " ORDER BY pinned DESC, id DESC LIMIT ?", (limit,)).fetchall()
+    out = []
+    for nid, kind, title, body, img, links, pinned, active, at in rows:
+        try:
+            lk = json.loads(links or "[]")
+        except ValueError:
+            lk = []
+        out.append({"id": nid, "kind": kind, "title": title, "body": body, "img": f"/app/newsimg/{img}.jpg" if img else None,
+                    "links": lk, "pinned": bool(pinned), "active": bool(active), "at": tashkent_dt(at)})
+    return out
+
+
+def news_unread(uid):
+    row = db().execute("SELECT last_id FROM news_seen WHERE user_id=?", (uid,)).fetchone()
+    return db().execute("SELECT COUNT(*) FROM news_posts WHERE active=1 AND id>?", (row[0] if row else 0,)).fetchone()[0]
+
+
+async def web_news_seen(uid, last):
+    try:
+        last = int(last)
+    except (TypeError, ValueError):
+        return {"error": "id"}
+    with db() as c:
+        c.execute("INSERT INTO news_seen(user_id, last_id) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET "
+                  "last_id=MAX(last_id, excluded.last_id)", (uid, last))
+    return {"result": "ok", "unread": news_unread(uid)}
+
+
+async def web_news_admin(uid, act, body):
+    """Ownerlar: yangilik/e'lon qo'shish, tahrirlash, o'chirish, tepaga mahkamlash, yashirish."""
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner_only"}
+    c = db()
+    now = int(time.time())
+    if act in ("add", "update"):
+        kind = body.get("kind") if body.get("kind") in NEWS_KINDS else "news"
+        title = str(body.get("title") or "").strip()[:120]
+        text = str(body.get("body") or "").strip()[:5000]
+        if len(title) < 2:
+            return {"error": "title"}
+        links = json.dumps(_news_links(body.get("links")), ensure_ascii=False)
+        img = None
+        if body.get("image"):
+            img = await asyncio.to_thread(_chat_save_image, body.get("image"), NEWS_MEDIA_DIR, NEWS_IMG_SIDE)
+            if not img:
+                return {"error": "image"}
+        if act == "add":
+            with c:
+                c.execute("INSERT INTO news_posts(kind, title, body, img, links, author_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                          (kind, title, text, img, links, uid, now, now))
+        else:
+            try:
+                nid = int(body.get("id"))
+            except (TypeError, ValueError):
+                return {"error": "id"}
+            old = c.execute("SELECT img FROM news_posts WHERE id=?", (nid,)).fetchone()
+            if not old:
+                return {"error": "id"}
+            keep = old[0] if not body.get("drop_image") else None
+            with c:
+                c.execute("UPDATE news_posts SET kind=?, title=?, body=?, img=?, links=?, updated_at=? WHERE id=?",
+                          (kind, title, text, img or keep, links, now, nid))
+        return {"result": act, "news": news_list(True)}
+    try:
+        nid = int(body.get("id"))
+    except (TypeError, ValueError):
+        return {"error": "id"}
+    if not c.execute("SELECT 1 FROM news_posts WHERE id=?", (nid,)).fetchone():
+        return {"error": "id"}
+    with c:
+        if act == "delete":
+            c.execute("DELETE FROM news_posts WHERE id=?", (nid,))
+        elif act == "pin":
+            c.execute("UPDATE news_posts SET pinned=1-pinned WHERE id=?", (nid,))
+        elif act == "toggle":
+            c.execute("UPDATE news_posts SET active=1-active WHERE id=?", (nid,))
+        else:
+            return {"error": "act"}
+    return {"result": act, "news": news_list(True)}
+
+
+# ⚙️ Owner panel (web): xususiyatlarni hamma uchun ochish/yopish — bot panelidagi bilan bir xil flaglar
+OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar")
+
+
+def owner_flags_payload():
+    f = webapp_flags()
+    return {k: bool(f.get(k, 0)) for k in OWNER_FLAG_KEYS}
+
+
+async def web_owner_flag(uid, key):
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner_only"}
+    if key not in OWNER_FLAG_KEYS:
+        return {"error": "key"}
+    webapp_set(key, 0 if webapp_flags().get(key, 0) else 1)
+    return {"result": "ok", "flags": owner_flags_payload()}
+
+
 async def webapp_payload(user_id):
     """Web app uchun foydalanuvchi ma'lumotlari (bot sikli ipida — DB xavfsiz)."""
     c = db()
@@ -19319,6 +19461,9 @@ async def webapp_payload(user_id):
         "chat_stickers": list(CHAT_STICKERS),
         "emp": emp_payload(user_id),
         "transfers": transfers_payload(user_id),
+        "news": news_list(include_hidden=is_owner),
+        "news_unread": news_unread(user_id),
+        "owner_flags": owner_flags_payload() if is_owner else None,
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -20402,6 +20547,67 @@ WEBAPP_HTML = r"""<!doctype html>
   .gplay{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;color:#2b1b02;
     background:var(--g-metal);box-shadow:0 4px 12px rgba(0,0,0,.5)}
   .gnote{text-align:center;color:var(--dim);font-size:12px;margin-top:14px}
+  /* ───── 📰 NEWS — online gazeta ───── */
+  .nbtn{display:inline-flex;align-items:center;gap:4px;margin-top:6px;padding:4px 11px 4px 8px;border-radius:999px;cursor:pointer;position:relative;
+    font-family:Cinzel,serif;font-weight:900;font-size:11.5px;letter-spacing:1.5px;color:#2b1b02;background:var(--g-metal);
+    box-shadow:0 3px 10px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.5)}
+  .nbtn i{font-style:normal;font-size:12px}.nbtn:active{transform:scale(.94)}
+  .nbdg{position:absolute;top:-6px;right:-8px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#e0283c;color:#fff;
+    font:800 10px/17px -apple-system,sans-serif;letter-spacing:0;text-align:center;box-shadow:0 0 0 2px #1a1206}
+  .npaper{border-radius:18px;padding:14px 14px 18px;background:linear-gradient(180deg,#17110a,#0e0a06);box-shadow:inset 0 0 0 1px rgba(255,210,74,.35),0 12px 30px rgba(0,0,0,.5)}
+  .nmast{text-align:center;padding-bottom:8px;border-bottom:3px double rgba(255,210,74,.55);margin-bottom:12px}
+  .nm-t{font-family:Cinzel,serif;font-weight:900;font-size:31px;letter-spacing:3px;line-height:1.05;background:var(--g-metal);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .nm-s{display:flex;justify-content:space-between;gap:6px;margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,210,74,.3);font-size:10.5px;color:#cdb98a;letter-spacing:.4px}
+  .nitem{display:grid;grid-template-columns:42% 1fr;gap:12px;cursor:pointer}
+  .nitem.noimg{grid-template-columns:1fr}
+  .nimg{border-radius:10px;background-size:cover;background-position:center;min-height:110px;box-shadow:inset 0 0 0 1px rgba(255,210,74,.3)}
+  .nlead .nimg{min-height:190px}
+  .nkick{font-size:10.5px;font-weight:800;letter-spacing:1.2px;color:#ff6b6b;margin-bottom:4px}
+  .nttl{font-family:Georgia,"Times New Roman",serif;font-weight:700;font-size:20px;line-height:1.2;color:#fff3d6}
+  .nttl.s{font-size:16px}
+  .nexc{margin-top:6px;font-family:Georgia,"Times New Roman",serif;font-size:13.5px;line-height:1.45;color:#d9cdb4;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical}
+  .nexc.l8{-webkit-line-clamp:8}.nexc.l4{-webkit-line-clamp:4}
+  .nmeta{margin-top:6px;font-size:11px;color:#9c8a66}.nmeta b{color:#ffd56a}
+  .nrow{padding:12px 0;border-top:1px solid rgba(255,210,74,.16)}
+  .nsec{display:flex;align-items:center;gap:10px;margin:16px 0 4px;font-family:Cinzel,serif;font-weight:900;font-size:13px;letter-spacing:2px;color:#ffd56a}
+  .nsec::before,.nsec::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,transparent,rgba(255,210,74,.6),transparent)}
+  .nad{margin-top:10px;padding:2px 12px 12px;border-radius:14px;background:rgba(255,210,74,.06);box-shadow:inset 0 0 0 1px rgba(255,210,74,.3)}
+  .nad .nrow{border-top:0}
+  .nlinks{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 2px}
+  .nlink{padding:6px 11px;border-radius:999px;font-size:12.5px;font-weight:700;color:#ffe08a;cursor:pointer;background:linear-gradient(180deg,#2a1e0c,#140e07);
+    box-shadow:inset 0 0 0 1px #8a6420;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .nlink:active{transform:scale(.95)}
+  .nempty{text-align:center;padding:30px 10px;color:#e8dcc0;font-size:15px;line-height:1.6}
+  .nwv{position:fixed;inset:0;z-index:60;display:none;background:rgba(0,0,0,.7)}.nwv.show{display:block}
+  .nwv-in{position:absolute;inset:0;display:flex;flex-direction:column;background:#0e0a06}
+  .nwv-hd{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:3px double rgba(255,210,74,.5);font-family:Cinzel,serif;letter-spacing:2px;color:#ffd56a}
+  .nwv-sc{flex:1;overflow:auto;padding:14px 16px calc(24px + env(safe-area-inset-bottom))}
+  .nwv-img{width:100%;border-radius:12px;display:block;margin-bottom:12px}
+  .nwv-t{font-family:Georgia,"Times New Roman",serif;font-size:24px;line-height:1.2;margin:4px 0 10px;color:#fff3d6}
+  .nwv-b{font-family:Georgia,"Times New Roman",serif;font-size:15.5px;line-height:1.6;color:#e3d7bd}
+  /* ───── 👑 Owner panel guruhlari ───── */
+  .oseg{display:flex;gap:6px;overflow-x:auto;margin:0 -2px 12px;padding:2px;scrollbar-width:none}
+  .oseg::-webkit-scrollbar{display:none}
+  .oseg span{flex:none;display:flex;align-items:center;gap:5px;padding:8px 12px;border-radius:12px;font-size:13px;font-weight:800;cursor:pointer;
+    color:#e8d6a6;background:rgba(0,0,0,.35);box-shadow:inset 0 0 0 1px rgba(255,210,74,.3)}
+  .oseg span i{font-style:normal}
+  .oseg span.on{color:#2b1b02;background:var(--g-metal);box-shadow:0 4px 12px rgba(0,0,0,.4)}
+  .ogrp{display:none}.ogrp.on{display:block}
+  .ogrp>.card+.card{margin-top:12px}
+  .nta{box-sizing:border-box;width:100%;min-height:120px;padding:12px;border-radius:14px;border:1px solid rgba(255,210,74,.35);background:rgba(0,0,0,.35);color:#fff;font:inherit;font-size:14px;resize:vertical}
+  .nimgp img{display:block;max-width:100%;max-height:200px;border-radius:12px;margin:8px 0}
+  .nlrow{display:grid;grid-template-columns:34% 1fr 26px;gap:6px;align-items:center;margin-bottom:6px}
+  .nlrow input{box-sizing:border-box;width:100%;padding:9px 10px;border-radius:10px;border:1px solid rgba(255,210,74,.3);background:rgba(0,0,0,.35);color:#fff;font:inherit;font-size:13px}
+  .nlx{cursor:pointer;text-align:center;color:#ff8080}
+  .npost{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid rgba(255,210,74,.14)}
+  .npost.off{opacity:.55}
+  .npi{flex:none;width:44px;height:44px;border-radius:10px;background-size:cover;background-position:center;display:flex;align-items:center;justify-content:center;font-size:20px;background-color:rgba(255,210,74,.1)}
+  .npm{flex:1;min-width:0}.npm b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13.5px}
+  .na{flex:none;cursor:pointer;font-size:16px;padding:4px}
+  .oflag{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 0;border-top:1px solid rgba(255,210,74,.14);cursor:pointer;font-size:14px}
+  .otg{flex:none;width:44px;height:24px;border-radius:12px;background:#3a3020;position:relative;transition:background .2s}
+  .otg i{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#bba878;transition:left .2s}
+  .otg.on{background:#2f9a4a}.otg.on i{left:23px;background:#fff}
   /* ───── 💼 Moliya lobbisi ───── */
   .glob.wide{grid-template-columns:1fr}
   .glob.wide .gcard{aspect-ratio:1536/510}
@@ -20735,11 +20941,13 @@ function render(res){
     '<div class="hdr"><div class="ava">'+esc(initial)+'<img id="avimg" alt="" src="/app/avatar/'+esc(d.id)+'"></div>'+
     '<div><div class="hname">'+esc(d.name)+'</div>'+
     '<div class="hsub">'+(d.username?'@'+esc(d.username):'ID '+esc(d.id))+
-    (d.is_owner?' · 👑 Owner':'')+'</div></div>'+
+    (d.is_owner?' · 👑 Owner':'')+'</div>'+
+    '<span class="nbtn" id="nBtn"><i>📰</i>NEWS'+(d.news_unread?'<b class="nbdg">'+(d.news_unread>9?'9+':d.news_unread)+'</b>':'')+'</span></div>'+
     '<div class="bal"><div class="n" id="bal">'+esc(d.money_fmt)+'$</div>'+
       (d.emp?'<div class="hemp"><img alt="" src="/app/a/emp_face_s.png"><b id="hdrEmp">'+fmtMoney(d.emp.balance)+'</b> EMP</div>':'')+
       '<div class="wrow"><span class="wbtn" id="wBtn" title="O‘tkazmalar">👛</span><div class="l">Hamyon</div></div></div></div>'));
   document.getElementById('wBtn').onclick=e=>{ e.stopPropagation(); openTransfers(d); };
+  document.getElementById('nBtn').onclick=e=>{ e.stopPropagation(); if(TAB!=='news') window.NEWS_BACK=TAB; setTab('news'); newsSeen(d); };
   window.BAL=d.money;
   (function(){ const im=document.getElementById('avimg'); if(!im) return;
     const tu=tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user&&tg.initDataUnsafe.user.photo_url;
@@ -21034,6 +21242,9 @@ function render(res){
   }
   app.appendChild(sh);
 
+  // 📰 NEWS — online gazeta
+  app.appendChild(newsPage(d));
+
   // MOLIYA — Bank + Birja lobbisi
   const mo=$('<div class="sec" id="s-moliya"></div>');
   const btc=(d.birja_market||[]).find(x=>x.asset==='BTC'), loan=d.bank&&d.bank.loan;
@@ -21131,7 +21342,14 @@ function render(res){
   if(d.is_owner && d.owner){
     const o=$('<div class="sec" id="s-owner"></div>');
     o.appendChild($('<h2>👑 Owner panel</h2>'));
-    o.appendChild($('<div class="grid">'+
+    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
+    const oseg=$('<div class="oseg">'+OG.map(([k,i,l])=>'<span data-g="'+k+'"><i>'+i+'</i>'+l+'</span>').join('')+'</div>');
+    o.appendChild(oseg);
+    const G={}; OG.forEach(([k])=>{ G[k]=$('<div class="ogrp" data-g="'+k+'"></div>'); o.appendChild(G[k]); });
+    const showG=k=>{ window.OGRP=k; oseg.querySelectorAll('span').forEach(x=>x.classList.toggle('on',x.dataset.g===k));
+      o.querySelectorAll('.ogrp').forEach(g=>g.classList.toggle('on',g.dataset.g===k)); };
+    oseg.querySelectorAll('span').forEach(x=>x.onclick=()=>showG(x.dataset.g));
+    G.stat.appendChild($('<div class="grid">'+
       card('👤 Foydalanuvchilar', d.owner.users,'neon')+
       card('🏘 Guruhlar', d.owner.groups,'mag')+
       card('💵 Jami pul', d.owner.total_money+'$','lime','full')+
@@ -21140,7 +21358,7 @@ function render(res){
       '</div>'));
     // 🏫 Ta'lim muassasalari (ownerlar: ochish, nomi/narxini o'zgartirish, yopish)
     const KN={kinder:'🧸 Bog‘cha',school:'🎒 Maktab',college:'🔬 Kollej',uni:'🎓 Institut'};
-    const ed=$('<div class="card full oedu" style="margin-top:12px"><div class="lbl">🏫 Ta‘lim muassasalari</div>'+
+    const ed=$('<div class="card full oedu"><div class="lbl">🏫 Ta‘lim muassasalari</div>'+
       '<div class="frow"><select class="sel" id="ekind">'+Object.keys(KN).map(k=>'<option value="'+k+'">'+KN[k]+'</option>').join('')+'</select></div>'+
       '<div class="frow"><input class="bet" id="ename" maxlength="40" placeholder="Nomi (masalan: Prezident maktabi)" style="text-align:left"></div>'+
       '<div class="frow"><input class="bet" id="efee" type="number" inputmode="numeric" placeholder="Yillik to‘lov, $"></div>'+
@@ -21162,9 +21380,11 @@ function render(res){
       if(res.result==='added'){ toast('✅ Muassasa ochildi'); app_q(ed,'#ename').value=''; app_q(ed,'#efee').value=''; drawEdu(res.edu_all); }
       else toast(eduErr(res.error)); });
     drawEdu(d.edu_all||[]);
-    o.appendChild(ed);
+    G.edu.appendChild(ed);
+    G.news.appendChild(newsAdmin(d));
+    G.set.appendChild(ownerFlags(d));
     if(d.emp&&d.emp.admin){ // 🪙 EMP paketlari — narxlarni ownerlar boshqaradi
-      const ea=$('<div class="card full oemp" style="margin-top:12px"></div>');
+      const ea=$('<div class="card full oemp"></div>');
       const drawEA=e=>{ const A=e.admin;
         ea.innerHTML='<div class="lbl">🪙 EMP Coin — paketlar va narxlar</div>'+
           '<div class="chips"><span class="chip">🧾 To‘lovlar: '+A.payments+'</span><span class="chip">⭐ '+fmtMoney(A.stars)+'</span>'+
@@ -21197,8 +21417,9 @@ function render(res){
           app_q(ea,'#swSave').onclick=()=>api('/app/api/emp/swapcfg',{enabled:en,rate:app_q(ea,'#swRate').value,fee:app_q(ea,'#swFee').value,
             limit_out:app_q(ea,'#swLo').value,limit_in:app_q(ea,'#swLi').value}).then(done); }
       };
-      drawEA(d.emp); o.appendChild(ea);
-    }
+      drawEA(d.emp); G.emp.appendChild(ea);
+    } else G.emp.appendChild($('<div class="card full"><div class="hsub">🪙 EMP ma’lumoti yo‘q</div></div>'));
+    showG(OG.some(x=>x[0]===window.OGRP)?window.OGRP:'stat');
     app.appendChild(o);
   }
 
@@ -21212,8 +21433,8 @@ function render(res){
     tabs.appendChild(el);
   });
   app.appendChild(tabs);
-  app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':'casino'));
-  setTab(defs.some(x=>x[0]===TAB)||TAB==='bank'||TAB==='birja'||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
+  app.querySelectorAll('.gback:not([data-back=news])').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':'casino'));
+  setTab(defs.some(x=>x[0]===TAB)||TAB==='news'||TAB==='bank'||TAB==='birja'||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
   ['s-crash','s-frog','s-kami'].forEach(id=>{ const sc=document.getElementById(id); if(!sc) return;
     sc.insertAdjacentHTML('afterbegin','<div class="sndbar"><span data-snd="m">🎵</span><span data-snd="s">🔊</span></div>');
     sc.querySelectorAll('.sndbar span').forEach(b=>b.onclick=()=>SND.toggle(b.dataset.snd)); });
@@ -22265,6 +22486,107 @@ const CHERR={not_found:'🔎 Bunday foydalanuvchi topilmadi (botni ishlatgan bo�
   long:'📏 Xabar juda uzun (1000 belgigacha)',disabled:'🌐 Web app o‘chirilgan',user:'⚠️ Foydalanuvchi xato',
   image:'🖼 Rasmni o‘qib bo‘lmadi', img_daily:'📷 Bugungi rasm limiti tugadi (40 ta)', sticker:'🎭 Bunday stiker yo‘q', too_large:'📦 Rasm juda katta'};
 // rasmni telefonda kichraytirish (≤1280 px, JPEG) — trafik va server yuki kam
+// ---- 📰 NEWS (online gazeta) ----
+function nDate(){ const M=['yanvar','fevral','mart','aprel','may','iyun','iyul','avgust','sentabr','oktabr','noyabr','dekabr'];
+  const t=new Date(); return t.getDate()+'-'+M[t.getMonth()]+', '+t.getFullYear(); }
+function newsOpenLink(u){ if(/^https:\/\/t\.me\//.test(u)&&tg&&tg.openTelegramLink) tg.openTelegramLink(u);
+  else if(tg&&tg.openLink) tg.openLink(u); else window.open(u,'_blank'); }
+function nLinks(n){ return (n.links||[]).length?'<div class="nlinks">'+n.links.map(l=>'<span class="nlink" data-u="'+esc(l.u)+'">🔗 '+esc(l.t)+'</span>').join('')+'</div>':''; }
+function nBody(t){ return esc(t||'').replace(/\n/g,'<br>'); }
+function nRow(n,cls,kick){
+  return '<div class="'+cls+' nitem'+(n.img?'':' noimg')+'" data-id="'+n.id+'">'+(n.img?'<div class="nimg" style="background-image:url('+esc(n.img)+')"></div>':'')+
+    '<div class="ntext">'+(kick?'<div class="nkick">'+kick+'</div>':'')+'<div class="nttl'+(kick?'':' s')+'">'+(!kick&&n.pinned?'📌 ':'')+esc(n.title)+'</div>'+
+    '<div class="nexc '+(kick?'l8':'l4')+'">'+nBody(n.body)+'</div><div class="nmeta">'+esc(n.at)+(kick?' · <b>Batafsil ›</b>':'')+'</div></div></div>'+nLinks(n);
+}
+function newsPage(d){
+  const sec=$('<div class="sec" id="s-news"></div>');
+  const all=(d.news||[]).filter(n=>n.active), news=all.filter(n=>n.kind!=='ad'), ads=all.filter(n=>n.kind==='ad');
+  const lead=news[0], rest=news.slice(1);
+  let h='<div class="gback" data-back="news">‹ Orqaga</div><div class="npaper">'+
+    '<div class="nmast"><div class="nm-t">EMPIRE NEWS</div><div class="nm-s"><span>'+nDate()+'</span><span>👑 Imperiya gazetasi</span><span>№ '+(all.length?Math.max(...all.map(n=>n.id)):0)+'</span></div></div>';
+  if(!all.length) h+='<div class="nempty">🗞 Hozircha yangilik yo‘q.<br><span class="hsub">Birinchi son tez orada chiqadi</span></div>';
+  if(lead) h+=nRow(lead,'nlead',lead.pinned?'📌 BOSH MAVZU':'⚡ SO‘NGGI XABAR');
+  if(rest.length) h+='<div class="nsec"><span>YANGILIKLAR</span></div>'+rest.map(n=>nRow(n,'nrow')).join('');
+  if(ads.length) h+='<div class="nsec ad"><span>📢 E‘LONLAR</span></div>'+ads.map(n=>'<div class="nad">'+nRow(n,'nrow')+'</div>').join('');
+  sec.innerHTML=h+'</div>';
+  sec.querySelectorAll('.nitem').forEach(el=>el.onclick=()=>{ const n=all.find(x=>x.id==el.dataset.id); if(n) openArticle(n); });
+  sec.querySelectorAll('.nlink').forEach(el=>el.onclick=e=>{ e.stopPropagation(); newsOpenLink(el.dataset.u); });
+  app_q(sec,'.gback').onclick=()=>setTab(window.NEWS_BACK||'profil');
+  return sec;
+}
+function newsSeen(d){
+  const ids=(d.news||[]).filter(n=>n.active).map(n=>n.id); if(!d.news_unread||!ids.length) return;
+  api('/app/api/news/seen',{last:Math.max(...ids)}).then(r=>{ if(r.result){ d.news_unread=r.unread; const b=document.querySelector('.nbdg'); if(b&&!r.unread) b.remove(); } }).catch(()=>{});
+}
+function refreshNews(d){ const old=document.getElementById('s-news'); if(!old) return;
+  const nw=newsPage(d); if(old.classList.contains('on')) nw.classList.add('on'); old.replaceWith(nw); }
+function openArticle(n){
+  let ov=document.getElementById('nwv'); if(!ov){ ov=document.createElement('div'); ov.id='nwv'; document.body.appendChild(ov); }
+  ov.className='nwv show';
+  ov.innerHTML='<div class="nwv-in"><div class="nwv-hd"><span class="chv-b" id="nwvB">‹</span><b>EMPIRE NEWS</b></div><div class="nwv-sc">'+
+    (n.img?'<img class="nwv-img" src="'+esc(n.img)+'" alt="">':'')+'<div class="nkick">'+(n.kind==='ad'?'📢 E‘LON':'🗞 YANGILIK')+' · '+esc(n.at)+'</div>'+
+    '<h1 class="nwv-t">'+esc(n.title)+'</h1><div class="nwv-b">'+nBody(n.body)+'</div>'+nLinks(n)+'</div></div>';
+  document.getElementById('nwvB').onclick=()=>{ ov.className='nwv'; };
+  ov.querySelectorAll('.nlink').forEach(el=>el.onclick=()=>newsOpenLink(el.dataset.u));
+}
+function newsAdmin(d){
+  const box=$('<div class="card full onews"></div>'); let edit=null, img=null, dropImg=false;
+  const ERR={title:'✍️ Sarlavha kamida 2 belgi',image:'🖼 Rasm yaroqsiz',id:'⚠️ Post topilmadi',owner_only:'👑 Faqat ownerlar'};
+  const linkRow=l=>'<div class="nlrow"><input class="nlt" maxlength="40" placeholder="Nomi" value="'+esc(l&&l.t||'')+'">'+
+    '<input class="nlu" maxlength="300" placeholder="https://… yoki @kanal" value="'+esc(l&&l.u||'')+'"><span class="nlx">✕</span></div>';
+  const draw=list=>{ d.news=list; let kind=edit?edit.kind:'news';
+    box.innerHTML='<div class="lbl">'+(edit?'✏️ Tahrirlash #'+edit.id:'📰 Yangi post')+'</div>'+
+      '<div class="seg nkind"><span class="s'+(kind!=='ad'?' on':'')+'" data-k="news">🗞 Yangilik</span><span class="s'+(kind==='ad'?' on':'')+'" data-k="ad">📢 E‘lon</span></div>'+
+      '<div class="frow"><input class="bet" id="nwT" maxlength="120" placeholder="Sarlavha" style="text-align:left" value="'+esc(edit?edit.title:'')+'"></div>'+
+      '<div class="frow"><textarea class="nta" id="nwB" maxlength="5000" rows="6" placeholder="Maqola matni…">'+esc(edit?edit.body:'')+'</textarea></div>'+
+      '<div class="nimgp" id="nwP">'+(edit&&edit.img?'<img src="'+esc(edit.img)+'" alt="">':'')+'</div>'+
+      '<div class="chbtns"><button class="btn" id="nwFB">🖼 Rasm tanlash</button><button class="btn" id="nwNo">🚫 Rasmsiz</button></div><input type="file" accept="image/*" id="nwF" hidden>'+
+      '<div class="lbl" style="margin-top:12px">🔗 Havolalar (6 tagacha)</div><div id="nwL">'+(edit&&edit.links.length?edit.links:[null]).map(linkRow).join('')+'</div>'+
+      '<button class="btn" id="nwLA">➕ Havola qo‘shish</button>'+
+      '<div class="chbtns" style="margin-top:12px"><button class="btn go" id="nwS">'+(edit?'💾 Saqlash':'📤 Chop etish')+'</button>'+(edit?'<button class="btn" id="nwC">Bekor qilish</button>':'')+'</div>'+
+      '<div class="lbl" style="margin-top:18px">🗂 Postlar ('+list.length+')</div>'+
+      (list.length?list.map(n=>'<div class="npost'+(n.active?'':' off')+'" data-id="'+n.id+'">'+
+        (n.img?'<span class="npi" style="background-image:url('+esc(n.img)+')"></span>':'<span class="npi e">'+(n.kind==='ad'?'📢':'🗞')+'</span>')+
+        '<div class="npm"><b>'+(n.pinned?'📌 ':'')+esc(n.title)+'</b><div class="hsub">'+(n.kind==='ad'?'E‘lon':'Yangilik')+' · '+esc(n.at)+(n.active?'':' · 🙈 yashirin')+'</div></div>'+
+        '<span class="na" data-a="edit" title="Tahrirlash">✏️</span><span class="na" data-a="pin" title="Tepaga">📌</span>'+
+        '<span class="na" data-a="toggle" title="Ko‘rsatish/yashirish">'+(n.active?'👁':'🙈')+'</span><span class="na" data-a="delete" title="O‘chirish">🗑</span></div>').join('')
+        :'<div class="hsub">Hali post yo‘q</div>');
+    box.querySelectorAll('.nkind .s').forEach(x=>x.onclick=()=>{ kind=x.dataset.k; box.querySelectorAll('.nkind .s').forEach(y=>y.classList.toggle('on',y===x)); });
+    app_q(box,'#nwF').onchange=e=>{ const f=e.target.files[0]; if(!f) return;
+      chatShrink(f).then(u=>{ img=u; dropImg=false; app_q(box,'#nwP').innerHTML='<img src="'+u+'" alt="">'; }).catch(()=>toast('⚠️ Rasm o‘qilmadi')); };
+    app_q(box,'#nwFB').onclick=()=>app_q(box,'#nwF').click();
+    app_q(box,'#nwNo').onclick=()=>{ img=null; dropImg=true; app_q(box,'#nwP').innerHTML=''; };
+    const bindX=()=>box.querySelectorAll('.nlx').forEach(x=>x.onclick=()=>x.parentNode.remove());
+    app_q(box,'#nwLA').onclick=()=>{ const L=app_q(box,'#nwL'); if(L.children.length>=6){ toast('🔗 Ko‘pi bilan 6 ta'); return; }
+      L.insertAdjacentHTML('beforeend',linkRow(null)); bindX(); };
+    bindX();
+    app_q(box,'#nwS').onclick=e=>{ const b=e.currentTarget; b.disabled=true;
+      const links=[...box.querySelectorAll('.nlrow')].map(r=>({t:app_q(r,'.nlt').value.trim(),u:app_q(r,'.nlu').value.trim()})).filter(l=>l.u);
+      const body={kind:kind,title:app_q(box,'#nwT').value,body:app_q(box,'#nwB').value,links:links};
+      if(img) body.image=img; if(edit){ body.id=edit.id; if(dropImg) body.drop_image=1; }
+      api('/app/api/news/'+(edit?'update':'add'),body).then(r=>{ b.disabled=false;
+        if(r.result){ toast(edit?'✅ Saqlandi':'✅ Yangilik chop etildi'); edit=null; img=null; dropImg=false; draw(r.news); refreshNews(d); }
+        else toast(ERR[r.error]||'⚠️ Xatolik'); }).catch(()=>{ b.disabled=false; toast('⚠️ Aloqa xatosi'); }); };
+    const cb=app_q(box,'#nwC'); if(cb) cb.onclick=()=>{ edit=null; img=null; dropImg=false; draw(d.news); };
+    box.querySelectorAll('.npost').forEach(r=>{ const id=+r.dataset.id;
+      r.querySelectorAll('.na').forEach(a=>a.onclick=()=>{ const act=a.dataset.a;
+        if(act==='edit'){ edit=d.news.find(x=>x.id===id)||null; img=null; dropImg=false; draw(d.news); box.scrollIntoView({behavior:'smooth'}); return; }
+        if(act==='delete'&&!confirm('Post o‘chirilsinmi?')) return;
+        api('/app/api/news/'+act,{id:id}).then(res=>{ if(res.result){ toast('✅ Bajarildi'); if(edit&&edit.id===id) edit=null; draw(res.news); refreshNews(d); }
+          else toast(ERR[res.error]||'⚠️ Xatolik'); }); }); });
+  };
+  draw(d.news||[]); return box;
+}
+function ownerFlags(d){
+  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun']];
+  const box=$('<div class="card full"></div>');
+  const draw=f=>{ box.innerHTML='<div class="lbl">⚙️ Xususiyatlar</div>'+F.map(([k,i,l])=>'<div class="oflag" data-k="'+k+'"><span>'+i+' '+l+'</span>'+
+      '<span class="otg'+(f[k]?' on':'')+'"><i></i></span></div>').join('')+
+      '<div class="hsub" style="margin-top:8px">O‘chiq bo‘lsa — faqat ownerlar ko‘radi (test rejimi). Foydalanuvchilar keyingi ochilishda ko‘radi.</div>';
+    box.querySelectorAll('.oflag').forEach(r=>r.onclick=()=>api('/app/api/owner/flag',{key:r.dataset.k}).then(x=>{
+      if(x.flags){ d.owner_flags=x.flags; draw(x.flags); toast('✅ Saqlandi'); } else toast('⚠️ Xatolik'); })); };
+  draw(d.owner_flags||{}); return box;
+}
 function chatShrink(file){ return new Promise((ok,bad)=>{ const url=URL.createObjectURL(file), im=new Image();
   im.onload=()=>{ const k=Math.min(1,1280/Math.max(im.naturalWidth,im.naturalHeight)), w=Math.round(im.naturalWidth*k), h=Math.round(im.naturalHeight*k);
     const cv=document.createElement('canvas'); cv.width=w; cv.height=h; cv.getContext('2d').drawImage(im,0,0,w,h); URL.revokeObjectURL(url);

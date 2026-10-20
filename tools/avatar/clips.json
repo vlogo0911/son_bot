@@ -1,0 +1,156 @@
+{
+ "idle": {
+  "file": "40_10.bvh",
+  "start": 1.5,
+  "end": 5.5,
+  "dur": 51.791666666666664,
+  "travel": false
+ },
+ "dance": {
+  "file": "55_01.bvh",
+  "start": 1.2,
+  "end": 14.5,
+  "dur": 15.058333333333334,
+  "travel": false
+ },
+ "wave": {
+  "file": "55_02.bvh",
+  "start": 1.2,
+  "end": 8.0,
+  "dur": 18.175,
+  "travel": false
+ },
+ "chicken": {
+  "file": "18_15.bvh",
+  "start": 1.2,
+  "end": 12.0,
+  "dur": 12.808333333333334,
+  "travel": false
+ },
+ "break": {
+  "file": "90_28.bvh",
+  "start": 1.2,
+  "end": 6.4,
+  "dur": 6.425,
+  "travel": true
+ },
+ "kazachok": {
+  "file": "90_30.bvh",
+  "start": 1.2,
+  "end": 12.0,
+  "dur": 11.95,
+  "travel": false
+ },
+ "moonwalk": {
+  "file": "90_32.bvh",
+  "start": 1.2,
+  "end": 6.0,
+  "dur": 6.033333333333333,
+  "travel": false
+ },
+ "flex": {
+  "file": "79_94.bvh",
+  "start": 1.2,
+  "end": 7.8,
+  "dur": 7.8,
+  "travel": false
+ },
+ "happy": {
+  "file": "79_69.bvh",
+  "start": 1.2,
+  "end": 6.8,
+  "dur": 6.816666666666666,
+  "travel": false
+ },
+ "laugh": {
+  "file": "79_70.bvh",
+  "start": 1.2,
+  "end": 6.4,
+  "dur": 6.366666666666666,
+  "travel": false
+ },
+ "cry": {
+  "file": "79_72.bvh",
+  "start": 1.2,
+  "end": 7.9,
+  "dur": 7.95,
+  "travel": false
+ },
+ "sad": {
+  "file": "79_71.bvh",
+  "start": 1.2,
+  "end": 9.0,
+  "dur": 9.0,
+  "travel": false
+ },
+ "boxing": {
+  "file": "13_17.bvh",
+  "start": 2.5,
+  "end": 17.0,
+  "dur": 40.34166666666667,
+  "travel": false
+ },
+ "kick": {
+  "file": "90_05.bvh",
+  "start": 1.2,
+  "end": 4.3,
+  "dur": 4.283333333333333,
+  "travel": true
+ },
+ "backflip": {
+  "file": "87_03.bvh",
+  "start": 0.3,
+  "end": 2.07,
+  "dur": 2.066666666666667,
+  "travel": true
+ },
+ "cartwheel": {
+  "file": "49_06.bvh",
+  "start": 0.8,
+  "end": 4.0,
+  "dur": 4.016666666666667,
+  "travel": true
+ },
+ "bow": {
+  "file": "111_02.bvh",
+  "start": 0.5,
+  "end": 3.5,
+  "dur": 3.533333333333333,
+  "travel": false
+ },
+ "shrug": {
+  "file": "111_25.bvh",
+  "start": 0.3,
+  "end": 2.4,
+  "dur": 2.433333333333333,
+  "travel": false
+ },
+ "jacks": {
+  "file": "22_16.bvh",
+  "start": 0.6,
+  "end": 3.6,
+  "dur": 3.6083333333333334,
+  "travel": false
+ },
+ "taichi": {
+  "file": "12_04.bvh",
+  "start": 8.0,
+  "end": 30.0,
+  "dur": 148.33333333333334,
+  "travel": false
+ },
+ "party": {
+  "file": "14_17.bvh",
+  "start": 8.0,
+  "end": 17.0,
+  "dur": 20.841666666666665,
+  "travel": false
+ },
+ "salsa": {
+  "file": "60_08.bvh",
+  "start": 1.2,
+  "end": 17.0,
+  "dur": 28.516666666666666,
+  "travel": false
+ }
+}

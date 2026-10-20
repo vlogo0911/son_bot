@@ -16747,6 +16747,13 @@ def init_exchange():
         """)
         if "net" not in {r[1] for r in c.execute("PRAGMA table_info(exchange_txns)")}:
             c.execute("ALTER TABLE exchange_txns ADD COLUMN net INTEGER NOT NULL DEFAULT 0")
+        if "asset" not in {r[1] for r in c.execute("PRAGMA table_info(exchange_txns)")}:   # usd | emp
+            c.execute("ALTER TABLE exchange_txns ADD COLUMN asset TEXT NOT NULL DEFAULT 'usd'")
+        # 💎 hamkor olmosi ↔ 🪙 EMP: kurs (1 olmos = rate EMP), komissiya, kunlik limitlar (EMP hisobida)
+        c.execute("""CREATE TABLE IF NOT EXISTS exchange_asset_config (
+            id INTEGER PRIMARY KEY CHECK (id=1), enabled INTEGER NOT NULL DEFAULT 0, rate REAL NOT NULL DEFAULT 10,
+            fee_pct REAL NOT NULL DEFAULT 5, limit_out INTEGER NOT NULL DEFAULT 5000, limit_in INTEGER NOT NULL DEFAULT 5000)""")
+        c.execute("INSERT OR IGNORE INTO exchange_asset_config(id) VALUES (1)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_exch_out ON exchange_txns(direction, status)")
 
 
@@ -16767,7 +16774,7 @@ def exch_sign(body: bytes) -> str:
 def exch_today_out(uid):
     start = int(time.time()) - 86400
     row = db().execute(
-        "SELECT COALESCE(SUM(amount), 0) FROM exchange_txns WHERE direction='out' AND user_id=? "
+        "SELECT COALESCE(SUM(amount), 0) FROM exchange_txns WHERE direction='out' AND user_id=? AND asset='usd' "
         "AND status IN ('done','pending') AND created_at>=?",
         (uid, start),
     ).fetchone()
@@ -16810,6 +16817,86 @@ async def exchange_apply_incoming(txid, user_id, amount):
             f"💱 <b>ALMASHUV (kirdi)</b> · {escape(EXCHANGE_PARTNER_NAME)}\n{person_name(user_id)}: +{amount}$ (txid {txid})",
         )
     return True, {"balance": balance, "duplicate": not fresh}
+
+
+# ── 💎 Hamkor olmosi ↔ 🪙 EMP (alohida yo'l: /exchange/credit_asset — eski $ ko'prigi bilan aralashmaydi) ──
+# So'rov: {"txid", "user_id", "asset", "amount", "ts"} — amount QABUL QILUVCHI valyutasida (bizga "emp", hamkorga "diamond").
+# Imzo: X-Signature = HMAC-SHA256(EXCHANGE_SECRET, body). Javob: 200 {"ok":true} | 409 {"ok":false,"error":...} (yuboruvchi qaytaradi).
+
+def swap_config():
+    try:
+        row = db().execute("SELECT enabled, rate, fee_pct, limit_out, limit_in FROM exchange_asset_config WHERE id=1").fetchone()
+    except sqlite3.OperationalError:     # init_exchange hali chaqirilmagan
+        row = None
+    return dict(zip(("enabled", "rate", "fee_pct", "limit_out", "limit_in"), row)) if row else \
+        {"enabled": 0, "rate": 10.0, "fee_pct": 5.0, "limit_out": 5000, "limit_in": 5000}
+
+
+def swap_ready():
+    return bool(EXCHANGE_SECRET) and bool(EXCHANGE_PARTNER_URL) and bool(swap_config()["enabled"])
+
+
+def swap_today(uid, direction):
+    try:
+        row = db().execute("SELECT COALESCE(SUM(amount),0) FROM exchange_txns WHERE direction=? AND user_id=? AND asset='emp' "
+                           "AND status IN ('done','pending') AND created_at>=?", (direction, uid, int(time.time()) - 86400)).fetchone()
+    except sqlite3.OperationalError:     # init_exchange hali chaqirilmagan
+        return 0
+    return int(row[0] or 0)
+
+
+def swap_stats():
+    try:
+        r = db().execute("SELECT COALESCE(SUM(CASE WHEN direction='out' AND status='done' THEN amount END),0),"
+                         " COALESCE(SUM(CASE WHEN direction='out' AND status='done' THEN net END),0),"
+                         " COALESCE(SUM(CASE WHEN direction='in' THEN amount END),0) FROM exchange_txns WHERE asset='emp'").fetchone()
+    except sqlite3.OperationalError:
+        r = (0, 0, 0)
+    return dict(zip(("out_emp", "out_diamonds", "in_emp"), r))
+
+
+def swap_quote(emp):
+    """EMP → olmos: (olmos, komissiya EMP)."""
+    cfg = swap_config()
+    fee = math.ceil(emp * cfg["fee_pct"] / 100)
+    return int((emp - fee) // cfg["rate"]) if cfg["rate"] > 0 else 0, fee
+
+
+async def exchange_apply_incoming_asset(txid, user_id, asset, amount):
+    """Hamkordan 💎 → bizda 🪙 EMP (idempotent)."""
+    cfg = swap_config()
+    if not EXCHANGE_SECRET or not cfg["enabled"]:
+        return False, {"error": "disabled"}
+    if asset != "emp":
+        return False, {"error": "asset"}
+    if amount <= 0 or amount > EMP_MAX_AMOUNT:
+        return False, {"error": "bad_amount"}
+    c = db()
+    if c.execute("SELECT 1 FROM exchange_txns WHERE txid=?", (txid,)).fetchone():
+        return True, {"duplicate": True, "balance": emp_balance(user_id)}
+    if not c.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone():
+        return False, {"error": "user"}
+    if not emp_enabled_for(user_id):
+        return False, {"error": "emp_closed"}
+    if swap_today(user_id, "in") + amount > cfg["limit_in"]:
+        return False, {"error": "limit"}
+    try:
+        with c:
+            cur = c.execute("INSERT OR IGNORE INTO exchange_txns(txid, direction, user_id, amount, net, status, created_at, asset) "
+                            "VALUES (?, 'in', ?, ?, ?, 'done', ?, 'emp')", (txid, user_id, amount, amount, int(time.time())))
+            if cur.rowcount == 1:
+                emp_change(c, user_id, amount)
+    except sqlite3.Error:
+        logger.exception("EMP almashuv: kiruvchi yozilmadi (txid %s)", txid)
+        return False, {"error": "db"}
+    bal = emp_balance(user_id)
+    try:
+        await _EXCHANGE_LOOP_BOT.send_message(user_id, f"💎→🪙 {escape(EXCHANGE_PARTNER_NAME)} olmoslaringiz almashtirildi: "
+                                                       f"<b>+{fmt_money(amount)} EMP</b>\n🪙 EMP balansi: {fmt_money(bal)}")
+    except TelegramError:
+        pass
+    await log_money_event(_EXCHANGE_LOOP_BOT, f"💎→🪙 <b>EMP ALMASHUV (kirdi)</b>\n{person_name(user_id)}: +{amount} EMP (txid {txid})")
+    return True, {"balance": bal, "duplicate": False}
 
 
 # ── HTTP server (alohida ipda; so'rovni bot sikliga uzatadi) ──
@@ -16986,6 +17073,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_chat_send(uid, body.get("to"), body.get("text"), body.get("kind") or "text", body.get("data"))
         elif path == "/app/api/emp/invoice":
             coro = web_emp_invoice(uid, body.get("pack"))
+        elif path == "/app/api/emp/swap":
+            coro = web_emp_swap(uid, body.get("amount"))
+        elif path == "/app/api/emp/swapcfg":
+            coro = web_emp_swapcfg(uid, body)
         elif path == "/app/api/emp/state":
             coro = web_emp_state(uid)
         elif path in ("/app/api/emp/add", "/app/api/emp/update", "/app/api/emp/toggle", "/app/api/emp/delete"):
@@ -17028,7 +17119,7 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         if path.startswith("/app/api/"):
             self._web_api(path)
             return
-        if path != "/exchange/credit":
+        if path not in ("/exchange/credit", "/exchange/credit_asset"):
             self._send(404, {"ok": False})
             return
         try:
@@ -17050,6 +17141,7 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             user_id = int(data["user_id"])
             amount = int(data["amount"])
             ts = int(data.get("ts", 0))
+            asset = str(data.get("asset", ""))[:16] if path == "/exchange/credit_asset" else None
         except (ValueError, KeyError, TypeError, json.JSONDecodeError):
             self._send(400, {"ok": False, "error": "bad_json"})
             return
@@ -17061,7 +17153,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             return
         try:
             fut = asyncio.run_coroutine_threadsafe(
-                exchange_apply_incoming(txid, user_id, amount), _EXCHANGE_LOOP)
+                exchange_apply_incoming_asset(txid, user_id, asset, amount) if asset is not None
+                else exchange_apply_incoming(txid, user_id, amount), _EXCHANGE_LOOP)
             ok, payload = fut.result(timeout=EXCHANGE_HTTP_TIMEOUT)
         except Exception as e:  # noqa: BLE001
             logger.warning("Almashuv: kiruvchi so'rov bajarilmadi: %s", e)
@@ -17091,11 +17184,14 @@ def exchange_start_server(application):
 
 # ── Chiquvchi: bizning foydalanuvchi hamkor botga pul yuboradi ──
 
-def _exch_post(txid, user_id, amount):
+def _exch_post(txid, user_id, amount, asset=None):
     """Hamkorga imzolangan so'rov (alohida ipda chaqiriladi). Qaytaradi: (holat, javob)."""
-    body = json.dumps({"txid": txid, "user_id": user_id, "amount": amount, "ts": int(time.time())}).encode()
+    obj = {"txid": txid, "user_id": user_id, "amount": amount, "ts": int(time.time())}
+    if asset:
+        obj["asset"] = asset
+    body = json.dumps(obj).encode()
     req = urllib.request.Request(
-        EXCHANGE_PARTNER_URL + "/exchange/credit", data=body, method="POST",
+        EXCHANGE_PARTNER_URL + ("/exchange/credit_asset" if asset else "/exchange/credit"), data=body, method="POST",
         headers={"Content-Type": "application/json", "X-Signature": exch_sign(body)})
     try:
         with urllib.request.urlopen(req, timeout=EXCHANGE_HTTP_TIMEOUT) as resp:
@@ -17111,10 +17207,12 @@ def _exch_post(txid, user_id, amount):
 
 async def exchange_finalize_out(txid, uid):
     """Pending 'out' o'tkazmani hamkorga yuborib yakunlaydi. True — hal bo'ldi (done/failed)."""
-    row = db().execute("SELECT amount, net FROM exchange_txns WHERE txid=? AND status='pending'", (txid,)).fetchone()
+    row = db().execute("SELECT amount, net, asset FROM exchange_txns WHERE txid=? AND status='pending'", (txid,)).fetchone()
     if not row:
         return True
-    gross, net = row
+    gross, net, asset = row
+    if asset == "emp":
+        return await _swap_finalize_out(txid, uid, gross, net)
     status, resp = await asyncio.to_thread(_exch_post, txid, uid, net)
     c = db()
     if status == 200 and resp.get("ok"):
@@ -17148,6 +17246,104 @@ async def exchange_finalize_out(txid, uid):
     with c:
         c.execute("UPDATE exchange_txns SET retries=retries+1 WHERE txid=? AND status='pending'", (txid,))
     return False
+
+
+async def _swap_finalize_out(txid, uid, emp, diamonds):
+    """🪙 EMP → 💎: hamkorga olmos qo'shishni so'raymiz; aniq rad bo'lsa EMP qaytadi, noaniq bo'lsa keyin qayta."""
+    status, resp = await asyncio.to_thread(_exch_post, txid, uid, diamonds, "diamond")
+    c = db()
+    if status == 200 and resp.get("ok"):
+        with c:
+            c.execute("UPDATE exchange_txns SET status='done' WHERE txid=? AND status='pending'", (txid,))
+        try:
+            await _EXCHANGE_LOOP_BOT.send_message(uid, f"🪙→💎 <b>{fmt_money(diamonds)} olmos</b> {escape(EXCHANGE_PARTNER_NAME)}dagi "
+                                                       f"hisobingizga tushdi (−{fmt_money(emp)} EMP).")
+        except TelegramError:
+            pass
+        await log_money_event(_EXCHANGE_LOOP_BOT, f"🪙→💎 <b>EMP ALMASHUV (chiqdi)</b>\n{person_name(uid)}: −{emp} EMP → {diamonds} olmos (txid {txid})")
+        return True
+    if status in (400, 401, 403, 404, 409, 503) and resp.get("error") != "starting":
+        with c:
+            cur = c.execute("UPDATE exchange_txns SET status='failed' WHERE txid=? AND status='pending'", (txid,))
+            if cur.rowcount == 1:
+                emp_change(c, uid, emp)
+        if cur.rowcount == 1:
+            try:
+                await _EXCHANGE_LOOP_BOT.send_message(uid, f"😓 Olmosga almashtirib bo‘lmadi — <b>{fmt_money(emp)} EMP</b> qaytarildi.")
+            except TelegramError:
+                pass
+        return True
+    with c:
+        c.execute("UPDATE exchange_txns SET retries=retries+1 WHERE txid=? AND status='pending'", (txid,))
+    return False
+
+
+async def web_emp_swap(uid, amount):
+    """🪙 EMP → 💎 hamkor olmosi."""
+    if not emp_enabled_for(uid):
+        return {"error": "disabled"}
+    if not swap_ready():
+        return {"error": "swap_off"}
+    try:
+        emp = int(amount)
+    except (TypeError, ValueError):
+        return {"error": "amount"}
+    cfg = swap_config()
+    if emp <= 0 or emp > EMP_MAX_AMOUNT:
+        return {"error": "amount"}
+    diamonds, fee = swap_quote(emp)
+    if diamonds < 1:
+        return {"error": "too_small", "min": swap_min()}
+    if swap_today(uid, "out") + emp > cfg["limit_out"]:
+        return {"error": "limit", "left": max(0, cfg["limit_out"] - swap_today(uid, "out"))}
+    txid = f"sw-{uid}-{secrets.token_hex(8)}"
+    c = db()
+    with c:
+        cur = c.execute("UPDATE emp_wallet SET emp=emp-? WHERE user_id=? AND emp>=?", (emp, uid, emp))
+        if cur.rowcount != 1:
+            return {"error": "funds"}
+        c.execute("INSERT INTO exchange_txns(txid, direction, user_id, amount, net, status, created_at, asset) "
+                  "VALUES (?, 'out', ?, ?, ?, 'pending', ?, 'emp')", (txid, uid, emp, diamonds, int(time.time())))
+    done = await _swap_finalize_out(txid, uid, emp, diamonds)
+    st = db().execute("SELECT status FROM exchange_txns WHERE txid=?", (txid,)).fetchone()[0]
+    return {"result": "pending" if not done else st, "diamonds": diamonds, "fee": fee, "emp": emp_payload(uid)}
+
+
+def swap_min():
+    cfg = swap_config()
+    m = 1
+    while swap_quote(m)[0] < 1 and m < EMP_MAX_AMOUNT:
+        m = max(m + 1, int(m * 1.5))
+    lo, hi = max(1, m // 2), m        # aniq minimum (ikkilik qidiruv)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if swap_quote(mid)[0] >= 1:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
+def swap_payload(uid):
+    cfg = swap_config()
+    return {"ready": swap_ready(), "partner": EXCHANGE_PARTNER_NAME, "rate": cfg["rate"], "fee": cfg["fee_pct"],
+            "min": swap_min(), "left": max(0, cfg["limit_out"] - swap_today(uid, "out")), "limit_in": cfg["limit_in"]}
+
+
+async def web_emp_swapcfg(uid, body):
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner"}
+    try:
+        rate = float(body.get("rate")); fee = float(body.get("fee"))
+        lo, li = int(body.get("limit_out")), int(body.get("limit_in")); en = 1 if body.get("enabled") else 0
+    except (TypeError, ValueError):
+        return {"error": "values"}
+    if not (0.01 <= rate <= 1_000_000 and 0 <= fee <= 50 and 0 <= lo <= EMP_MAX_AMOUNT and 0 <= li <= EMP_MAX_AMOUNT):
+        return {"error": "values"}
+    c = db()
+    with c:
+        c.execute("UPDATE exchange_asset_config SET enabled=?, rate=?, fee_pct=?, limit_out=?, limit_in=? WHERE id=1", (en, rate, fee, lo, li))
+    return {"result": "ok", "emp": emp_payload(uid)}
 
 
 async def exchange_send(uid, amount):
@@ -18419,11 +18615,14 @@ def emp_payload(uid):
     c = db()
     out = {"balance": emp_balance(uid), "test": not webapp_flags().get("emp", 0), "packs": emp_packs(),
            "history": [{"emp": r[0], "stars": r[1], "at": tashkent_dt(r[2])} for r in c.execute(
-               "SELECT emp, stars, created_at FROM emp_payments WHERE user_id=? ORDER BY id DESC LIMIT 5", (uid,))]}
+               "SELECT emp, stars, created_at FROM emp_payments WHERE user_id=? ORDER BY id DESC LIMIT 5", (uid,))],
+           "swap": swap_payload(uid)}
     if uid in CAREER_OWNER_IDS:
         tot = c.execute("SELECT COUNT(*), COALESCE(SUM(stars),0), COALESCE(SUM(emp),0) FROM emp_payments WHERE refunded=0").fetchone()
         out["admin"] = {"packs": emp_packs(True), "payments": tot[0], "stars": tot[1], "emp_sold": tot[2],
-                        "emp_total": c.execute("SELECT COALESCE(SUM(emp),0) FROM emp_wallet").fetchone()[0]}
+                        "emp_total": c.execute("SELECT COALESCE(SUM(emp),0) FROM emp_wallet").fetchone()[0],
+                        "swapcfg": dict(swap_config(), bridge=bool(EXCHANGE_SECRET and EXCHANGE_PARTNER_URL)),
+                        "swap_stats": swap_stats()}
     return out
 
 
@@ -20274,6 +20473,11 @@ WEBAPP_HTML = r"""<!doctype html>
   .pk .pki{font-size:30px}.pk .pke{font-size:26px;font-weight:900;line-height:1.1;margin-top:4px}.pk .pkl{font-size:11px;letter-spacing:.2em;opacity:.7}
   .pk .pks{margin:10px auto 0;display:inline-block;padding:7px 14px;border-radius:999px;font-weight:800;background:var(--g-metal);color:#2b1b02}
   .pk .pkb{position:absolute;top:-8px;right:8px;padding:3px 8px;border-radius:9px;font-size:10px;font-weight:800;background:#ff3b5c;color:#fff;box-shadow:0 0 10px rgba(255,59,92,.6)}
+  .empsw{margin-top:16px;padding:14px;border-radius:18px;background:linear-gradient(150deg,rgba(120,200,255,.12),rgba(255,210,74,.06));box-shadow:inset 0 0 0 1px rgba(150,210,255,.3)}
+  .empsw .swr{display:flex;gap:8px;margin-top:10px}.empsw .swr .bet{flex:1;min-width:0}.empsw .swr .btn{flex:none;padding:0 16px}
+  .empsw .swq{margin-top:8px;font-size:14px}
+  .oemp .swcfg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.oemp .swcfg label{font-size:11px;opacity:.85;display:flex;flex-direction:column;gap:4px}
+  .oemp .swcfg input{box-sizing:border-box;width:100%;min-width:0;padding:9px 8px;border-radius:10px;border:1px solid rgba(255,210,74,.3);background:rgba(0,0,0,.3);color:#fff;font:inherit}
   .emphist{margin-top:16px}.emphist .ehr{display:flex;justify-content:space-between;padding:8px 2px;border-bottom:1px solid rgba(255,210,74,.12);font-size:13px}
   .oemp .ehd{display:grid;grid-template-columns:1fr 1fr 1fr 84px;gap:6px;font-size:11px;opacity:.7;margin:12px 0 4px}
   .oemp .emprow{display:grid;grid-template-columns:1fr 1fr 1fr 28px 28px 28px;gap:6px;align-items:center;margin-top:6px}
@@ -20762,7 +20966,16 @@ function render(res){
             '<span class="es" title="Saqlash">💾</span><span class="et" title="Yoqish/o‘chirish">'+(x.active?'🟢':'⛔')+'</span><span class="ed" title="O‘chirish">🗑</span></div>').join('')+
           '<div class="erow emprow new"><input class="ee" type="number" inputmode="numeric" placeholder="EMP"><input class="eb" type="number" inputmode="numeric" placeholder="Bonus" value="0">'+
           '<input class="es2" type="number" inputmode="numeric" placeholder="⭐"><span class="ea" title="Qo‘shish">➕</span></div>'+
-          '<div class="hsub" style="margin-top:8px">⭐ narx — bitta to‘lov 1–10 000 Stars. ⛔ paket foydalanuvchilarga ko‘rinmaydi.</div>';
+          '<div class="hsub" style="margin-top:8px">⭐ narx — bitta to‘lov 1–10 000 Stars. ⛔ paket foydalanuvchilarga ko‘rinmaydi.</div>'+
+          (A.swapcfg?'<div class="lbl" style="margin-top:16px">💎 Hamkor olmosi ↔ 🪙 EMP</div>'+
+            '<div class="hsub">Ko‘prik: '+(A.swapcfg.bridge?'✅ ulangan':'❌ yo‘q (EXCHANGE_SECRET / EXCHANGE_PARTNER_URL)')+
+            ' · Chiqdi: '+fmtMoney(A.swap_stats.out_emp)+' EMP → '+fmtMoney(A.swap_stats.out_diamonds)+' 💎 · Kirdi: '+fmtMoney(A.swap_stats.in_emp)+' EMP</div>'+
+            '<div class="swcfg"><label>1 💎 = EMP<input id="swRate" type="number" step="0.01" value="'+A.swapcfg.rate+'"></label>'+
+            '<label>Komissiya %<input id="swFee" type="number" step="0.1" value="'+A.swapcfg.fee_pct+'"></label>'+
+            '<label>Kunlik chiqish (EMP)<input id="swLo" type="number" value="'+A.swapcfg.limit_out+'"></label>'+
+            '<label>Kunlik kirish (EMP)<input id="swLi" type="number" value="'+A.swapcfg.limit_in+'"></label></div>'+
+            '<div class="chbtns"><button class="btn'+(A.swapcfg.enabled?' go':'')+'" id="swEn">'+(A.swapcfg.enabled?'🟢 Yoqilgan':'⛔ O‘chiq')+'</button>'+
+            '<button class="btn go" id="swSave">💾 Saqlash</button></div>':'');
         const val=r=>({emp:app_q(r,'.ee').value,bonus:app_q(r,'.eb').value,stars:app_q(r,'.es2').value});
         const done=res=>{ if(res.result){ toast('✅ Saqlandi'); d.emp=res.emp; drawEA(res.emp); } else toast(res.error==='values'?'⚠️ Qiymatlar noto‘g‘ri (⭐ 1–10 000)':'⚠️ Xatolik'); };
         ea.querySelectorAll('.emprow[data-id]').forEach(r=>{ const id=+r.dataset.id;
@@ -20770,6 +20983,10 @@ function render(res){
           app_q(r,'.et').onclick=()=>api('/app/api/emp/toggle',{id:id}).then(done);
           app_q(r,'.ed').onclick=()=>{ if(confirm('Paket o‘chirilsinmi?')) api('/app/api/emp/delete',{id:id}).then(done); }; });
         const nr=app_q(ea,'.emprow.new'); app_q(nr,'.ea').onclick=()=>api('/app/api/emp/add',val(nr)).then(done);
+        if(A.swapcfg){ let en=!!A.swapcfg.enabled; const enb=app_q(ea,'#swEn');
+          enb.onclick=()=>{ en=!en; enb.textContent=en?'🟢 Yoqilgan':'⛔ O‘chiq'; enb.classList.toggle('go',en); };
+          app_q(ea,'#swSave').onclick=()=>api('/app/api/emp/swapcfg',{enabled:en,rate:app_q(ea,'#swRate').value,fee:app_q(ea,'#swFee').value,
+            limit_out:app_q(ea,'#swLo').value,limit_in:app_q(ea,'#swLi').value}).then(done); }
       };
       drawEA(d.emp); o.appendChild(ea);
     }
@@ -20822,12 +21039,31 @@ function openEmpShop(d){
       '<div class="emppk">'+(e.packs.length?e.packs.map(x=>'<div class="pk" data-id="'+x.id+'" data-tap="1">'+(x.bonus?'<span class="pkb">+'+fmtMoney(x.bonus)+' bonus</span>':'')+
         '<div class="pki">🪙</div><div class="pke">'+fmtMoney(x.emp)+'</div><div class="pkl">EMP</div><div class="pks">⭐ '+fmtMoney(x.stars)+'</div></div>').join('')
         :'<div class="hsub center">Hozircha paket yo‘q</div>')+'</div>'+
+      (e.swap&&e.swap.ready?'<div class="empsw"><div class="lbl">💎 '+esc(e.swap.partner)+' olmoslari ↔ 🪙 EMP</div>'+
+        '<div class="hsub">Kurs: <b>1 💎 = '+e.swap.rate+' EMP</b> · komissiya '+e.swap.fee+'% · bugun yana '+fmtMoney(e.swap.left)+' EMP</div>'+
+        '<div class="swr"><input class="bet" id="empSwA" type="number" inputmode="numeric" placeholder="EMP (min '+e.swap.min+')" style="text-align:left">'+
+        '<button class="btn go" id="empSwB">🪙→💎</button></div><div class="swq" id="empSwQ">Miqdorni yozing</div>'+
+        '<div class="hsub" style="margin-top:6px">💎→🪙 teskari almashtirish — '+esc(e.swap.partner)+' botida (EMP ga almashtirish).</div></div>':'')+
       (e.history&&e.history.length?'<div class="emphist"><div class="lbl">🧾 Oxirgi xaridlar</div>'+e.history.map(h=>'<div class="ehr"><span>+'+fmtMoney(h.emp)+' EMP · ⭐ '+h.stars+'</span><span class="hsub">'+esc(h.at)+'</span></div>').join('')+'</div>':'')+
       '</div>';
     ov.className='show';
     document.getElementById('empX').onclick=()=>{ ov.className=''; };
     ov.onclick=ev=>{ if(ev.target===ov) ov.className=''; };
     ov.querySelectorAll('.pk').forEach(el=>el.onclick=()=>buy(+el.dataset.id,el));
+    const sa=document.getElementById('empSwA');
+    if(sa){ const q=document.getElementById('empSwQ'), sb=document.getElementById('empSwB'), S=e.swap;
+      const quote=v=>{ const fee=Math.ceil(v*S.fee/100); return [Math.floor((v-fee)/S.rate),fee]; };
+      sa.oninput=()=>{ const v=parseInt(sa.value)||0; if(!v){ q.textContent='Miqdorni yozing'; return; } const [dm,fee]=quote(v);
+        q.innerHTML=v>e.balance?'⚠️ EMP yetarli emas':(dm<1?'Minimal: '+S.min+' EMP':'➡️ <b>'+fmtMoney(dm)+' 💎</b> olasiz · komissiya '+fmtMoney(fee)+' EMP'); };
+      sb.onclick=()=>{ const v=parseInt(sa.value)||0; if(!v) return; sb.disabled=true;
+        api('/app/api/emp/swap',{amount:v}).then(r=>{ sb.disabled=false;
+          if(r.emp){ d.emp=r.emp; const b=document.getElementById('empBal'); if(b) b.textContent=fmtMoney(r.emp.balance); }
+          if(r.result==='done'){ toast('✅ '+fmtMoney(r.diamonds)+' 💎 '+S.partner+' hisobingizga tushdi'); haptic('success'); draw(); }
+          else if(r.result==='pending'){ toast('⏳ Yuborildi — hamkor bot javobini kutyapmiz'); draw(); }
+          else if(r.result==='failed'){ toast('😓 O‘tmadi — EMP qaytarildi'); draw(); }
+          else toast({funds:'💸 EMP yetarli emas',too_small:'Minimal: '+(r.min||S.min)+' EMP',limit:'📅 Bugungi limit: yana '+fmtMoney(r.left||0)+' EMP',
+            swap_off:'💱 Almashuv hozir o‘chiq',disabled:'🪙 EMP yopiq',amount:'⚠️ Miqdor xato'}[r.error]||'⚠️ Xatolik');
+        }).catch(()=>{ sb.disabled=false; toast('⚠️ Aloqa xatosi'); }); }; }
   };
   const poll=(before,n)=>api('/app/api/emp/state',{}).then(r=>{ if(r.emp){ if(r.emp.balance>before||n<=0){ d.emp=r.emp; draw(); const b=document.getElementById('empBal'); if(b) b.textContent=fmtMoney(r.emp.balance);
       if(r.emp.balance>before){ toast('🎉 +'+fmtMoney(r.emp.balance-before)+' EMP hisobingizga tushdi'); haptic('success'); } } else setTimeout(()=>poll(before,n-1),1500); } });

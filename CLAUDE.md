@@ -238,3 +238,11 @@
   Narxlarni ownerlar web app Owner tabida boshqaradi (`/app/api/emp/{add,update,toggle,delete}`, `web_emp_admin`, ⭐ 1–10 000).
   Klient: Profil'da `.empc` karta, `openEmpShop` (`#empv`, coin rasmi `webapp_assets/emp_coin*.jpg` — "STATS ECONOMY"),
   to'lovdan keyin `/app/api/emp/state` polling. Payload `emp` (balance/test/packs/history; owner uchun `admin` statistikasi).
+- 💎 Hamkor olmosi ↔ 🪙 EMP: alohida yo'l `POST /exchange/credit_asset` ({txid,user_id,asset,amount,ts}, o'sha HMAC/`EXCHANGE_SECRET`;
+  amount — qabul qiluvchi valyutasida; eski `/exchange/credit` ($) o'zgarmagan). `exchange_txns.asset` (usd|emp), sozlama
+  `exchange_asset_config` (enabled, rate = 1 💎 necha EMP, fee_pct, limit_out/limit_in — kunlik, EMP). EMP→💎: `web_emp_swap`
+  (`/app/api/emp/swap`, `swap_quote`: olmos = floor((EMP−ceil(EMP·fee%))/rate), EMP yechiladi → `_swap_finalize_out` hamkorga
+  asset=diamond; 4xx → EMP qaytadi, noaniq → pending + `exchange_retry_worker`). 💎→EMP: `exchange_apply_incoming_asset` (asset=emp,
+  idempotent txid, `emp_enabled_for`, limit_in). Ownerlar web app Owner → EMP bo'limida kurs/komissiya/limit/yoqish
+  (`/app/api/emp/swapcfg`, `web_emp_swapcfg`), statistika `swap_stats`. Payload `emp.swap` (`swap_payload`). Hamkor uchun protokol va
+  namuna: `tools/partner_bridge/`.

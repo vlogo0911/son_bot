@@ -2228,7 +2228,7 @@ async def panel_kid_handle_text(update, context):
         row = c.execute(
             "SELECT user_id FROM users WHERE lower(username)=lower(?)", (raw[1:],)
         ).fetchone()
-    elif raw.lstrip("-").isdigit():
+    elif raw.lstrip("-").isdigit() and len(raw) <= 16:
         row = (int(raw),)
     else:
         row = None
@@ -3561,6 +3561,38 @@ def person_name(user_id):
     display_name = html.escape(str(display_name))
     return f'<a href="tg://user?id={user_id}">{display_name}</a>'
 
+def request_result_text(kind, approved):
+    """Juftlik/ajrashish/ishdan bo'shash arizasi natijasi — foydalanuvchiga tushunarli matn."""
+    if approved:
+        return {
+            "pair": "💞 Juftlik arizangiz tasdiqlandi! Endi siz juftlikdasiz.",
+            "divorce": "💔 Ajrashish arizangiz tasdiqlandi — endi juftlikda emassiz.",
+            "quit_job": "💼 Ishdan bo‘shash arizangiz tasdiqlandi. Endi yangi kasb tanlashingiz mumkin.",
+        }.get(kind, "✅ Arizangiz tasdiqlandi.")
+    return {
+        "pair": "❌ Juftlik arizangiz rad etildi.",
+        "divorce": "❌ Ajrashish arizangiz rad etildi — juftligingiz saqlanib qoldi.",
+        "quit_job": "❌ Ishdan bo‘shash arizangiz rad etildi — kasbingiz o‘zgarmadi.",
+    }.get(kind, "❌ Arizangiz rad etildi.")
+
+
+async def registration_next_step(bot, uid):
+    """Ro'yxatning keyingi yetishmayotgan qadamini shaxsiy chatga yuboradi: jins → tug'ilgan sana → kasb."""
+    try:
+        if not parent_role(uid):
+            await bot.send_message(uid, "👋 Botdan foydalanish uchun jinsingizni tanlang:", reply_markup=gender_keyboard())
+            return
+        row = career_get_user(uid)
+        if not row or not row[1]:
+            await bot.send_message(uid, "📅 Endi tug‘ilgan sanangizni kiriting — bu faqat bir marta qilinadi.",
+                                   reply_markup=career_birth_kb())
+            return
+        if not row[3]:
+            await bot.send_message(uid, "💼 <b>Endi kasbingizni tanlang:</b>", reply_markup=career_profession_kb(uid))
+    except TelegramError:
+        pass
+
+
 def gender_keyboard():
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("👦 O‘g‘il bola", callback_data="rel:gender:male"),
@@ -4054,6 +4086,15 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if gender not in ("male", "female"):
             await q.answer("Noto‘g‘ri tanlov.", show_alert=True)
             return
+        old = parent_role(uid)
+        if old:
+            await q.answer("⚧ Jinsingiz allaqachon tanlangan: " + ("👦 O‘g‘il bola" if old == "male" else "👧 Qiz bola")
+                           + ". Uni o‘zgartirib bo‘lmaydi.", show_alert=True)
+            try:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except TelegramError:
+                pass
+            return
         with c:
             c.execute(
                 """INSERT INTO user_gender(user_id, gender, updated_at)
@@ -4063,7 +4104,9 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (uid, gender, datetime.now().isoformat(timespec="seconds")),
             )
         await q.answer("Tanlov saqlandi!")
-        await q.edit_message_text("✅ Jinsingiz saqlandi. Davom etish uchun /start bosing.")
+        await q.edit_message_text("✅ Jinsingiz saqlandi: " + ("👦 O‘g‘il bola" if gender == "male" else "👧 Qiz bola"))
+        if q.message and q.message.chat.type == ChatType.PRIVATE:
+            await registration_next_step(context.bot, uid)
         return
 
     if data.startswith("rel:menu:"):
@@ -4285,7 +4328,7 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (uid, datetime.now().isoformat(timespec="seconds"), rid),
                 )
             try:
-                await context.bot.send_message(requester, f"❌ {kind} arizangiz rad etildi.")
+                await context.bot.send_message(requester, request_result_text(kind, False))
             except TelegramError:
                 pass
             await q.answer("Ariza rad etildi.")
@@ -4350,11 +4393,11 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (uid, now, requester, target, target, requester),
                 )
         try:
-            await context.bot.send_message(
-                requester, f"✅ Arizangiz tasdiqlandi: {kind}."
-            )
+            await context.bot.send_message(requester, request_result_text(kind, True))
         except TelegramError:
             pass
+        if kind == "quit_job":
+            await registration_next_step(context.bot, requester)
         if kind == "pair" and target:
             try:
                 await context.bot.send_message(
@@ -4364,7 +4407,7 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         elif kind == "divorce" and target:
             try:
-                await context.bot.send_message(target, "💔 Juftlik arizasi tasdiqlandi.")
+                await context.bot.send_message(target, "💔 Ajrashish tasdiqlandi — endi juftlikda emassiz.")
             except TelegramError:
                 pass
         if kind == "divorce":
@@ -8941,6 +8984,8 @@ PROFESSION_NAMES = {
 }
 
 def profession_name(pid, chat_id):
+    if pid not in PROFESSION_NAMES:      # eski/noto'g'ri ID — profil yiqilmasin
+        return "—"
     lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
     return PROFESSION_NAMES[pid].get(lang, PROFESSION_NAMES[pid]["uz"])
 
@@ -9020,6 +9065,9 @@ async def career_start_birth(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+CAREER_MIN_AGE, CAREER_MAX_AGE = 6, 100
+
+
 def career_parse_birth(text):
     try:
         value = datetime.strptime(text.strip(), "%d.%m.%Y").date()
@@ -9035,7 +9083,7 @@ def career_parse_birth(text):
     if (today.month, today.day) < (value.month, value.day):
         age -= 1
 
-    if age < 1 or age > 120:
+    if age < CAREER_MIN_AGE or age > CAREER_MAX_AGE:
         return None
 
     return value, age
@@ -9050,6 +9098,10 @@ async def career_handle_birth(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if context.user_data.get("career_state") != "birth_input":
         return False
+    row = career_get_user(user.id)
+    if row and row[1]:
+        context.user_data.pop("career_state", None)
+        return False
 
     parsed = career_parse_birth(msg.text)
 
@@ -9057,7 +9109,8 @@ async def career_handle_birth(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.reply_text(
             "❌ Sana noto‘g‘ri.\n\n"
             "Quyidagi formatda kiriting:\n"
-            "<code>15.08.2005</code>"
+            "<code>15.08.2005</code>\n"
+            f"(yosh {CAREER_MIN_AGE}–{CAREER_MAX_AGE} oralig‘ida bo‘lishi kerak)"
         )
         return True
 
@@ -9081,9 +9134,19 @@ async def career_handle_birth(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
+    """Kasb/ro'yxat tugmalari. Callback'ga faqat BIR marta javob beriladi: ichkarida alert bo'lsa — o'sha,
+    bo'lmasa oxirida bo'sh javob (aks holda Telegram "query is already answered" xatosini beradi)."""
+    try:
+        await _cb_career(update, context)
+    finally:
+        try:
+            await update.callback_query.answer()
+        except TelegramError:
+            pass
 
+
+async def _cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
     data = q.data
     user = q.from_user
     if not user:
@@ -9124,6 +9187,13 @@ async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await career_start_birth(update, context)
         return
 
+    if data in ("career:birth", "career:birth_yes"):
+        row = career_get_user(user.id)
+        if row and row[1]:
+            context.user_data.pop("career_state", None)
+            await q.answer("🎂 Tug‘ilgan sana allaqachon tasdiqlangan — uni o‘zgartirib bo‘lmaydi.", show_alert=True)
+            return
+
     if data == "career:birth":
         await career_start_birth(update, context)
         return
@@ -9131,7 +9201,7 @@ async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "career:birth_yes":
         birth = context.user_data.get("career_birth")
         if not birth:
-            await q.message.reply_text("❌ Sana topilmadi. Qaytadan kiriting.")
+            await q.message.reply_text("❌ Sana topilmadi. Qaytadan kiriting.", reply_markup=career_birth_kb())
             return
 
         c = db()
@@ -9151,7 +9221,16 @@ async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         c.commit()
 
-        context.user_data["career_state"] = "profession"
+        context.user_data.pop("career_state", None)
+        context.user_data.pop("career_birth", None)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+        row = career_get_user(user.id)
+        if row and row[3]:      # kasb allaqachon bor (qayta ro'yxatda saqlanmagan bo'lsa ham)
+            await q.message.reply_text("✅ Tug‘ilgan sana saqlandi!")
+            return
         await q.message.reply_text(
             "✅ Tug‘ilgan sana saqlandi!\n\n"
             "💼 <b>Endi kasbingizni tanlang:</b>",
@@ -9422,121 +9501,6 @@ async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    if data.startswith("career:request:"):
-        try:
-            profession_id = int(data.split(":")[-1])
-        except ValueError:
-            return
-
-        if profession_id not in PROFESSION_NAMES:
-            return
-
-        row = career_get_user(user.id)
-
-        if not row or not row[2]:
-            await q.answer("Avval kasbingizni tanlang.", show_alert=True)
-            return
-
-        current_profession = row[2]
-
-        if profession_id == current_profession:
-            await q.answer(
-                "❌ Hozirgi kasbingizni qayta tanlay olmaysiz.",
-                show_alert=True,
-            )
-            return
-
-        pending = db().execute(
-            """
-            SELECT id FROM career_requests
-            WHERE user_id=? AND status='pending'
-            LIMIT 1
-            """,
-            (user.id,)
-        ).fetchone()
-
-        if pending:
-            await q.answer(
-                "⏳ Sizda allaqachon pending ariza bor.",
-                show_alert=True,
-            )
-            return
-
-        c = db()
-
-        c.execute(
-            """
-            INSERT INTO career_requests
-                (user_id, requested_profession_id, status, created_at)
-            VALUES (?, ?, 'pending', ?)
-            """,
-            (
-                user.id,
-                profession_id,
-                datetime.utcnow().isoformat(),
-            ),
-        )
-
-        request_id = c.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
-
-        c.commit()
-
-        current_name = profession_name(current_profession, user.id)
-        new_name = profession_name(profession_id, user.id)
-
-        await q.edit_message_text(
-            "📨 <b>Ariza boshliqqa yuborildi!</b>\n\n"
-            f"💼 Hozirgi kasb: {current_name}\n"
-            f"🔄 Yangi kasb: {new_name}\n\n"
-            "⏳ Boshliq qarorini kuting.",
-            parse_mode="HTML",
-        )
-
-        applicant_name = escape(
-            user.full_name or user.username or str(user.id)
-        )
-
-        owner_text = (
-            "📨 <b>Yangi kasb almashtirish arizasi</b>\n\n"
-            f"👤 Foydalanuvchi: <b>{applicant_name}</b>\n"
-            f"🆔 ID: <code>{user.id}</code>\n"
-            f"💼 Hozirgi kasb: <b>{current_name}</b>\n"
-            f"🔄 Yangi kasb: <b>{new_name}</b>\n\n"
-            "Arizani ko‘rib chiqing:"
-        )
-
-        owner_kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "✅ Tasdiqlash",
-                    callback_data=f"career:approve:{request_id}"
-                ),
-                InlineKeyboardButton(
-                    "❌ Rad etish",
-                    callback_data=f"career:reject:{request_id}"
-                ),
-            ]
-        ])
-
-        for owner_id in CAREER_OWNER_IDS:
-            try:
-                await context.bot.send_message(
-                    chat_id=owner_id,
-                    text=owner_text,
-                    parse_mode="HTML",
-                    reply_markup=owner_kb,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Boshliqqa ariza yuborilmadi %s: %s",
-                    owner_id,
-                    e,
-                )
-
-        return
-
     if data.startswith("career:prof:"):
         try:
             profession_id = int(data.split(":")[-1])
@@ -9553,15 +9517,22 @@ async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).fetchone()
 
         if not row or not row[0]:
-            await q.message.reply_text("❌ Avval tug‘ilgan sanangizni tasdiqlang.")
+            await q.message.reply_text("❌ Avval tug‘ilgan sanangizni tasdiqlang.", reply_markup=career_birth_kb())
+            return
+        if row[1]:
+            cur = career_get_user(user.id)
+            cur_name = profession_name(cur[2], q.message.chat.id) if cur and cur[2] in PROFESSION_NAMES else "—"
+            await q.answer(f"💼 Sizda kasb bor: {cur_name}.\nAlmashtirish uchun /ariza yuboring.", show_alert=True)
             return
 
-        c.execute(
+        cur = c.execute(
             """UPDATE users
                SET profession_id=?, profession_selected=1
-               WHERE user_id=?""",
+               WHERE user_id=? AND COALESCE(profession_selected,0)=0""",
             (profession_id, user.id)
         )
+        if cur.rowcount != 1:       # ikki marta tez bosilganda
+            return
         c.execute(
             "INSERT OR IGNORE INTO user_career (user_id, career_xp) VALUES (?, 0)",
             (user.id,)
@@ -9572,6 +9543,10 @@ async def cb_career(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("career_birth", None)
         context.user_data.pop("career_age", None)
 
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
         await q.message.reply_text(
             f"🎉 <b>Kasbingiz tanlandi!</b>\n\n"
             f"💼 {profession_name(profession_id, q.message.chat.id)}\n"
@@ -11932,12 +11907,11 @@ async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             approved += 1
             try:
-                await context.bot.send_message(
-                    chat_id=requester,
-                    text=f"✅ Arizangiz tasdiqlandi. Ariza raqami: {rid}",
-                )
+                await context.bot.send_message(chat_id=requester, text=request_result_text(kind, True))
             except TelegramError:
                 pass
+            if kind == "quit_job":
+                await registration_next_step(context.bot, requester)
 
             if kind == "divorce":
                 await divorce_notify(context.bot, settlement)
@@ -12920,7 +12894,7 @@ async def panel_bank_text(update, context):
     # kind == "owner"
     if raw.startswith("@"):
         row = c.execute("SELECT user_id FROM users WHERE lower(username)=lower(?)", (raw[1:],)).fetchone()
-    elif raw.isdigit():
+    elif raw.isdigit() and len(raw) <= 16:
         row = (int(raw),)
     else:
         row = None
@@ -14969,7 +14943,7 @@ async def mod_target(update, context):
             row = c.execute(
                 "SELECT user_id, first_name FROM users WHERE lower(username)=lower(?)", (raw[1:],)
             ).fetchone()
-        elif raw.lstrip("-").isdigit():
+        elif raw.lstrip("-").isdigit() and len(raw) <= 16:
             row = c.execute("SELECT user_id, first_name FROM users WHERE user_id=?", (int(raw),)).fetchone() \
                 or (int(raw), raw)
         else:
@@ -16931,7 +16905,7 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "bot": "son_bot"})
         elif path in ("", "/app"):
             self._send_html(200, WEBAPP_HTML)
-        elif path.startswith("/app/avatar/") and path.rsplit("/", 1)[1].isdigit():
+        elif path.startswith("/app/avatar/") and path.rsplit("/", 1)[1].isdigit() and len(path.rsplit("/", 1)[1]) <= 16:
             self._avatar(int(path.rsplit("/", 1)[1]))
         elif path.startswith("/app/a/") and path.rsplit("/", 1)[1] in WEBAPP_ASSETS:
             self._asset(path.rsplit("/", 1)[1])
@@ -18000,7 +17974,7 @@ async def panel_rereg_text(update, context):
     if raw.startswith("@"):
         row = db().execute("SELECT user_id FROM users WHERE lower(username)=lower(?)", (raw[1:],)).fetchone()
         uid = row[0] if row else None
-    elif raw.lstrip("-").isdigit():
+    elif raw.lstrip("-").isdigit() and len(raw) <= 16:
         uid = int(raw)
     if not uid:
         await msg.reply_text("❌ Foydalanuvchi topilmadi. ID (raqam) yoki @username yuboring.", reply_markup=PANEL_REREG_BACK)
@@ -19761,7 +19735,7 @@ async def web_shop_buy(uid, gift_key, recipient):
         if recipient.startswith("@"):
             row = db().execute("SELECT user_id FROM users WHERE lower(username)=lower(?)", (recipient[1:],)).fetchone()
             rid = row[0] if row else None
-        elif recipient.lstrip("-").isdigit():
+        elif recipient.lstrip("-").isdigit() and len(recipient) <= 16:
             rid = int(recipient)
     if not rid:
         return {"error": "recipient"}

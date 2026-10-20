@@ -255,3 +255,8 @@
 - 🪙 3D tanga: `webapp_assets/emp_face.webp` (fon olib tashlangan, perspektiva tekislangan tanga yuzi — ichki halqa ellipsi bo'yicha
   remap) + `coin3d(px, 'sway'|'spin')` (CSS preserve-3d: ikki yuz, qalinlik qatlamlari `<i>`, `c3shine` yaltirash, `c3g` nur).
   Profil EMP kartasi va EMP do'koni sarlavhasida.
+- 🧭 Ro'yxat mantiqi (jins → tug'ilgan sana → kasb): `cb_career` — `_cb_career` o'rami, callback faqat bir marta `answer` qilinadi
+  (aks holda alertlar ishlamaydi). Jins, tasdiqlangan sana va kasb bir marta tanlanadi (eski tugmalar bilan o'zgartirib bo'lmaydi;
+  kasb almashtirish faqat /ariza, ishdan bo'shash — owner tasdig'i). Yosh `CAREER_MIN_AGE`/`CAREER_MAX_AGE` (6–100).
+  `registration_next_step(bot, uid)` — keyingi bo'sh qadamni yuboradi (jins tanlangandan va ishdan bo'shash tasdiqlangandan keyin);
+  `request_result_text(kind, approved)` — tasdiq/rad xabarlari; `profession_name` noma'lum id uchun "—". ID argumentlari ≤16 raqam.

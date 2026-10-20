@@ -4231,8 +4231,8 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("❌ Taklif rad etildi.")
             if is_random:
                 try:
-                    await context.bot.send_message(row[0], f"💔 {person_name(uid)} random juftlik taklifingizni rad etdi.\n"
-                                                           "💍 Web app → Oila bo‘limida yana random juft qidirishingiz mumkin.")
+                    await context.bot.send_message(row[0], f"💔 {person_name(uid)} juftlik taklifingizni rad etdi.\n"
+                                                           "💍 Web app → Oila bo‘limida yana juft qidirishingiz mumkin.")
                 except TelegramError:
                     pass
             return
@@ -4248,7 +4248,7 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("✅ Roziligingiz saqlandi. Endi bot egalari tasdig‘i kutilmoqda.")
         if is_random:
             try:
-                await context.bot.send_message(row[0], f"💞 {person_name(uid)} random juftlik taklifingizga rozi bo‘ldi!\n"
+                await context.bot.send_message(row[0], f"💞 {person_name(uid)} juftlik taklifingizga rozi bo‘ldi!\n"
                                                        "⏳ Endi bot egalari tasdig‘i kutilmoqda.")
             except TelegramError:
                 pass
@@ -16934,6 +16934,18 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_birja_buy(uid, body.get("asset"), body.get("usd"))
         elif path == "/app/api/birja/sell":
             coro = web_birja_sell(uid, body.get("asset"), body.get("pct"))
+        elif path == "/app/api/chat/find":
+            coro = web_chat_find(uid, body.get("q"))
+        elif path == "/app/api/chat/list":
+            coro = web_chat_list(uid)
+        elif path == "/app/api/chat/history":
+            coro = web_chat_history(uid, body.get("with"), body.get("after"))
+        elif path == "/app/api/chat/send":
+            coro = web_chat_send(uid, body.get("to"), body.get("text"))
+        elif path == "/app/api/chat/block":
+            coro = web_chat_block(uid, body.get("with"), bool(body.get("on")))
+        elif path == "/app/api/pair/propose":
+            coro = web_pair_propose(uid, body.get("q"))
         elif path == "/app/api/randpair/find":
             coro = web_randpair(uid)
         elif path == "/app/api/randpair/cancel":
@@ -17874,6 +17886,14 @@ def init_webapp():
     with db() as c:
         c.execute("CREATE TABLE IF NOT EXISTS webapp_config (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
         c.execute("CREATE TABLE IF NOT EXISTS user_avatar (user_id INTEGER PRIMARY KEY, data TEXT NOT NULL DEFAULT '{}')")
+        # 💬 Web chat: shaxsiy xabarlar va bloklar
+        c.execute("""CREATE TABLE IF NOT EXISTS web_chat_msgs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, from_id INTEGER NOT NULL, to_id INTEGER NOT NULL,
+            text TEXT NOT NULL, created_at INTEGER NOT NULL, read INTEGER NOT NULL DEFAULT 0)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_wchat_pair ON web_chat_msgs(from_id, to_id, id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_wchat_unread ON web_chat_msgs(to_id, read)")
+        c.execute("""CREATE TABLE IF NOT EXISTS web_chat_blocks (
+            user_id INTEGER NOT NULL, blocked_id INTEGER NOT NULL, PRIMARY KEY(user_id, blocked_id))""")
         cols = {r[1] for r in c.execute("PRAGMA table_info(pair_requests)")}
         if cols and "random" not in cols:     # 💍 random juft so'rovlari belgisi
             c.execute("ALTER TABLE pair_requests ADD COLUMN random INTEGER NOT NULL DEFAULT 0")
@@ -18065,6 +18085,213 @@ async def web_randpair_cancel(uid):
     with c:
         c.execute("UPDATE pair_requests SET status='cancelled' WHERE id=? AND status='proposal'", (op[0],))
     return {"result": "cancelled", "status": randpair_status(uid)}
+
+
+# ── 💬 Web chat: ID / @username orqali topib, shaxsiy suhbat ──
+CHAT_MAX_LEN = 1000
+CHAT_RATE = (8, 10)              # 10 s ichida ko'pi bilan 8 ta xabar
+CHAT_NOTIFY_GAP = 300            # s — bitta suhbat bo'yicha Telegram bildirishnomalari oralig'i
+CHAT_PAGE = 60
+_CHAT_SENT: dict[int, list] = {}
+_CHAT_NOTIFIED: dict[tuple, float] = {}
+
+
+def chat_resolve(q):
+    """ID yoki @username → botni ishlatgan foydalanuvchi ID si (yoki None)."""
+    q = str(q or "").strip()
+    c = db()
+    if re.fullmatch(r"\d{3,15}", q):
+        row = c.execute("SELECT user_id FROM users WHERE user_id=? AND (started=1 OR birth_confirmed=1)", (int(q),)).fetchone()
+    else:
+        un = q.lstrip("@")
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", un):
+            return None
+        row = c.execute("SELECT user_id FROM users WHERE LOWER(username)=LOWER(?) AND (started=1 OR birth_confirmed=1)",
+                        (un,)).fetchone()
+    return row[0] if row else None
+
+
+def chat_blocked(a, b):
+    """a yoki b bir-birini bloklaganmi."""
+    return bool(db().execute("SELECT 1 FROM web_chat_blocks WHERE (user_id=? AND blocked_id=?) OR (user_id=? AND blocked_id=?)",
+                             (a, b, b, a)).fetchone())
+
+
+def chat_peer(uid, me=None):
+    card = user_card(uid)
+    pair = active_pair(uid)
+    out = {"id": uid, "name": card["name"], "username": card["username"], "gender": card["gender"],
+           "age": card["age"], "level": card["level"], "money_fmt": card["money_fmt"], "rank": card["rank"],
+           "profession": card["profession"], "divorces": card["divorces"], "kids": card["kids"],
+           "has_pair": bool(pair)}
+    if me is not None:
+        out["blocked_by_me"] = bool(db().execute("SELECT 1 FROM web_chat_blocks WHERE user_id=? AND blocked_id=?",
+                                                 (me, uid)).fetchone())
+        out["my_partner"] = bool(pair and me in (pair[1], pair[2]))
+    return out
+
+
+def chat_unread(uid):
+    return db().execute("SELECT COUNT(*) FROM web_chat_msgs WHERE to_id=? AND read=0", (uid,)).fetchone()[0]
+
+
+async def web_chat_find(uid, q):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    tid = chat_resolve(q)
+    if not tid:
+        return {"error": "not_found"}
+    if tid == uid:
+        return {"error": "self"}
+    return {"result": "found", "user": chat_peer(tid, uid)}
+
+
+async def web_chat_list(uid):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    c = db()
+    rows = c.execute("""
+        SELECT peer, MAX(id) AS last FROM (
+            SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END AS peer, id
+            FROM web_chat_msgs WHERE from_id=? OR to_id=?)
+        GROUP BY peer ORDER BY last DESC LIMIT 50""", (uid, uid, uid)).fetchall()
+    out = []
+    for peer, last in rows:
+        m = c.execute("SELECT from_id, text, created_at FROM web_chat_msgs WHERE id=?", (last,)).fetchone()
+        unread = c.execute("SELECT COUNT(*) FROM web_chat_msgs WHERE from_id=? AND to_id=? AND read=0", (peer, uid)).fetchone()[0]
+        out.append({"id": peer, "name": _plain_person(peer), "last": m[1][:80], "mine": m[0] == uid,
+                    "at": tashkent_dt(m[2]), "unread": unread})
+    return {"result": "ok", "chats": out, "unread": chat_unread(uid)}
+
+
+async def web_chat_history(uid, peer, after=0):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    try:
+        peer = int(peer); after = int(after or 0)
+    except (TypeError, ValueError):
+        return {"error": "user"}
+    c = db()
+    rows = c.execute("""SELECT id, from_id, text, created_at, read FROM web_chat_msgs
+                        WHERE ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND id>?
+                        ORDER BY id DESC LIMIT ?""", (uid, peer, peer, uid, after, CHAT_PAGE)).fetchall()[::-1]
+    with c:
+        c.execute("UPDATE web_chat_msgs SET read=1 WHERE from_id=? AND to_id=? AND read=0", (peer, uid))
+    seen = c.execute("SELECT COALESCE(MAX(id),0) FROM web_chat_msgs WHERE from_id=? AND to_id=? AND read=1",
+                     (uid, peer)).fetchone()[0]
+    res = {"result": "ok", "msgs": [{"id": r[0], "mine": r[1] == uid, "text": r[2], "at": tashkent_dt(r[3])} for r in rows],
+           "seen": seen, "unread": chat_unread(uid)}
+    if not after:
+        res["peer"] = chat_peer(peer, uid)
+    return res
+
+
+async def web_chat_send(uid, peer, text):
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    try:
+        peer = int(peer)
+    except (TypeError, ValueError):
+        return {"error": "user"}
+    text = re.sub(r"[\u0000-\u0008\u000b-\u001f\u007f]", "", str(text or "")).strip()
+    if not text:
+        return {"error": "empty"}
+    if len(text) > CHAT_MAX_LEN:
+        return {"error": "long", "max": CHAT_MAX_LEN}
+    if peer == uid:
+        return {"error": "self"}
+    if not db().execute("SELECT 1 FROM users WHERE user_id=? AND (started=1 OR birth_confirmed=1)", (peer,)).fetchone():
+        return {"error": "not_found"}
+    if chat_blocked(uid, peer):
+        return {"error": "blocked"}
+    now = time.time()
+    sent = [t for t in _CHAT_SENT.get(uid, []) if now - t < CHAT_RATE[1]]
+    if len(sent) >= CHAT_RATE[0]:
+        return {"error": "rate"}
+    sent.append(now); _CHAT_SENT[uid] = sent
+    c = db()
+    with c:
+        mid = c.execute("INSERT INTO web_chat_msgs(from_id, to_id, text, created_at) VALUES (?, ?, ?, ?)",
+                        (uid, peer, text, int(now))).lastrowid
+    # Telegram bildirishnoma (suhbat bo'yicha 5 daqiqada bir marta, o'qilmagan bo'lsa)
+    key = (uid, peer)
+    if _EXCHANGE_LOOP_BOT is not None and now - _CHAT_NOTIFIED.get(key, 0) > CHAT_NOTIFY_GAP:
+        _CHAT_NOTIFIED[key] = now
+        kb = None
+        if WEBAPP_URL.startswith("https://"):
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Javob berish",
+                                                             web_app=WebAppInfo(f"{WEBAPP_URL}/app#chat={uid}"))]])
+        try:
+            await _EXCHANGE_LOOP_BOT.send_message(
+                chat_id=peer, reply_markup=kb,
+                text=f"💬 <b>Yangi xabar</b> — {person_name(uid)} (ID: <code>{uid}</code>)\n\n"
+                     f"{html.escape(text[:300])}{'…' if len(text) > 300 else ''}")
+        except TelegramError as e:
+            logger.info("Chat bildirishnomasi yetkazilmadi (%s): %s", peer, e)
+    return {"result": "sent", "msg": {"id": mid, "mine": True, "text": text, "at": tashkent_dt(int(now))}}
+
+
+async def web_chat_block(uid, peer, on):
+    try:
+        peer = int(peer)
+    except (TypeError, ValueError):
+        return {"error": "user"}
+    c = db()
+    with c:
+        if on:
+            c.execute("INSERT OR IGNORE INTO web_chat_blocks(user_id, blocked_id) VALUES (?, ?)", (uid, peer))
+        else:
+            c.execute("DELETE FROM web_chat_blocks WHERE user_id=? AND blocked_id=?", (uid, peer))
+    return {"result": "blocked" if on else "unblocked"}
+
+
+async def web_pair_propose(uid, q):
+    """💍 ID / @username orqali juftlik taklifi (web app). Faqat jufti yo'qlar, qarama-qarshi jins."""
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    tid = chat_resolve(q) if not isinstance(q, int) else q
+    if not tid:
+        return {"error": "not_found"}
+    if tid == uid:
+        return {"error": "self"}
+    me, him = parent_role(uid), parent_role(tid)
+    if me not in ("male", "female"):
+        return {"error": "no_gender"}
+    if him not in ("male", "female"):
+        return {"error": "target_gender"}
+    if me == him:
+        return {"error": "same_gender"}
+    if active_pair(uid):
+        return {"error": "has_pair"}
+    if active_pair(tid):
+        return {"error": "target_pair"}
+    if chat_blocked(uid, tid):
+        return {"error": "blocked"}
+    c = db()
+    if c.execute("""SELECT 1 FROM pair_requests WHERE request_type='pair' AND requester_id=? AND target_id=?
+                    AND status IN ('proposal','pending') AND created_at > ?""", (uid, tid, _iso_ago(RANDPAIR_TTL))).fetchone():
+        return {"error": "already"}
+    if _EXCHANGE_LOOP_BOT is None:
+        return {"error": "bot"}
+    now = datetime.now().isoformat(timespec="seconds")
+    with c:
+        rid = c.execute("""INSERT INTO pair_requests (request_type, requester_id, target_id, group_id, status, created_at, random)
+                           VALUES ('pair', ?, ?, 0, 'proposal', ?, 2)""", (uid, tid, now)).lastrowid
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("💞 Roziman", callback_data=f"rel:proposal:yes:{rid}"),
+        InlineKeyboardButton("❌ Rad etish", callback_data=f"rel:proposal:no:{rid}"),
+    ]])
+    try:
+        await _EXCHANGE_LOOP_BOT.send_message(
+            chat_id=tid, reply_markup=kb,
+            text="💍 <b>Juftlik taklifi!</b>\n"
+                 f"{person_name(uid)} sizga juft bo‘lishni taklif qildi.\n\n" + user_card_text(user_card(uid))
+                 + "\n\nRozimisiz? Rozilikdan so‘ng juftlik bot egalari tasdig‘idan keyin tuziladi.")
+    except TelegramError:
+        with c:
+            c.execute("UPDATE pair_requests SET status='failed' WHERE id=?", (rid,))
+        return {"error": "undeliverable"}
+    return {"result": "sent", "name": _plain_person(tid)}
 
 
 async def web_avatar_save(uid, data):
@@ -18262,6 +18489,7 @@ async def webapp_payload(user_id):
         "avatar_test": not webapp_flags().get("avatar", 0),
         "avatar": avatar_get(user_id),
         "randpair": randpair_status(user_id),
+        "chat_unread": chat_unread(user_id),
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -19493,6 +19721,33 @@ WEBAPP_HTML = r"""<!doctype html>
   .rpair .rph{display:flex;align-items:center;gap:12px}
   .rpair .rpi{width:48px;height:48px;flex:none;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:26px;background:var(--g-metal);box-shadow:0 0 16px rgba(255,210,74,.45)}
   .rpair .rpok,.rpair .rpw{margin-top:10px;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.25);line-height:1.45}
+  .rpair .rpsep{margin:12px 0 6px;text-align:center;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim,#a99)}
+  .rpair .rpid,.chs .chq{display:flex;gap:8px}.rpair .rpid .bet,.chs .chq .bet{flex:1;min-width:0}.rpair .rpid .btn,.chs .chq .btn{flex:none;padding:0 16px}
+  .tab{position:relative}.tbadge{position:absolute;top:3px;right:calc(50% - 22px);min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#ff3b5c;color:#fff;font-size:10px;font-weight:800;line-height:17px;box-shadow:0 0 8px rgba(255,59,92,.7)}
+  .chava{position:relative;flex:none;width:44px;height:44px;border-radius:50%;overflow:hidden;display:flex;align-items:center;justify-content:center;font-weight:800;color:#2b1b02;background:var(--g-metal)}
+  .chava img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  .chfound{display:flex;gap:12px;align-items:center;margin-top:12px}.chfound .chava{width:54px;height:54px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}.chbtns{display:flex;gap:8px;margin-top:12px}.chbtns .btn{flex:1}
+  .chlist{display:flex;flex-direction:column;gap:8px}
+  .chrow{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:16px;cursor:pointer;background:rgba(255,255,255,.04);box-shadow:inset 0 0 0 1px rgba(255,210,74,.14)}
+  .chrow.un{box-shadow:inset 0 0 0 1px rgba(255,210,74,.55);background:rgba(255,210,74,.07)}
+  .chr-m{flex:1;min-width:0}.chr-t{display:flex;justify-content:space-between;gap:8px}.chr-t .hsub{flex:none;font-size:10px}
+  .chr-l{font-size:12.5px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+  .chbadge{flex:none;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:#ff3b5c;color:#fff;font-size:11px;font-weight:800;line-height:22px;text-align:center}
+  .chv{position:fixed;inset:0;z-index:85;display:none;background:rgba(5,4,2,.6)}.chv.show{display:flex;justify-content:center}
+  .chv-in{width:100%;max-width:560px;height:100%;display:flex;flex-direction:column;background:linear-gradient(180deg,#140f06,#07070d)}
+  .chv-hd{display:flex;align-items:center;gap:10px;padding:12px 12px 10px;border-bottom:1px solid rgba(255,210,74,.2)}
+  .chv-b{font-size:30px;line-height:1;padding:0 8px 4px 2px;cursor:pointer;color:#ffd24a}.chv-n{flex:1;min-width:0}.chv-n b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .chv-i{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;background:rgba(255,210,74,.12);box-shadow:inset 0 0 0 1px rgba(255,210,74,.35);color:#ffd24a}
+  .chv-info{display:none;padding:0 12px 10px;border-bottom:1px solid rgba(255,210,74,.12)}.chv-info.on{display:block}
+  .chv-msgs{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:6px}
+  .msg{max-width:80%;align-self:flex-start;padding:8px 11px 5px;border-radius:16px 16px 16px 4px;background:rgba(255,255,255,.08);word-wrap:break-word;overflow-wrap:anywhere}
+  .msg.me{align-self:flex-end;border-radius:16px 16px 4px 16px;background:linear-gradient(135deg,#c99a2e,#8a6416);color:#fff}
+  .msg .mt{font-size:14.5px;line-height:1.38}.msg .mm{font-size:9.5px;opacity:.7;text-align:right;margin-top:3px}.msg .tick{margin-left:5px}
+  .chempty{margin-top:30%}
+  .chv-ft{display:flex;gap:8px;align-items:flex-end;padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid rgba(255,210,74,.2)}
+  .chv-ft textarea{flex:1;resize:none;min-height:44px;max-height:110px;padding:12px 14px;border-radius:22px;border:1px solid rgba(255,210,74,.35);background:rgba(0,0,0,.35);color:#fff;font:inherit;font-size:15px;outline:none}
+  .chv-ft .btn{flex:none;width:48px;height:44px;padding:0;border-radius:50%;font-size:18px}
   .avcard{display:flex;align-items:center;gap:14px;margin-top:12px;cursor:pointer}
   .avcard .avi{width:56px;height:56px;flex:none;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:30px;background:var(--g-metal);box-shadow:0 0 18px rgba(255,210,74,.45)}
   .kpar{margin-top:8px;font-size:12px;font-weight:700;color:rgba(255,255,255,.92)}
@@ -19710,8 +19965,12 @@ function render(res){
       '<button class="btn full" id="rpCancel" style="margin-top:10px">✖️ Taklifni bekor qilish</button>';
     else h+='<div class="hsub" style="margin-top:8px">Taklif bilan birga pulingiz, reytingingiz, darajangiz, kasbingiz va oilaviy tarixingiz ko‘rsatiladi. Rozi bo‘lsa — bot egalari tasdig‘idan keyin juft bo‘lasiz.</div>'+
       '<button class="btn go full" id="rpFind" style="margin-top:10px">💍 Random juft topish</button>';
+    if(!st.has_pair && st.gender) h+='<div class="rpsep">yoki ID orqali</div><div class="rpid"><input class="bet" id="rpQ" placeholder="ID yoki @username" autocomplete="off" style="text-align:left">'+
+      '<button class="btn" id="rpSend">💌 Taklif</button></div>';
     rpBox.innerHTML=h;
-    const f=app_q(rpBox,'#rpFind'), cn=app_q(rpBox,'#rpCancel');
+    const f=app_q(rpBox,'#rpFind'), cn=app_q(rpBox,'#rpCancel'), rs=app_q(rpBox,'#rpSend');
+    if(rs) rs.onclick=()=>{ const v=app_q(rpBox,'#rpQ').value.trim(); if(!v){ toast('✍️ ID yoki @username yozing'); return; }
+      pairPropose(v,rs).then(r=>{ if(r&&r.result==='sent') app_q(rpBox,'#rpQ').value=''; }); };
     if(f){ let cd=st.cooldown||0;
       const tick=()=>{ if(cd>0){ f.disabled=true; f.textContent='⏳ '+cd+' s dan keyin'; cd--; } else { f.disabled=false; f.textContent='💍 Random juft topish'; clearInterval(rpT); } };
       tick(); if(cd>0) rpT=setInterval(tick,1000);
@@ -19892,6 +20151,16 @@ function render(res){
     '<button class="btn cash full" id="fcash" style="display:none">💰 Yechib olish</button>';
   app.appendChild(fr);
 
+  // 💬 CHAT: ID / @username orqali topib suhbatlashish
+  const ch=$('<div class="sec" id="s-chat"></div>');
+  ch.innerHTML='<h2>💬 Chat</h2>'+
+    '<div class="card full chs"><div class="lbl">🔎 Foydalanuvchini topish</div>'+
+    '<div class="chq"><input class="bet" id="chQ" placeholder="ID yoki @username" autocomplete="off" style="text-align:left">'+
+    '<button class="btn go" id="chGo">Topish</button></div><div id="chRes"></div></div>'+
+    '<h2 style="margin-top:18px">🗨 Suhbatlar</h2><div id="chList" class="chlist"><div class="hsub">Yuklanmoqda…</div></div>';
+  app.appendChild(ch);
+  initChat(d);
+
   // KAMIKAZE (test: faqat ownerlar, keyin hamma uchun)
   if(d.kami){
     const km=$('<div class="sec" id="s-kami"></div>');
@@ -19947,7 +20216,7 @@ function render(res){
 
   // TABS
   const tabs=$('<div class="tabs"></div>');
-  const defs=[['profil','👤','Profil'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['bank','🏦','Bank'],['birja','📈','Birja'],['farzand','👶','Oila'],['casino',CASINO_ICON,'Kazino']];
+  const defs=[['profil','👤','Profil'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['bank','🏦','Bank'],['birja','📈','Birja'],['farzand','👶','Oila'],['chat','💬','Chat'],['casino',CASINO_ICON,'Kazino']];
   if(d.is_owner&&d.owner) defs.push(['owner','👑','Owner']);
   defs.forEach(([k,t,l])=>{
     const el=$('<div class="tab" data-k="'+k+'"><span class="ti">'+t+'</span><span class="tl">'+l+'</span></div>');
@@ -20909,6 +21178,101 @@ function initCrash(){
   }
   window.CR={stop(){ alive=false; cancelAnimationFrame(raf); clearTimeout(timer); }, poke(){ poll(true); }};
   paintBtn(); renderPlayers(); poll(true); raf=requestAnimationFrame(frame);
+}
+
+// ---- 💬 CHAT (ID orqali shaxsiy suhbat) ----
+const CHERR={not_found:'🔎 Bunday foydalanuvchi topilmadi (botni ishlatgan bo‘lishi kerak)',self:'🙃 Bu sizning ID ingiz',
+  blocked:'🚫 Bloklangan — xabar yuborib bo‘lmaydi',rate:'⏳ Juda tez yozyapsiz, biroz kuting',empty:'✍️ Xabar bo‘sh',
+  long:'📏 Xabar juda uzun (1000 belgigacha)',disabled:'🌐 Web app o‘chirilgan',user:'⚠️ Foydalanuvchi xato'};
+const PAIRERR={not_found:'🔎 Foydalanuvchi topilmadi',self:'🙃 O‘zingizga taklif yubora olmaysiz',no_gender:'⚧ Avval botda jinsingizni tanlang (/start)',
+  target_gender:'⚧ U hali jinsini tanlamagan',same_gender:'🚫 Faqat qarama-qarshi jins bilan juft bo‘lish mumkin',
+  has_pair:'💞 Sizda allaqachon juft bor',target_pair:'💞 Uning allaqachon jufti bor',blocked:'🚫 Bloklangan',
+  already:'⏳ Bu odamga taklif allaqachon yuborilgan',undeliverable:'📭 Yetkazilmadi — u botni bloklagan',bot:'⚠️ Bot band, qayta urining',disabled:'🌐 Web app o‘chirilgan'};
+function pairPropose(q,btn){
+  if(btn) btn.disabled=true;
+  return api('/app/api/pair/propose',{q:String(q)}).then(r=>{ if(btn) btn.disabled=false;
+    if(r.result==='sent'){ toast('💌 Juftlik taklifi '+r.name+' ga yuborildi'); haptic('success'); }
+    else toast(PAIRERR[r.error]||'⚠️ Xatolik'); return r; }).catch(()=>{ if(btn) btn.disabled=false; toast('⚠️ Aloqa xatosi'); });
+}
+function chAva(id,name){ const i=esc(((name||'?').trim().charAt(0)||'?').toUpperCase());
+  return '<span class="chava">'+i+'<img alt="" src="/app/avatar/'+esc(id)+'" onerror="this.remove()"></span>'; }
+function peerInfo(u){
+  const G={male:'👦 Yigit',female:'👧 Qiz'};
+  return '<div class="chips">'+(u.gender?'<span class="chip">'+G[u.gender]+'</span>':'')+(u.age!=null?'<span class="chip">🎂 '+esc(u.age)+'</span>':'')+
+    '<span class="chip">💰 '+esc(u.money_fmt)+'$</span><span class="chip">🏆 '+(u.rank?'#'+esc(u.rank):'👑')+'</span>'+
+    '<span class="chip">⭐ '+esc(u.level)+'</span>'+(u.profession?'<span class="chip">💼 '+esc(u.profession)+'</span>':'')+
+    '<span class="chip">'+(u.has_pair?'💞 Jufti bor':'💍 Jufti yo‘q')+'</span>'+(u.divorces?'<span class="chip">💔 Ajrashgan: '+esc(u.divorces)+'</span>':'')+'</div>';
+}
+function initChat(d){
+  const sec=document.getElementById('s-chat'); if(!sec) return;
+  const q=document.getElementById('chQ'), go=document.getElementById('chGo'), res=document.getElementById('chRes'), list=document.getElementById('chList');
+  if(window.CHL) clearInterval(window.CHL);
+  const find=()=>{ const v=q.value.trim(); if(!v) return; go.disabled=true;
+    api('/app/api/chat/find',{q:v}).then(r=>{ go.disabled=false;
+      if(r.result!=='found'){ res.innerHTML='<div class="hsub" style="margin-top:10px">'+(CHERR[r.error]||'⚠️ Xatolik')+'</div>'; return; }
+      const u=r.user, canPair=!u.has_pair&&!(d.randpair&&d.randpair.has_pair)&&u.gender&&d.randpair&&d.randpair.gender&&u.gender!==d.randpair.gender;
+      res.innerHTML='<div class="chfound">'+chAva(u.id,u.name)+'<div class="chf-m"><b>'+esc(u.name)+'</b>'+(u.username?' <span class="hsub">@'+esc(u.username)+'</span>':'')+
+        '<div class="hsub">ID '+esc(u.id)+'</div></div></div>'+peerInfo(u)+
+        '<div class="chbtns"><button class="btn go" id="chW">💬 Yozish</button>'+(canPair?'<button class="btn" id="chP">💍 Juftlik taklifi</button>':'')+'</div>';
+      document.getElementById('chW').onclick=()=>openChat(u.id,u.name,d);
+      const pb=document.getElementById('chP'); if(pb) pb.onclick=()=>pairPropose(u.id,pb);
+    }).catch(()=>{ go.disabled=false; toast('⚠️ Aloqa xatosi'); }); };
+  go.onclick=find; q.onkeydown=e=>{ if(e.key==='Enter') find(); };
+  const load=()=>{ if(!sec.classList.contains('on')&&list.dataset.ok) return;
+    api('/app/api/chat/list',{}).then(r=>{ if(!r.chats) return; list.dataset.ok=1; setChatBadge(r.unread);
+      list.innerHTML=r.chats.length?r.chats.map(c=>'<div class="chrow'+(c.unread?' un':'')+'" data-id="'+c.id+'" data-n="'+esc(c.name)+'">'+chAva(c.id,c.name)+
+        '<div class="chr-m"><div class="chr-t"><b>'+esc(c.name)+'</b><span class="hsub">'+esc(c.at)+'</span></div>'+
+        '<div class="chr-l">'+(c.mine?'Siz: ':'')+esc(c.last)+'</div></div>'+(c.unread?'<span class="chbadge">'+c.unread+'</span>':'')+'</div>').join('')
+        :'<div class="card full"><div class="center">Hali suhbat yo‘q.<br><span class="hsub">Yuqoridan ID yoki @username orqali toping</span></div></div>';
+      list.querySelectorAll('.chrow').forEach(el=>el.onclick=()=>openChat(+el.dataset.id,el.dataset.n,d));
+    }).catch(()=>{}); };
+  load(); window.CHL=setInterval(load,8000); window.CHLOAD=load;
+  setChatBadge(d.chat_unread||0);
+  const m=/chat=(\d+)/.exec(location.hash||''); if(m && !window.CHOPENED){ window.CHOPENED=1; setTimeout(()=>{ setTab('chat'); openChat(+m[1],'',d); },50); }
+}
+function setChatBadge(n){ const t=document.querySelector('.tab[data-k="chat"]'); if(!t) return;
+  let b=t.querySelector('.tbadge'); if(n>0){ if(!b){ b=document.createElement('span'); b.className='tbadge'; t.appendChild(b); } b.textContent=n>99?'99+':n; } else if(b) b.remove(); }
+function openChat(peer,name,d){
+  let ov=document.getElementById('chv');
+  if(!ov){ ov=document.createElement('div'); ov.id='chv'; document.body.appendChild(ov); }
+  if(window.CHP) clearInterval(window.CHP);
+  ov.className='chv show';
+  ov.innerHTML='<div class="chv-in"><div class="chv-hd"><span class="chv-b" id="chvB">‹</span>'+chAva(peer,name)+
+    '<div class="chv-n"><b id="chvN">'+esc(name||('ID '+peer))+'</b><div class="hsub" id="chvS">ID '+esc(peer)+'</div></div>'+
+    '<span class="chv-i" id="chvP" title="Juftlik taklifi">💍</span><span class="chv-i" id="chvM" title="Ma’lumot">ⓘ</span></div>'+
+    '<div class="chv-info" id="chvInfo"></div><div class="chv-msgs" id="chvL"><div class="hsub center">Yuklanmoqda…</div></div>'+
+    '<div class="chv-ft"><textarea id="chvT" rows="1" maxlength="1000" placeholder="Xabar yozing…"></textarea><button class="btn go" id="chvS2">➤</button></div></div>';
+  const L=document.getElementById('chvL'), T=document.getElementById('chvT'), S=document.getElementById('chvS2'), info=document.getElementById('chvInfo');
+  let last=0, seen=0, peerData=null, first=true;
+  const close=()=>{ ov.className='chv'; clearInterval(window.CHP); window.CHP=0; if(window.CHLOAD) window.CHLOAD(); };
+  document.getElementById('chvB').onclick=close;
+  const bubble=m=>'<div class="msg'+(m.mine?' me':'')+'" data-id="'+m.id+'"><div class="mt">'+esc(m.text).replace(/\n/g,'<br>')+'</div>'+
+    '<div class="mm">'+esc(m.at)+(m.mine?'<span class="tick">✓</span>':'')+'</div></div>';
+  function paintSeen(){ L.querySelectorAll('.msg.me').forEach(el=>{ const t=el.querySelector('.tick'); if(t) t.textContent=(+el.dataset.id<=seen)?'✓✓':'✓'; }); }
+  function add(ms){ if(!ms.length) return; const near=L.scrollHeight-L.scrollTop-L.clientHeight<80;
+    if(first){ L.innerHTML=''; } const em=L.querySelector('.chempty'); if(em) em.remove(); ms.forEach(m=>{ if(m.id>last){ L.insertAdjacentHTML('beforeend',bubble(m)); last=m.id; } });
+    if(near||first) L.scrollTop=L.scrollHeight; }
+  function drawInfo(){ if(!peerData) return; const u=peerData;
+    document.getElementById('chvN').textContent=u.name; document.getElementById('chvS').textContent=(u.username?'@'+u.username+' · ':'')+'ID '+u.id;
+    info.innerHTML=peerInfo(u)+'<div class="chbtns"><button class="btn" id="chvBl">'+(u.blocked_by_me?'✅ Blokdan chiqarish':'🚫 Bloklash')+'</button></div>';
+    document.getElementById('chvBl').onclick=()=>api('/app/api/chat/block',{with:peer,on:!u.blocked_by_me}).then(r=>{
+      if(r.result){ u.blocked_by_me=r.result==='blocked'; toast(u.blocked_by_me?'🚫 Bloklandi':'✅ Blokdan chiqarildi'); drawInfo(); } }); }
+  document.getElementById('chvM').onclick=()=>{ info.classList.toggle('on'); };
+  document.getElementById('chvP').onclick=e=>pairPropose(peer,e.currentTarget);
+  function poll(){ api('/app/api/chat/history',{with:peer,after:last}).then(r=>{
+      if(r.error){ L.innerHTML='<div class="hsub center">'+(CHERR[r.error]||'⚠️ Xatolik')+'</div>'; return; }
+      if(r.peer){ peerData=r.peer; drawInfo(); }
+      if(first&&!r.msgs.length) L.innerHTML='<div class="hsub center chempty">👋 Suhbatni boshlang</div>';
+      add(r.msgs); first=false; seen=r.seen; paintSeen(); setChatBadge(r.unread);
+    }).catch(()=>{}); }
+  poll(); window.CHP=setInterval(()=>{ if(document.getElementById('chv').classList.contains('show')&&!document.hidden) poll(); },2500);
+  const send=()=>{ const v=T.value.trim(); if(!v||S.disabled) return; S.disabled=true;
+    api('/app/api/chat/send',{to:peer,text:v}).then(r=>{ S.disabled=false;
+      if(r.result==='sent'){ T.value=''; T.style.height=''; if(first){ L.innerHTML=''; first=false; } add([r.msg]); paintSeen(); SND.ui&&SND.ui('select'); }
+      else toast(CHERR[r.error]||'⚠️ Xatolik'); }).catch(()=>{ S.disabled=false; toast('⚠️ Aloqa xatosi'); }); };
+  S.onclick=send;
+  T.onkeydown=e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } };
+  T.oninput=()=>{ T.style.height='auto'; T.style.height=Math.min(110,T.scrollHeight)+'px'; };
 }
 
 // ---- 🛩 KAMIKAZE ----

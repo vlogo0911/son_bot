@@ -181,3 +181,11 @@
   so'rg'ich, emotsiyalar). Aylantirish: barmoq bilan surish + ⟲/⟳ (Old/O'ng yon/Orqa/Chap yon). Kiyimlar `family_children.outfit`
   (JSON) — `/app/api/kid/outfit` (`web_kid_outfit`, faqat ota-ona, qiymatlar `[a-z0-9_]` bilan tozalanadi). Payloadda `outfit`,
   `parents` (ota-ona ismlari kartada).
+- 🧍 Realistik 3D avatar (web, test — standart faqat ownerlar): Profil → "3D avatarim" (`openAvatarStudio(d)`, `#ast`, `.kst` uslublari).
+  `AV3D`: three r128 + jsdelivr `three@0.128.0/examples/js` dan GLTFLoader/meshopt_decoder/RoomEnvironment (kerak bo'lganda), PBR,
+  ACES, PMREM muhit, yumshoq soyalar, oltin poydevor; nafas/tebranish, aylantirish, 🔍 yuzga yaqinlashtirish. Modellar
+  `webapp_assets/avatar_m.glb` / `avatar_f.glb` (Innerscene CC0, MakeHuman CC0 asosida; meshopt + WebP 1024). Ranglar teksturani
+  qayta bo'yash bilan (`recolor`, HSL mask `MASK[g].top/bottom`, kiyim/soch/oyoq kiyim), teri — `material.color` tinti; ko'z
+  materialida `alphaTest` (shox parda iris'ni yopmasin). Sozlamalar `user_avatar` jadvali (JSON, `AVATAR_SLOTS` g/top/bottom/shoes/hair/skin/bg),
+  `/app/api/avatar/save` (`web_avatar_save`), payload `avatar3d`/`avatar_test`/`avatar`. `avatar_enabled_for` = webapp_config "avatar"
+  yoki owner; owner panel → 🌐 Web App → "🧍 3D avatar: hamma uchun ochish" (`panel:webapp_avatar`).

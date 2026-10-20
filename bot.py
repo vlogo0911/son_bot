@@ -16918,6 +16918,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_birja_buy(uid, body.get("asset"), body.get("usd"))
         elif path == "/app/api/birja/sell":
             coro = web_birja_sell(uid, body.get("asset"), body.get("pct"))
+        elif path == "/app/api/avatar/save":
+            coro = web_avatar_save(uid, body.get("avatar"))
         elif path == "/app/api/kid/outfit":
             coro = web_kid_outfit(uid, body.get("kid"), body.get("outfit"))
         elif path == "/app/api/edu/enroll":
@@ -17742,7 +17744,8 @@ def panel_webapp_view():
     lines += ["",
               f"👥 Hamma uchun: <b>{'✅ yoqilgan' if flags['all'] else '❌ o‘chiq'}</b>",
               f"👑 Ownerlar uchun: <b>{'✅ yoqilgan' if flags['owner'] else '❌ o‘chiq'}</b>",
-              f"🛩 Kamikaze: <b>{'✅ hamma uchun' if flags.get('kami') else '🧪 faqat ownerlar (test)'}</b>"]
+              f"🛩 Kamikaze: <b>{'✅ hamma uchun' if flags.get('kami') else '🧪 faqat ownerlar (test)'}</b>",
+              f"🧍 3D avatar: <b>{'✅ hamma uchun' if flags.get('avatar') else '🧪 faqat ownerlar (test)'}</b>"]
     rows = [
         [InlineKeyboardButton("🔴 Hamma uchun o‘chirish" if flags["all"] else "🟢 Hamma uchun yoqish",
                               callback_data="panel:webapp_all")],
@@ -17750,6 +17753,8 @@ def panel_webapp_view():
                               callback_data="panel:webapp_owner")],
         [InlineKeyboardButton("🧪 Kamikaze: faqat ownerlarga" if flags.get("kami") else "🛩 Kamikaze: hamma uchun ochish",
                               callback_data="panel:webapp_kami")],
+        [InlineKeyboardButton("🧪 3D avatar: faqat ownerlarga" if flags.get("avatar") else "🧍 3D avatar: hamma uchun ochish",
+                              callback_data="panel:webapp_avatar")],
         [InlineKeyboardButton("⬅️ Panelga qaytish", callback_data="panel:home")],
     ]
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -17763,6 +17768,8 @@ async def panel_webapp_callback(query, context):
         webapp_set("owner", 0 if webapp_flags()["owner"] else 1)
     elif data == "panel:webapp_kami":
         webapp_set("kami", 0 if webapp_flags().get("kami") else 1)
+    elif data == "panel:webapp_avatar":
+        webapp_set("avatar", 0 if webapp_flags().get("avatar") else 1)
     text, kb = panel_webapp_view()
     try:
         await query.edit_message_text(text, reply_markup=kb)
@@ -17846,6 +17853,40 @@ if WEBAPP_URL and not WEBAPP_URL.startswith(("http://", "https://")):
 def init_webapp():
     with db() as c:
         c.execute("CREATE TABLE IF NOT EXISTS webapp_config (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+        c.execute("CREATE TABLE IF NOT EXISTS user_avatar (user_id INTEGER PRIMARY KEY, data TEXT NOT NULL DEFAULT '{}')")
+
+
+# ── 🧍 Realistik 3D avatar (web app) — test: standart faqat ownerlar ──
+AVATAR_SLOTS = ("g", "top", "bottom", "shoes", "hair", "skin", "bg")
+
+
+def avatar_enabled_for(uid):
+    if not web_enabled_for(uid):
+        return False
+    return bool(webapp_flags().get("avatar", 0)) or uid in CAREER_OWNER_IDS
+
+
+def avatar_get(uid):
+    row = db().execute("SELECT data FROM user_avatar WHERE user_id=?", (uid,)).fetchone()
+    try:
+        d = json.loads(row[0]) if row else {}
+        return {k: v for k, v in d.items() if k in AVATAR_SLOTS and isinstance(v, str)}
+    except (ValueError, TypeError):
+        return {}
+
+
+async def web_avatar_save(uid, data):
+    """Avatar sozlamalari (jins, kiyim/soch/teri ranglari, fon) — qisqa kalitlar, klient katalogidan."""
+    if not avatar_enabled_for(uid):
+        return {"error": "disabled"}
+    if not isinstance(data, dict):
+        return {"error": "avatar"}
+    clean = {k: v for k, v in data.items()
+             if k in AVATAR_SLOTS and isinstance(v, str) and re.fullmatch(r"[a-z0-9_]{1,20}", v)}
+    with db() as c:
+        c.execute("INSERT INTO user_avatar(user_id, data) VALUES (?, ?) "
+                  "ON CONFLICT(user_id) DO UPDATE SET data=excluded.data", (uid, json.dumps(clean)))
+    return {"result": "saved", "avatar": clean}
 
 
 def webapp_flags():
@@ -18024,6 +18065,9 @@ async def webapp_payload(user_id):
         "edu_all": edu_list(False) if is_owner else [],
         "kami": kami_enabled_for(user_id),
         "kami_test": not webapp_flags().get("kami", 0),
+        "avatar3d": avatar_enabled_for(user_id),
+        "avatar_test": not webapp_flags().get("avatar", 0),
+        "avatar": avatar_get(user_id),
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -18756,7 +18800,9 @@ async def web_edu_admin(uid, act, body):
 
 
 # Kazino bannerlari (faqat shu ro'yxatdagi fayllar uzatiladi)
-WEBAPP_ASSETS = {"crash.jpg": "image/jpeg", "hovuz.jpg": "image/jpeg", "kamikaze.jpg": "image/jpeg"}
+WEBAPP_ASSETS = {"crash.jpg": "image/jpeg", "hovuz.jpg": "image/jpeg", "kamikaze.jpg": "image/jpeg",
+                 # 3D avatarlar: Innerscene CC0 (MakeHuman CC0 asosida), meshopt + WebP bilan siqilgan
+                 "avatar_m.glb": "model/gltf-binary", "avatar_f.glb": "model/gltf-binary"}
 
 WEBAPP_HTML = r"""<!doctype html>
 <html lang="uz">
@@ -19186,7 +19232,7 @@ WEBAPP_HTML = r"""<!doctype html>
   .kst-sub{font-size:12.5px;color:rgba(255,255,255,.9);margin-top:3px;font-weight:700}
   .kst-x{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;color:#fff;cursor:pointer;background:rgba(0,0,0,.35)}
   .kst-stage{position:relative;flex:1;min-height:300px}
-  #kstCv{width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+  #kstCv,#astCv{width:100%;height:100%;display:block;touch-action:none;cursor:grab}
   .kst-col{position:absolute;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:12px}
   .kst-col.l{left:10px}.kst-col.r{right:10px}
   .kslot{width:66px;height:66px;border-radius:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;
@@ -19205,6 +19251,22 @@ WEBAPP_HTML = r"""<!doctype html>
   .kopt{flex:none;width:76px;padding:8px 4px;border-radius:14px;text-align:center;cursor:pointer;background:rgba(255,255,255,.1);box-shadow:inset 0 0 0 1px rgba(255,255,255,.2)}
   .kopt span{font-size:26px;display:block}.kopt small{display:block;font-size:10px;font-weight:700;color:#fff;margin-top:4px;line-height:1.1}
   .kopt.on{background:var(--g-metal);box-shadow:0 0 14px rgba(255,210,74,.6)}.kopt.on small{color:#2b1b02}
+  .kst-in.st-av::before{background:radial-gradient(120% 70% at 50% 34%,#7a5a1c 0%,#2e220c 55%,#0d0904 100%)}
+  .kst-in.st-av.bg-night::before{background:radial-gradient(120% 70% at 50% 34%,#2b4785 0%,#0d1733 55%,#03050c 100%)}
+  .kst-in.st-av.bg-studio::before{background:radial-gradient(120% 70% at 50% 34%,#a8a8a8 0%,#4a4a4a 55%,#151515 100%)}
+  .kst-in.st-av.bg-sunset::before{background:radial-gradient(120% 70% at 50% 34%,#f6a560 0%,#a4385a 55%,#2a0c22 100%)}
+  .kst-in.st-av.bg-emerald::before{background:radial-gradient(120% 70% at 50% 34%,#24916a 0%,#0b3a2a 55%,#020d09 100%)}
+  .asw{display:block;width:18px;height:18px;border-radius:50%;margin-top:3px;box-shadow:inset 0 0 0 2px rgba(255,255,255,.75),0 1px 4px rgba(0,0,0,.5)}
+  .asw.big{width:30px;height:30px;margin:0 auto}
+  .kslot .asw{position:absolute;right:5px;top:5px;width:14px;height:14px;margin:0}
+  .kst-in.st-av .kslot{position:relative}
+  .avg{display:flex;gap:8px;justify-content:center;padding:2px 0 4px}
+  .avg span{padding:7px 16px;border-radius:999px;font-size:13px;font-weight:800;color:#fff;cursor:pointer;background:rgba(0,0,0,.35);box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
+  .avg span.on{background:var(--g-metal);color:#2b1b02;box-shadow:0 0 14px rgba(255,210,74,.6)}
+  .avtest{font-size:10px;padding:2px 7px;border-radius:8px;background:#ff4d6d;color:#fff;vertical-align:middle;letter-spacing:.06em}
+  #astZ.on{background:var(--g-metal);color:#2b1b02}
+  .avcard{display:flex;align-items:center;gap:14px;margin-top:12px;cursor:pointer}
+  .avcard .avi{width:56px;height:56px;flex:none;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:30px;background:var(--g-metal);box-shadow:0 0 18px rgba(255,210,74,.45)}
   .kpar{margin-top:8px;font-size:12px;font-weight:700;color:rgba(255,255,255,.92)}
   .k3d{position:absolute;top:12px;right:12px;z-index:2;font-size:11px;font-weight:900;color:#2b1b02;background:var(--g-metal);padding:4px 9px;border-radius:999px;
     box-shadow:0 4px 10px rgba(0,0,0,.35);animation:padglow 2s ease-in-out infinite}
@@ -19287,6 +19349,11 @@ function render(res){
   if(d.birja>0) extra.push('<span class="chip">📈 Birja: '+esc(d.birja)+'$</span>');
   if(d.loan) extra.push('<span class="chip" style="color:#ff6b6b;border-color:rgba(255,107,107,.4)">🏦 Faol kredit</span>');
   if(extra.length) p.appendChild($('<div style="margin-top:12px">'+extra.join(' ')+'</div>'));
+  if(d.avatar3d){
+    const av=$('<div class="card full avcard" data-tap="1"><div class="avi">🧍</div><div><div class="lbl">3D avatarim'+(d.avatar_test?' <span class="avtest">TEST</span>':'')+'</div>'+
+      '<div class="hsub">Realistik 3D model · kiyim, soch, teri rangi va fonni tanlang</div></div></div>');
+    av.onclick=()=>openAvatarStudio(d); p.appendChild(av);
+  }
   app.appendChild(p);
 
   // REYTING
@@ -19642,7 +19709,7 @@ function render(res){
 document.addEventListener('change',e=>{ if(e.target.matches&&e.target.matches('select.sel')&&typeof SND!=='undefined') SND.ui('select'); });
 document.addEventListener('pointerdown',e=>{
   // ✨ ovoz: o'yinlardan tashqaridagi tugmalar (o'yinlarning o'z effektlari bor)
-  const u=e.target.closest('.btn,.mini,.kbtn,.opt,.tab,.seg .s,.gcard,.gback,.card[data-tap],.chip,.ovx,.kslot,.kopt,.kst-rot span,.kidc');
+  const u=e.target.closest('.btn,.mini,.kbtn,.opt,.tab,.seg .s,.gcard,.gback,.card[data-tap],.chip,.ovx,.kslot,.kopt,.kst-rot span,.kidc,.avg span');
   if(u && typeof SND!=='undefined' && (!u.closest('#s-crash,#s-frog,#s-kami') || u.classList.contains('gback'))){
     SND.ui(u.classList.contains('tab')?'tab':(u.classList.contains('gcard')||u.hasAttribute('data-tap'))?'card':'sparkle'); }
   const t=e.target.closest('.btn,.mini,.kbtn,.opt,.tab,.pad.active,.seg .s');
@@ -19985,7 +20052,7 @@ const KID3D=(function(){
   function height(age,g){ const T=[50,75,87,96,103,110,116,122,128,133,138,144,150,156,162,167,170,172,174,175,176];
     const v=T[Math.min(T.length-1,Math.max(0,age|0))]; return g==='girl'&&age>=12?v-6:v; }
   return {
-    CAT, allowed, fit, height,
+    CAT, allowed, fit, height, load,
     async open(canvas,kid,outfit){ await load(); if(!R||cvs!==canvas){ if(R){ R.dispose(); } R=null; init(canvas); }
       t0=performance.now(); curRot=targetRot=0; build(kid,outfit); cancelAnimationFrame(raf); raf=requestAnimationFrame(frame); },
     rebuild(kid,outfit){ if(R) build(kid,outfit); },
@@ -20038,6 +20105,174 @@ function openKidStudio(k){
   ov.querySelectorAll('.kslot').forEach(el=>el.onclick=()=>showPick(el.dataset.s));
   KID3D.open(cv,k,of).then(()=>{ document.getElementById('kstLoad').style.display='none'; })
     .catch(()=>{ document.getElementById('kstLoad').textContent='⚠️ 3D yuklanmadi. Internetni tekshiring.'; });
+}
+
+// ---- 🧍 Realistik 3D avatar (glTF, PBR, HDR yoritish) — test: faqat ownerlar ----
+const AV3D=(function(){
+  const EX='https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/';
+  let ld=null;
+  const sc=u=>new Promise((ok,bad)=>{ const s=document.createElement('script'); s.src=u; s.onload=ok; s.onerror=bad; document.head.appendChild(s); });
+  function load(){ if(ld) return ld;
+    ld=KID3D.load().then(()=>Promise.all([THREE.GLTFLoader?0:sc(EX+'loaders/GLTFLoader.js'),
+      window.MeshoptDecoder?0:sc(EX+'libs/meshopt_decoder.js'), THREE.RoomEnvironment?0:sc(EX+'environments/RoomEnvironment.js')]))
+      .catch(e=>{ ld=null; throw e; });
+    return ld; }
+  // rang: [kalit, nomi, namuna, ton(°), to'yinganlik, yorqinlik]
+  const CLOTH=[['orig','Asl','linear-gradient(135deg,#6b7280,#2563eb)'],['black','Qora','#15161a',220,.06,.09],['white','Oq','#f1f1ee',40,.06,.86],
+    ['navy','To‘q ko‘k','#1d2f5e',222,.5,.2],['red','Qizil','#b3172b',353,.72,.34],['gold','Oltin','#d4a62a',43,.7,.5],
+    ['green','Yashil','#2f6b48',148,.4,.3],['purple','Binafsha','#5b2d86',275,.48,.33],['beige','Bej','#cdb38f',35,.35,.68],['gray','Kulrang','#7b7d82',220,.04,.5]];
+  const CAT={
+    top:{n:'Ustki kiyim',ic:'🧥',o:CLOTH},
+    bottom:{n:'Shim',ic:'👖',o:CLOTH},
+    shoes:{n:'Oyoq kiyim',ic:'👟',o:[CLOTH[0],CLOTH[1],CLOTH[2],['brown','Jigarrang','#6b3f1f',24,.5,.25],CLOTH[4],CLOTH[5],CLOTH[3]]},
+    hair:{n:'Soch',ic:'💇',o:[['orig','Asl','#3b2a1e'],['black','Qora','#0f0d0c',25,.15,.07],['brown','Jigarrang','#4a2c17',24,.45,.2],
+      ['chest','Kashtan','#6e3518',16,.6,.27],['blonde','Sariq','#d9b26a',40,.55,.58],['red','Malla','#a3401d',14,.68,.36],['gray','Oq-kul','#b9b9b9',30,.04,.66]]},
+    skin:{n:'Teri rangi',ic:'🖐',o:[['orig','Asl','#e9c4a6'],['light','Oqish','#f3d6c4',[1.05,1.0,.98]],['wheat','Bug‘doy','#d3a47c',[.88,.7,.56]],
+      ['tan','Qoramtir','#a8764f',[.76,.58,.45]],['dark','Qora','#5e3b27',[.48,.34,.27]]]},
+    bg:{n:'Fon',ic:'🏛',o:[['gold','Oltin zal','radial-gradient(#7a5a1c,#1a1206)'],['night','Tungi shahar','radial-gradient(#26407a,#05070f)'],
+      ['studio','Studiya','radial-gradient(#9a9a9a,#2a2a2a)'],['sunset','Shafaq','radial-gradient(#f2994a,#5b1d3a)'],['emerald','Zumrad','radial-gradient(#1f7a5a,#04150f)']]}
+  };
+  const DEF={g:'m',top:'orig',bottom:'orig',shoes:'orig',hair:'orig',skin:'orig',bg:'gold'};
+  const fit=a=>{ const o={}; for(const k in DEF){ const v=(a||{})[k]; o[k]=(k==='g'?(v==='f'?'f':'m'):(CAT[k].o.some(x=>x[0]===v)?v:DEF[k])); } return o; };
+  const opt=(s,v)=>CAT[s].o.find(x=>x[0]===v)||CAT[s].o[0];
+  // HSL yordamchilari
+  function hsl(r,g,b){ const mx=Math.max(r,g,b), mn=Math.min(r,g,b), l=(mx+mn)/2; let h=0,s=0;
+    if(mx!==mn){ const d=mx-mn; s=l>.5?d/(2-mx-mn):d/(mx+mn); h=mx===r?(g-b)/d+(g<b?6:0):mx===g?(b-r)/d+2:(r-g)/d+4; h*=60; } return [h,s,l]; }
+  function rgb(h,s,l){ const k=n=>(n+h/30)%12, a=s*Math.min(l,1-l), f=n=>l-a*Math.max(-1,Math.min(k(n)-3,9-k(n),1)); return [f(0),f(8),f(4)]; }
+  // kiyim teksturasidagi qism maskalari (model + slot)
+  const MASK={
+    m:{top:(h,s,l)=>!(h>185&&h<255&&s>.12)&&s<.38&&l<.62, bottom:(h,s,l)=>h>185&&h<255&&s>.12},
+    f:{top:(h,s,l)=>h>195&&h<250&&s>.28, bottom:(h,s,l)=>l<.3&&s<.3}
+  };
+  const all=()=>true;
+  let R=null,S=null,CAM=null,cvs=null,raf=0,cur=null,curG=null,rot=0,tRot=0,zoom=0,tZoom=0,t0=0;
+  const MODELS={}, TEX=new Map();
+  function init(canvas){
+    cvs=canvas; lw=lh=0; R=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});
+    R.setPixelRatio(Math.min(2,window.devicePixelRatio||1)); R.outputEncoding=THREE.sRGBEncoding;
+    R.toneMapping=THREE.ACESFilmicToneMapping; R.toneMappingExposure=1.05; R.physicallyCorrectLights=true;
+    R.shadowMap.enabled=true; R.shadowMap.type=THREE.PCFSoftShadowMap;
+    S=new THREE.Scene(); const pm=new THREE.PMREMGenerator(R); S.environment=pm.fromScene(new THREE.RoomEnvironment(),.04).texture; pm.dispose();
+    const key=new THREE.DirectionalLight(0xfff1e0,2.3); key.position.set(2,4,3); key.castShadow=true; key.shadow.mapSize.set(2048,2048);
+    Object.assign(key.shadow.camera,{left:-1,right:1,top:2.1,bottom:-.2}); key.shadow.bias=-.0005; key.shadow.radius=4; S.add(key);
+    const rim=new THREE.DirectionalLight(0xffd59a,1.7); rim.position.set(-3,2.6,-3); S.add(rim);
+    const fill=new THREE.DirectionalLight(0xbcd2ff,.5); fill.position.set(-3,1.5,2.5); S.add(fill);
+    // oltin hoshiyali poydevor
+    const gold=new THREE.MeshStandardMaterial({color:0xd4a33b,metalness:1,roughness:.28});
+    const base=new THREE.Mesh(new THREE.CylinderGeometry(.62,.66,.08,72),new THREE.MeshStandardMaterial({color:0x17130d,metalness:.4,roughness:.35}));
+    base.position.y=-.04; base.receiveShadow=true; S.add(base);
+    const ring=new THREE.Mesh(new THREE.TorusGeometry(.645,.016,12,96),gold); ring.rotation.x=Math.PI/2; ring.position.y=-.002; S.add(ring);
+    CAM=new THREE.PerspectiveCamera(28,1,.05,50);
+  }
+  let lw=0,lh=0;
+  function size(){ const w=cvs.clientWidth||300, h=cvs.clientHeight||400; if(w===lw&&h===lh) return; lw=w; lh=h; R.setSize(w,h,false); CAM.aspect=w/h; CAM.updateProjectionMatrix(); }
+  function getModel(g){
+    if(MODELS[g]) return MODELS[g];
+    return MODELS[g]=new Promise((ok,bad)=>{ const L=new THREE.GLTFLoader(); L.setMeshoptDecoder(MeshoptDecoder);
+      L.load('/app/a/avatar_'+g+'.glb',gl=>{ const m=gl.scene;
+        m.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; const mt=o.material;
+          if(/skin/.test(mt.name)){ mt.roughness=.55; } if(/eyes/.test(mt.name)){ mt.roughness=.05; mt.alphaTest=.5; mt.needsUpdate=true; } } });   // shox parda (alfa≈0) iris'ni yopmasin
+        const bb=new THREE.Box3().setFromObject(m), h=bb.max.y-bb.min.y, k=1.75/h; m.scale.setScalar(k); m.position.y=-bb.min.y*k;
+        const c=new THREE.Box3().setFromObject(m).getCenter(new THREE.Vector3()); m.position.x-=c.x; m.position.z-=c.z;
+        const g2=new THREE.Group(); g2.add(m); ok(g2); },undefined,e=>{ delete MODELS[g]; bad(e); }); });
+  }
+  // teksturani qayta bo'yash: asl piksellar saqlanadi, mask bo'yicha ton/to'yinganlik almashadi, detal (yorug'lik farqi) qoladi
+  function texOf(mt){
+    let t=TEX.get(mt); if(t) return t;
+    const img=mt.map.image, c=document.createElement('canvas'); c.width=img.width; c.height=img.height;
+    const x=c.getContext('2d'); x.drawImage(img,0,0); const orig=x.getImageData(0,0,c.width,c.height);
+    const ct=new THREE.CanvasTexture(c); ct.flipY=mt.map.flipY; ct.encoding=THREE.sRGBEncoding; ct.wrapS=mt.map.wrapS; ct.wrapT=mt.map.wrapT;
+    ct.anisotropy=4; t={c,x,orig,ct,src:mt.map,key:''}; TEX.set(mt,t); return t;
+  }
+  function recolor(mt,parts){ // parts: [[mask, opt]]
+    const act=parts.filter(p=>p[1][3]!=null), key=act.map(p=>p[1][0]).join('|');
+    if(!act.length){ const t=TEX.get(mt); if(t){ mt.map=t.src; mt.needsUpdate=true; t.key=''; } return; }
+    const t=texOf(mt); if(t.key===key){ mt.map=t.ct; return; }
+    const o=t.orig.data, out=new ImageData(new Uint8ClampedArray(o),t.orig.width,t.orig.height), d=out.data, n=o.length;
+    for(const [mask,op] of act){ let sum=0,cnt=0; const hit=new Uint8Array(n>>2);
+      for(let i=0,p=0;i<n;i+=4,p++){ if(o[i+3]<8) continue; const v=hsl(o[i]/255,o[i+1]/255,o[i+2]/255); if(mask(v[0],v[1],v[2])){ hit[p]=1; sum+=v[2]; cnt++; } }
+      const mean=cnt?sum/cnt:.5;
+      for(let i=0,p=0;i<n;i+=4,p++){ if(!hit[p]) continue; const l=hsl(o[i]/255,o[i+1]/255,o[i+2]/255)[2];
+        const c=rgb(op[3],op[4],Math.max(.02,Math.min(.97,op[5]+(l-mean)*.9))); d[i]=c[0]*255; d[i+1]=c[1]*255; d[i+2]=c[2]*255; } }
+    t.x.putImageData(out,0,0); t.ct.needsUpdate=true; t.key=key; mt.map=t.ct; mt.needsUpdate=true;
+  }
+  function apply(a){
+    if(!cur) return; const M=MASK[a.g];
+    cur.traverse(o=>{ if(!o.isMesh) return; const mt=o.material, nm=mt.name||'';
+      if(/suit/.test(nm)) recolor(mt,[[M.top,opt('top',a.top)],[M.bottom,opt('bottom',a.bottom)]]);
+      else if(/shoes/.test(nm)) recolor(mt,[[all,opt('shoes',a.shoes)]]);
+      else if(/hair|eyebrow/.test(nm)) recolor(mt,[[all,opt('hair',a.hair)]]);
+      else if(/skin/.test(nm)){ const tn=opt('skin',a.skin)[3]||[1,1,1]; mt.color.setRGB(tn[0],tn[1],tn[2]); } });
+  }
+  function frame(now){
+    raf=requestAnimationFrame(frame); if(!R||!cur) return; size();
+    const t=(now-t0)/1000; rot+=(tRot-rot)*.12; zoom+=(tZoom-zoom)*.1;
+    cur.rotation.y=rot+Math.sin(t*.45)*.04; cur.scale.set(1,1+Math.sin(t*1.6)*.0035,1);   // nafas olish + yengil tebranish
+    const y=1.0+zoom*.62, z=4.3-zoom*3.45, ly=.9+zoom*.72; CAM.position.set(Math.sin(t*.3)*.05,y,z); CAM.lookAt(0,ly,0);
+    R.render(S,CAM);
+  }
+  return {
+    CAT, fit, opt,
+    async open(canvas,a){ await load(); if(R&&cvs!==canvas){ R.dispose(); R.forceContextLoss(); R=null; } if(!R) init(canvas);
+      t0=performance.now(); rot=tRot=0; await this.set(a); cancelAnimationFrame(raf); raf=requestAnimationFrame(frame); },
+    async set(a){ const m=await getModel(a.g); if(curG!==a.g){ if(cur) S.remove(cur); cur=m; curG=a.g; S.add(m); } apply(a); },
+    turn(d){ tRot+=d; }, drag(d){ tRot+=d; rot+=d; }, zoom(){ tZoom=tZoom?0:1; return !!tZoom; },
+    view(){ const a=((tRot%(Math.PI*2))+Math.PI*2)%(Math.PI*2); return ['Old tomoni','O‘ng yon','Orqa tomoni','Chap yon'][Math.round(a/(Math.PI/2))%4]; },
+    close(){ cancelAnimationFrame(raf); raf=0; if(R){ R.dispose(); R.forceContextLoss(); R=null; cvs=null; } if(cur&&S) S.remove(cur); cur=null; curG=null; tZoom=zoom=0; }
+  };
+})();
+
+// ---- 🧍 Avatar studiyasi (Profil → 3D avatarim) ----
+function openAvatarStudio(d){
+  let ov=document.getElementById('ast');
+  if(!ov){ ov=document.createElement('div'); ov.id='ast'; document.body.appendChild(ov); }
+  const a=AV3D.fit(d.avatar), L=['top','bottom','shoes'], Rr=['hair','skin','bg'];
+  const sw=(s,v)=>{ const o=AV3D.opt(s,v); return '<i class="asw" style="background:'+o[2]+'"></i>'; };
+  const slotHtml=s=>'<div class="kslot" data-s="'+s+'"><span class="ki">'+AV3D.CAT[s].ic+'</span>'+sw(s,a[s])+'<span class="kn">'+AV3D.CAT[s].n+'</span></div>';
+  ov.innerHTML='<div class="kst-in st-av bg-'+a.bg+'">'+
+    '<div class="kst-hd"><div><div class="kst-name">🧍 '+esc(d.name)+(d.avatar_test?' <span class="avtest">TEST</span>':'')+'</div>'+
+      '<div class="kst-sub">Realistik 3D avatar · ⭐ '+esc(d.level)+' · 💰 '+esc(d.money_fmt)+'$</div></div><span class="kst-x" id="astX">✕</span></div>'+
+    '<div class="avg"><span data-g="m">👨 Erkak</span><span data-g="f">👩 Ayol</span></div>'+
+    '<div class="kst-stage"><canvas id="astCv"></canvas>'+
+      '<div class="kst-col l">'+L.map(slotHtml).join('')+'</div><div class="kst-col r">'+Rr.map(slotHtml).join('')+'</div>'+
+      '<div class="kst-load" id="astLoad">⏳ 3D model yuklanmoqda…</div></div>'+
+    '<div class="kst-rot"><span id="astL">⟲</span><b id="astV">Old tomoni</b><span id="astR">⟳</span><span id="astZ">🔍</span></div>'+
+    '<div class="kst-pick" id="astPick"><div class="kst-hint">👆 Chekkadagi kataklardan rang tanlang · modelni barmoq bilan aylantiring · 🔍 yuzga yaqinlashtirish</div></div></div>';
+  ov.className='kst show';
+  const box=ov.querySelector('.kst-in'), cv=document.getElementById('astCv'), pick=document.getElementById('astPick'), vlab=document.getElementById('astV'), ldl=document.getElementById('astLoad');
+  let saveT=0;
+  const save=()=>{ d.avatar=Object.assign({},a); clearTimeout(saveT);
+    saveT=setTimeout(()=>api('/app/api/avatar/save',{avatar:a}).then(r=>{ if(!r||r.error) toast('⚠️ Saqlanmadi'); }),600); };
+  const close=()=>{ ov.className='kst'; AV3D.close(); };
+  document.getElementById('astX').onclick=close;
+  ov.onclick=e=>{ if(e.target===ov) close(); };
+  const upd=()=>{ vlab.textContent=AV3D.view(); };
+  document.getElementById('astL').onclick=()=>{ AV3D.turn(-Math.PI/2); setTimeout(upd,10); };
+  document.getElementById('astR').onclick=()=>{ AV3D.turn(Math.PI/2); setTimeout(upd,10); };
+  document.getElementById('astZ').onclick=e=>{ e.currentTarget.classList.toggle('on',AV3D.zoom()); };
+  let dragX=null;
+  cv.addEventListener('pointerdown',e=>{ dragX=e.clientX; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove',e=>{ if(dragX==null) return; AV3D.drag((e.clientX-dragX)*.012); dragX=e.clientX; upd(); });
+  cv.addEventListener('pointerup',()=>{ dragX=null; });
+  const paintG=()=>ov.querySelectorAll('.avg span').forEach(x=>x.classList.toggle('on',x.dataset.g===a.g));
+  ov.querySelectorAll('.avg span').forEach(el=>el.onclick=()=>{ if(a.g===el.dataset.g) return; a.g=el.dataset.g; paintG();
+    ldl.style.display='flex'; ldl.textContent='⏳ 3D model yuklanmoqda…';
+    AV3D.set(a).then(()=>{ ldl.style.display='none'; }).catch(()=>{ ldl.textContent='⚠️ Model yuklanmadi'; }); save(); });
+  paintG();
+  function showPick(s){
+    ov.querySelectorAll('.kslot').forEach(x=>x.classList.toggle('on',x.dataset.s===s));
+    pick.innerHTML='<div class="kst-pt">'+AV3D.CAT[s].ic+' '+AV3D.CAT[s].n+'</div><div class="kst-opts">'+
+      AV3D.CAT[s].o.map(o=>'<div class="kopt'+(a[s]===o[0]?' on':'')+'" data-v="'+o[0]+'"><span class="asw big" style="background:'+o[2]+'"></span><small>'+o[1]+'</small></div>').join('')+'</div>';
+    pick.querySelectorAll('.kopt').forEach(el=>el.onclick=()=>{
+      a[s]=el.dataset.v; pick.querySelectorAll('.kopt').forEach(x=>x.classList.toggle('on',x===el));
+      ov.querySelector('.kslot[data-s="'+s+'"] .asw').style.background=AV3D.opt(s,a[s])[2];
+      if(s==='bg') box.className='kst-in st-av bg-'+a.bg; else AV3D.set(a);
+      save();
+    });
+  }
+  ov.querySelectorAll('.kslot').forEach(el=>el.onclick=()=>showPick(el.dataset.s));
+  AV3D.open(cv,a).then(()=>{ ldl.style.display='none'; })
+    .catch(()=>{ ldl.textContent='⚠️ 3D yuklanmadi. Internetni tekshiring.'; });
 }
 
 // ---- 3D "Royal" samolyot — umumiy chizgich (Crash va Kamikaze) ----

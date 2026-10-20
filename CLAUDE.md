@@ -221,3 +221,11 @@
   `CHAT_STICKERS` ro'yxatidagi emoji (payload `chat_stickers`), katta animatsiyali (`.msg.stk`). `chat_msg_json`, `chat_preview`
   (ro'yxat/bildirishnomada "📷 Rasm"/"… Stiker"), rasmni bosish → `chatViewer`.
 - Web do'kon javobida `to` — oddiy ism (`_plain_person`), HTML havola emas (toast'da `&lt;a…` chiqmasin).
+- 🎭 Telegram stikerlari (web chat): foydalanuvchi botga shaxsiy chatda stiker yuborsa (`on_private_sticker`, `filters.Sticker.ALL`)
+  `tg_sticker_set_fetch` → `get_sticker_set` (1 kun kesh) → `tg_sticker_sets` (id/name/title/data JSON: u/f/t/e) +
+  `tg_sticker_files` (file_unique_id → file_id, fmt webp/tgs/webm/thumb) + `chat_sticker_packs` (user_id, set_id; `user_id=0` —
+  hamma uchun, ownerga "🌍 Hamma uchun qo'shish" tugmasi `stk:g|u:<id>` → `cb_sticker_pack`). Maks `TG_STICKER_PACKS_MAX` 30.
+  Fayllar `GET /app/tgs/<file_unique_id>` (`_tgsticker` → `tg_sticker_bytes`: bot `get_file`, volume `tg_stickers/` kesh, TGS gunzip
+  → Lottie JSON, kontent turi `_sniff_image`). API `/app/api/chat/stickers` (+`/remove`), `chat/send` kind=`tg` (text=file_unique_id,
+  media=fmt; eskiz yuborilmaydi). Klient: stiker panelida tablar (😊 emoji / to'plamlar eskizi / ➕ yo'riqnoma), `tgStickerHtml`
+  (webp img, webm video, tgs → `lottieLoad` cdnjs lottie-web 5.12.2 light, `tgLottieIn`, yopilganda destroy).

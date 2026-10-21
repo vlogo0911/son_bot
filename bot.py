@@ -15,6 +15,7 @@ import os
 import random
 import sqlite3
 import re
+import types
 import hashlib
 import hmac
 import secrets
@@ -1696,31 +1697,8 @@ async def handle_family_start(update, context, payload):
         await cmd_oila(update, context)
         return True
     if payload == "child":
-        pair = active_pair(user.id)
-        if not pair:
-            await msg.reply_text(family_text(user.id, "no_pair"))
-            return True
-        partner_id = pair[2] if pair[1] == user.id else pair[1]
-        count = family_child_count(pair[0])
-        pending = db().execute(
-            "SELECT 1 FROM child_requests WHERE pair_id=? AND status IN ('selecting','pending','approved') LIMIT 1",
-            (pair[0],),
-        ).fetchone()
-        if count >= 5 or pending:
-            await msg.reply_text(family_text(user.id, "max" if count >= 5 else "pending"))
-            return True
-        now = datetime.now().isoformat(timespec="seconds")
-        with db():
-            cur = db().execute(
-                "INSERT INTO child_requests(requester_id,partner_id,pair_id,status,created_at) VALUES(?,?,?,'selecting',?)",
-                (user.id, partner_id, pair[0], now),
-            )
-            rid = cur.lastrowid
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(family_text(user.id, "boy"), url=family_url(context, f"childgender_boy_{rid}"))],
-            [InlineKeyboardButton(family_text(user.id, "girl"), url=family_url(context, f"childgender_girl_{rid}"))],
-        ])
-        await msg.reply_text(family_text(user.id, "ask_gender"), reply_markup=kb)
+        # 👶 Farzand ko'rish arizasi endi web app'dan
+        await msg.reply_text(REQ_WEB_TEXT, reply_markup=webapp_open_kb(True))
         return True
     if payload.startswith("childgender_"):
         parts = payload.split("_")
@@ -3689,20 +3667,6 @@ def divorce_terms_text(pair, custody_id=None):
     return "\n".join(lines)
 
 
-def divorce_choice_kb(pair, uid):
-    if not divorce_kids(pair[0]):
-        rows = [[InlineKeyboardButton("💔 Ajrashish so‘rovini yuborish", callback_data="rel:divgo:0")]]
-    else:
-        rows = []
-        for member in (pair[1], pair[2]):
-            role = parent_role(member)
-            prefix = {"male": "👨 Otada", "female": "👩 Onada"}.get(role, "🏠 Shu odamda")
-            name = (db().execute("SELECT first_name FROM users WHERE user_id=?", (member,)).fetchone() or ["?"])[0]
-            rows.append([InlineKeyboardButton(f"{prefix} qolsin — {name}", callback_data=f"rel:divgo:{member}")])
-    rows.append([InlineKeyboardButton("❌ Bekor qilish", callback_data="rel:divcancel")])
-    return InlineKeyboardMarkup(rows)
-
-
 def divorce_settle(c, pair, custody_id):
     """Ajrashish tasdiqlanganda (tranzaksiya ichida): pul va sovg'alarni teng bo'ladi,
     farzandlar vasiyligi va alimentni belgilaydi. Qaytaradi: xabar uchun ma'lumot."""
@@ -4121,44 +4085,10 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action not in ("divorce", "quit"):
             await q.answer()
             return
-        if action == "divorce" and not active_pair(uid):
-            await q.answer("Sizda hozir juft yo‘q.", show_alert=True)
-            return
-        if action == "divorce":
-            # Avval oqibatlar ko'rsatiladi; farzand bo'lsa — kim bilan qolishi tanlanadi.
-            pair = active_pair(uid)
-            await q.answer()
-            await q.edit_message_text(
-                divorce_terms_text(pair) + "\n\n" + (
-                    "👶 Farzandlar kim bilan qolsin? Tanlovingiz juftingizga yuboriladi — u rozi bo‘lsa, shunday bo‘ladi."
-                    if divorce_kids(pair[0]) else "Ajrashish so‘rovini yuborasizmi?"
-                ),
-                reply_markup=divorce_choice_kb(pair, uid),
-            )
-            return
-        if action == "quit":
-            row = c.execute(
-                "SELECT profession_id FROM users WHERE user_id=?", (uid,)
-            ).fetchone()
-            if not row or not row[0]:
-                await q.answer("Sizda tanlangan kasb yo‘q.", show_alert=True)
-                return
-        kind = "divorce" if action == "divorce" else "quit_job"
-        target_id = None
-        if action == "divorce":
-            pair = active_pair(uid)
-            target_id = pair[2] if pair[1] == uid else pair[1]
-        rid = await create_rel_request(
-            context.application, kind, uid, target_id=target_id
-        )
+        # 📝 Ishdan bo'shash va ajrashish arizalari endi web app'dan yuboriladi
         await q.answer()
-        if not rid:
-            text = "⏳ Sizda bu turdagi ariza allaqachon kutilmoqda."
-        elif kind == "divorce":
-            text = "💌 Ajrashish so‘rovi juftingizga shaxsiy xabarda yuborildi. Avval uning roziligi kerak."
-        else:
-            text = "⏳ Arizangiz bot egalariga yuborildi. Ulardan biri tasdiqlashi kerak."
-        await q.edit_message_text(text)
+        private = bool(q.message and q.message.chat.type == ChatType.PRIVATE)
+        await q.edit_message_text(REQ_WEB_TEXT, reply_markup=webapp_open_kb(private, context.bot.username))
         return
 
     if data == "rel:divcancel":
@@ -4167,24 +4097,9 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("rel:divgo:"):
-        pair = active_pair(uid)
-        if not pair:
-            await q.answer("Sizda hozir juft yo‘q.", show_alert=True)
-            return
-        custody_id = int(data.rsplit(":", 1)[1])
-        has_kids = bool(divorce_kids(pair[0]))
-        if (has_kids and custody_id not in (pair[1], pair[2])) or (not has_kids and custody_id):
-            await q.answer("Noto‘g‘ri tanlov.", show_alert=True)
-            return
-        target_id = pair[2] if pair[1] == uid else pair[1]
-        rid = await create_rel_request(
-            context.application, "divorce", uid, target_id=target_id, custody_id=custody_id or None
-        )
         await q.answer()
-        await q.edit_message_text(
-            "💌 Ajrashish so‘rovi juftingizga shaxsiy xabarda yuborildi. Avval uning roziligi kerak."
-            if rid else "⏳ Sizda bu turdagi ariza allaqachon kutilmoqda."
-        )
+        private = bool(q.message and q.message.chat.type == ChatType.PRIVATE)
+        await q.edit_message_text(REQ_WEB_TEXT, reply_markup=webapp_open_kb(private, context.bot.username))
         return
 
     if data.startswith("rel:divorce:"):
@@ -17083,6 +16998,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_edu_enroll(uid, body.get("kid"), body.get("inst"))
         elif path in ("/app/api/edu/add", "/app/api/edu/update", "/app/api/edu/toggle"):
             coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
+        elif path == "/app/api/request":
+            coro = web_request(uid, body)
         elif path == "/app/api/news/seen":
             coro = web_news_seen(uid, body.get("last"))
         elif path in ("/app/api/news/add", "/app/api/news/update", "/app/api/news/delete", "/app/api/news/pin", "/app/api/news/toggle"):
@@ -19192,6 +19109,145 @@ def webapp_check_init_data(init_data, max_age=86400):
     return user if user.get("id") else None
 
 
+# ── 📝 Arizalar (web app): ishdan bo'shash / ajrashish / farzand ko'rish ──
+# Bot orqali yuborish o'rniga web app'dan; tasdiqlash (juft roziligi, bot egalari) avvalgidek botda qoladi.
+REQ_OPEN = ("pending", "partner_consent")
+
+
+def _plain(html_text):
+    import html as _html
+    return _html.unescape(re.sub(r"<[^>]+>", "", html_text or ""))
+
+
+def requests_payload(uid):
+    c = db()
+    row = c.execute("SELECT profession_id FROM users WHERE user_id=?", (uid,)).fetchone()
+    prof = row[0] if row else None
+    open_ = {r[0]: r[1] for r in c.execute(
+        "SELECT request_type, status FROM pair_requests WHERE requester_id=? AND request_type IN ('quit_job','divorce') "
+        "AND status IN ('pending','partner_consent')", (uid,))}
+    out = {"quit": {"profession": profession_name(prof, uid) if prof else None, "pending": "quit_job" in open_},
+           "pair": None, "divorce": {"pending": open_.get("divorce")}, "child": None}
+    pair = active_pair(uid)
+    if not pair:
+        return out
+    partner = pair[2] if pair[1] == uid else pair[1]
+    out["pair"] = {"partner": _plain_person(partner), "partner_id": partner}
+    kids = divorce_kids(pair[0])
+    custody = []
+    if kids:
+        for m in (pair[1], pair[2]):
+            role = parent_role(m)
+            custody.append({"id": m, "name": _plain_person(m), "role": {"male": "Otada", "female": "Onada"}.get(role, "Shu odamda")})
+    out["divorce"].update({"terms": _plain(divorce_terms_text(pair)), "custody": custody, "kids": len(kids)})
+    count = family_child_count(pair[0])
+    pend = c.execute("SELECT child_name, gender, status, due_at FROM child_requests WHERE pair_id=? "
+                     "AND status IN ('selecting','pending','approved') ORDER BY id DESC LIMIT 1", (pair[0],)).fetchone()
+    lang = family_lang(uid)
+    out["child"] = {"count": count, "max": 5, "cost": next_child_cost(pair[0]),
+                    "pending": {"name": pend[0], "gender": pend[1], "status": pend[2],
+                                "due": tashkent_dt(int(datetime.fromisoformat(pend[3]).timestamp())) if pend[3] else None} if pend else None,
+                    "names": {g: list(CHILD_NAMES.get(g, {}).get(lang) or CHILD_NAMES.get(g, {}).get("uz") or []) for g in ("boy", "girl")}}
+    return out
+
+
+def child_request_message(rid, requester, partner, gender, name):
+    """Juftga yuboriladigan farzand so'rovi matni va rozilik tugmalari (bot bilan bir xil)."""
+    text = family_text(partner, "request", parent=person_name(requester),
+                       gender=escape(child_gender_label(partner, gender)), name=escape(name))
+    if requester in CAREER_OWNER_IDS or partner in CAREER_OWNER_IDS:
+        for a, b in (("Rozilikdan so‘ng farzand 48 soat ichida yetkaziladi.", "Owner juftliklari uchun rozilikdan so‘ng farzand kutishsiz yetkaziladi."),
+                     ("After consent, the child will arrive within 48 hours.", "For owner couples, the child arrives without a 48-hour wait after consent."),
+                     ("После согласия ребёнок появится в течение 48 часов.", "Для пар с владельцем ребёнок появится сразу после согласия."),
+                     ("Келісімнен кейін бала 48 сағат ішінде жеткізіледі.", "Иесі бар жұптарға бала келісімнен кейін күтусіз жеткізіледі.")):
+            text = text.replace(a, b)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(family_text(partner, "yes"), callback_data=f"family:consent:yes:{rid}"),
+        InlineKeyboardButton(family_text(partner, "no"), callback_data=f"family:consent:no:{rid}"),
+    ]])
+    return text, kb
+
+
+async def web_request(uid, body):
+    """📝 Web app'dan ariza: kind = quit | divorce | child."""
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    bot_ = _EXCHANGE_LOOP_BOT
+    if bot_ is None:
+        return {"error": "bot"}
+    app_ = types.SimpleNamespace(bot=bot_)
+    kind = body.get("kind")
+    c = db()
+    if kind == "quit":
+        row = c.execute("SELECT profession_id FROM users WHERE user_id=?", (uid,)).fetchone()
+        if not row or not row[0]:
+            return {"error": "no_job"}
+        rid = await create_rel_request(app_, "quit_job", uid)
+        if not rid:
+            return {"error": "already"}
+    elif kind == "divorce":
+        pair = active_pair(uid)
+        if not pair:
+            return {"error": "no_pair"}
+        try:
+            custody = int(body.get("custody") or 0)
+        except (TypeError, ValueError):
+            return {"error": "custody"}
+        has_kids = bool(divorce_kids(pair[0]))
+        if (has_kids and custody not in (pair[1], pair[2])) or (not has_kids and custody):
+            return {"error": "custody"}
+        target = pair[2] if pair[1] == uid else pair[1]
+        rid = await create_rel_request(app_, "divorce", uid, target_id=target, custody_id=custody or None)
+        if not rid:
+            return {"error": "already"}
+    elif kind == "child":
+        pair = active_pair(uid)
+        if not pair:
+            return {"error": "no_pair"}
+        gender = body.get("gender")
+        name = re.sub(r"\s+", " ", str(body.get("name") or "")).strip()
+        if gender not in ("boy", "girl"):
+            return {"error": "gender"}
+        if not 2 <= len(name) <= 40 or "<" in name or ">" in name:
+            return {"error": "name"}
+        if family_child_count(pair[0]) >= 5:
+            return {"error": "max"}
+        if c.execute("SELECT 1 FROM child_requests WHERE pair_id=? AND status IN ('selecting','pending','approved') LIMIT 1",
+                     (pair[0],)).fetchone():
+            return {"error": "already"}
+        partner = pair[2] if pair[1] == uid else pair[1]
+        now = datetime.now().isoformat(timespec="seconds")
+        with c:
+            rid = c.execute("INSERT INTO child_requests(requester_id,partner_id,pair_id,gender,child_name,status,created_at) "
+                            "VALUES(?,?,?,?,?,'pending',?)", (uid, partner, pair[0], gender, name, now)).lastrowid
+        text, kb = child_request_message(rid, uid, partner, gender, name)
+        try:
+            await bot_.send_message(partner, text, reply_markup=kb, parse_mode="HTML")
+        except TelegramError:
+            with c:
+                c.execute("UPDATE child_requests SET status='cancelled' WHERE id=?", (rid,))
+            return {"error": "undeliverable"}
+    else:
+        return {"error": "kind"}
+    return {"result": "sent", "kind": kind, "requests": requests_payload(uid)}
+
+
+def webapp_open_kb(private, bot_username=None, label="📝 Web app'da ariza yuborish"):
+    """Botdagi ariza tugmalari endi web app'ga yo'naltiradi (#req — Profil → Arizalar)."""
+    if not WEBAPP_URL or not WEBAPP_URL.startswith("https://"):
+        return None
+    if private:
+        return InlineKeyboardMarkup([[InlineKeyboardButton(label, web_app=WebAppInfo(WEBAPP_URL + "/app#req"))]])
+    if bot_username:
+        return InlineKeyboardMarkup([[InlineKeyboardButton(label, url=f"https://t.me/{bot_username}")]])
+    return None
+
+
+REQ_WEB_TEXT = ("📝 <b>Arizalar endi web app'da</b>\n"
+                "Ishdan bo‘shash, ajrashish va farzand ko‘rish arizalarini web app → <b>Profil → 📝 Arizalar</b> bo‘limidan yuboring.\n"
+                "Juftingiz roziligi va bot egalari tasdig‘i avvalgidek shu yerda (botda) keladi.")
+
+
 # ── 📰 NEWS (online gazeta): ownerlar web app'dan yangilik / e'lon qo'yadi ──
 NEWS_MEDIA_DIR = os.path.join(VOLUME_PATH or BASE_DIR, "news_media")
 NEWS_IMG_SIDE = 1600
@@ -19461,6 +19517,7 @@ async def webapp_payload(user_id):
         "chat_stickers": list(CHAT_STICKERS),
         "emp": emp_payload(user_id),
         "transfers": transfers_payload(user_id),
+        "requests": requests_payload(user_id),
         "news": news_list(include_hidden=is_owner),
         "news_unread": news_unread(user_id),
         "owner_flags": owner_flags_payload() if is_owner else None,
@@ -20547,6 +20604,31 @@ WEBAPP_HTML = r"""<!doctype html>
   .gplay{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;color:#2b1b02;
     background:var(--g-metal);box-shadow:0 4px 12px rgba(0,0,0,.5)}
   .gnote{text-align:center;color:var(--dim);font-size:12px;margin-top:14px}
+  /* ───── 📝 Arizalar ───── */
+  .reqc{margin-top:12px}
+  .rqg{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
+  .rqt{display:flex;flex-direction:column;align-items:center;gap:3px;padding:12px 6px 10px;border-radius:14px;cursor:pointer;text-align:center;min-width:0;
+    background:rgba(0,0,0,.3);box-shadow:inset 0 0 0 1px rgba(255,210,74,.28)}
+  .rqt:active{transform:scale(.96)}
+  .rqt.on{box-shadow:inset 0 0 0 1.5px rgba(255,210,74,.75),0 0 14px rgba(255,200,60,.2)}
+  .rqi{font-size:26px;line-height:1}.rqt b{font-size:12.5px;line-height:1.2}
+  .rqs{font-size:10.5px;color:var(--dim);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rqv{position:fixed;inset:0;z-index:70;display:none}.rqv.show{display:block}
+  .rqbg{position:absolute;inset:0;background:rgba(0,0,0,.6)}
+  .rqsh{position:absolute;left:0;right:0;bottom:0;max-height:88vh;overflow:auto;padding:18px 18px calc(18px + env(safe-area-inset-bottom));
+    border-radius:22px 22px 0 0;background:linear-gradient(180deg,#1d1509,#0f0b05);box-shadow:0 -10px 30px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,210,74,.4);animation:rqup .25s ease}
+  @keyframes rqup{from{transform:translateY(30px)}to{transform:none}}
+  .rqsh h3{margin:0 0 10px;font-family:Cinzel,serif;font-size:19px;color:#ffd56a}
+  .rqsh p{margin:8px 0;font-size:14px;line-height:1.5}
+  .rqx{position:absolute;top:12px;right:16px;font-size:18px;cursor:pointer;color:var(--dim)}
+  .rqp{padding:12px;border-radius:12px;background:rgba(255,210,74,.08)}
+  .rqterms{white-space:pre-line;font-size:13.5px;line-height:1.55;padding:12px;border-radius:12px;background:rgba(0,0,0,.3);box-shadow:inset 0 0 0 1px rgba(255,210,74,.2)}
+  .rqopts,.rqnames{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .rqo{padding:8px 12px;border-radius:999px;font-size:13px;font-weight:700;cursor:pointer;background:rgba(0,0,0,.35);box-shadow:inset 0 0 0 1px rgba(255,210,74,.3)}
+  .rqo.on{color:#2b1b02;background:var(--g-metal)}
+  .rqsh .seg{margin-top:12px}.rqsh .btn.full{margin-top:14px}
+  #rqName{box-sizing:border-box;width:100%}
+  .btn.rqdanger{background:linear-gradient(180deg,#e0485c,#a81f34);color:#fff}
   /* ───── 📰 NEWS — online gazeta ───── */
   .npaper{border-radius:18px;padding:14px 14px 18px;background:linear-gradient(180deg,#17110a,#0e0a06);box-shadow:inset 0 0 0 1px rgba(255,210,74,.35),0 12px 30px rgba(0,0,0,.5)}
   .nmast{text-align:center;padding-bottom:8px;border-bottom:3px double rgba(255,210,74,.55);margin-bottom:12px}
@@ -20968,6 +21050,7 @@ function render(res){
       '<button class="btn go empbuy">⭐ Sotib olish</button></div>');
     ec.onclick=()=>openEmpShop(d); p.appendChild(ec);
   }
+  if(d.requests){ const rc=$('<div class="card full reqc" id="reqc"></div>'); drawReqCard(rc,d); p.appendChild(rc); }
   if(d.avatar3d){
     const av=$('<div class="card full avcard" data-tap="1"><div class="avi">🧍</div><div><div class="lbl">3D avatarim'+(d.avatar_test?' <span class="avtest">TEST</span>':'')+'</div>'+
       '<div class="hsub">Realistik 3D model · kiyim, soch, teri rangi va fonni tanlang</div></div></div>');
@@ -21427,6 +21510,8 @@ function render(res){
   });
   app.appendChild(tabs);
   setNewsBadge(d.news_unread||0);
+  if(/(^|#)req\b/.test(location.hash||'') && !window.RQOPENED){ window.RQOPENED=1; TAB='profil';
+    setTimeout(()=>{ const e=document.getElementById('reqc'); if(e) e.scrollIntoView({behavior:'smooth',block:'center'}); },400); }
   app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':'casino'));
   setTab(defs.some(x=>x[0]===TAB)||TAB==='bank'||TAB==='birja'||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
   ['s-crash','s-frog','s-kami'].forEach(id=>{ const sc=document.getElementById(id); if(!sc) return;
@@ -22480,6 +22565,74 @@ const CHERR={not_found:'🔎 Bunday foydalanuvchi topilmadi (botni ishlatgan bo�
   long:'📏 Xabar juda uzun (1000 belgigacha)',disabled:'🌐 Web app o‘chirilgan',user:'⚠️ Foydalanuvchi xato',
   image:'🖼 Rasmni o‘qib bo‘lmadi', img_daily:'📷 Bugungi rasm limiti tugadi (40 ta)', sticker:'🎭 Bunday stiker yo‘q', too_large:'📦 Rasm juda katta'};
 // rasmni telefonda kichraytirish (≤1280 px, JPEG) — trafik va server yuki kam
+// ---- 📝 Arizalar (ishdan bo'shash / ajrashish / farzand ko'rish) ----
+const RQERR={no_job:'💼 Sizda hozir kasb yo‘q',already:'⏳ Bu turdagi ariza allaqachon ko‘rib chiqilmoqda',no_pair:'💞 Sizda hozir juft yo‘q',
+  custody:'👶 Farzandlar kim bilan qolishini tanlang',gender:'👶 Jinsini tanlang',name:'✍️ Ism 2–40 harfdan iborat bo‘lsin',max:'👶 Ko‘pi bilan 5 ta farzand bo‘ladi',
+  undeliverable:'📭 Juftingizga yetkazilmadi: u botni ishga tushirmagan yoki bloklagan',disabled:'🌐 Web app o‘chirilgan',bot:'⚠️ Bot band, qayta urinib ko‘ring'};
+function reqTiles(d){ const R=d.requests||{}, q=R.quit||{}, dv=R.divorce||{}, ch=R.child;
+  return [
+    {k:'quit',i:'💼',t:'Ishdan bo‘shash',s:q.pending?'⏳ Ko‘rib chiqilmoqda':(q.profession?q.profession:'Kasb yo‘q'),on:!!q.pending},
+    {k:'divorce',i:'💔',t:'Ajrashish',s:dv.pending?(dv.pending==='partner_consent'?'⏳ Juft roziligi':'⏳ Ko‘rib chiqilmoqda'):(R.pair?R.pair.partner:'Juft yo‘q'),on:!!dv.pending},
+    {k:'child',i:'👶',t:'Farzand ko‘rish',s:ch&&ch.pending?(ch.pending.status==='approved'?'🍼 Yo‘lda':'⏳ Rozilik kutilmoqda'):(ch?ch.count+'/5 farzand':'Juft yo‘q'),on:!!(ch&&ch.pending)}];
+}
+function drawReqCard(rc,d){
+  rc.innerHTML='<div class="lbl">📝 Arizalar</div><div class="rqg">'+reqTiles(d).map(x=>'<div class="rqt'+(x.on?' on':'')+'" data-k="'+x.k+'" data-tap="1">'+
+    '<span class="rqi">'+x.i+'</span><b>'+x.t+'</b><span class="rqs">'+esc(x.s)+'</span></div>').join('')+'</div>'+
+    '<div class="hsub" style="margin-top:8px">Juft roziligi va bot egalari tasdig‘i botga keladi.</div>';
+  rc.querySelectorAll('.rqt').forEach(t=>t.onclick=()=>openRequest(t.dataset.k,d));
+}
+function openRequest(kind,d){
+  let ov=document.getElementById('rqv'); if(!ov){ ov=document.createElement('div'); ov.id='rqv'; document.body.appendChild(ov); }
+  const R=d.requests||{}, st={gender:'boy',name:'',custody:0}; let h='', can=false, go='📤 Ariza yuborish', danger=false;
+  if(kind==='quit'){ const q=R.quit||{};
+    h='<h3>💼 Ishdan bo‘shash</h3>';
+    if(q.pending) h+='<p class="rqp">⏳ Arizangiz bot egalarida ko‘rib chiqilmoqda.</p>';
+    else if(!q.profession) h+='<p class="rqp">Sizda hozir kasb yo‘q. Kasbni botda tanlaysiz.</p>';
+    else { can=true; h+='<p>Hozirgi kasbingiz: <b>'+esc(q.profession)+'</b></p><p class="hsub">Ariza bot egalariga yuboriladi. Tasdiqlangach, botda yangi kasb tanlaysiz.</p>'; }
+  } else if(kind==='divorce'){ const v=R.divorce||{};
+    h='<h3>💔 Ajrashish</h3>'; danger=true; go='💔 So‘rov yuborish';
+    if(!R.pair) h+='<p class="rqp">Sizda hozir juft yo‘q.</p>';
+    else if(v.pending) h+='<p class="rqp">'+(v.pending==='partner_consent'?'⏳ So‘rov '+esc(R.pair.partner)+'ga yuborilgan, uning roziligi kutilmoqda.':'⏳ Ariza bot egalarida ko‘rib chiqilmoqda.')+'</p>';
+    else { can=true;
+      h+='<div class="rqterms">'+esc(v.terms||'')+'</div>';
+      if((v.custody||[]).length){ st.custody=0;
+        h+='<div class="lbl" style="margin-top:12px">👶 Farzandlar kim bilan qolsin?</div><div class="rqopts">'+v.custody.map(c=>'<span class="rqo" data-c="'+c.id+'">'+esc(c.role)+' · '+esc(c.name)+'</span>').join('')+'</div>'; }
+      h+='<p class="hsub">So‘rov avval '+esc(R.pair.partner)+'ga boradi; u rozi bo‘lsa, bot egalari tasdiqlaydi.</p>'; }
+  } else { const ch=R.child;
+    h='<h3>👶 Farzand ko‘rish</h3>'; go='👶 So‘rov yuborish';
+    if(!R.pair||!ch) h+='<p class="rqp">Farzand ko‘rish uchun avval juftlik tuzing.</p>';
+    else if(ch.pending) h+='<p class="rqp">'+(ch.pending.status==='approved'?'🍼 '+esc(ch.pending.name||'Farzand')+' yo‘lda'+(ch.pending.due?' · '+esc(ch.pending.due):'')+'.':'⏳ '+esc(R.pair.partner)+' roziligi kutilmoqda'+(ch.pending.name?' ('+esc(ch.pending.name)+')':'')+'.')+'</p>';
+    else if(ch.count>=ch.max) h+='<p class="rqp">Sizda allaqachon '+ch.max+' ta farzand bor.</p>';
+    else { can=true;
+      h+='<div class="chips"><span class="chip">👶 '+ch.count+'/'+ch.max+'</span><span class="chip">💸 '+(ch.cost?fmtMoney(ch.cost)+'$':'Bepul')+'</span></div>'+
+        '<div class="seg rqgen"><span class="s on" data-g="boy">👦 O‘g‘il</span><span class="s" data-g="girl">👧 Qiz</span></div>'+
+        '<div class="lbl" style="margin-top:10px">Ism tanlang yoki yozing</div><div class="rqnames"></div>'+
+        '<input class="bet" id="rqName" maxlength="40" placeholder="O‘zingiz yozing" autocomplete="off" style="text-align:left;margin-top:8px">'+
+        '<p class="hsub">So‘rov '+esc(R.pair.partner)+'ga boradi. U rozi bo‘lganda to‘lov hamyoningizdan yechiladi.</p>'; }
+  }
+  ov.className='rqv show';
+  ov.innerHTML='<div class="rqbg"></div><div class="rqsh"><span class="rqx">✕</span>'+h+
+    (can?'<button class="btn go full'+(danger?' rqdanger':'')+'" id="rqGo">'+go+'</button>':'')+'</div>';
+  const close=()=>{ ov.className='rqv'; };
+  ov.querySelector('.rqbg').onclick=close; ov.querySelector('.rqx').onclick=close;
+  ov.querySelectorAll('.rqo').forEach(o=>o.onclick=()=>{ st.custody=+o.dataset.c; ov.querySelectorAll('.rqo').forEach(x=>x.classList.toggle('on',x===o)); });
+  const nm=ov.querySelector('#rqName'), names=ov.querySelector('.rqnames');
+  const drawNames=()=>{ if(!names) return; const L=((R.child||{}).names||{})[st.gender]||[];
+    names.innerHTML=L.slice(0,12).map(n=>'<span class="rqo'+(n===st.name?' on':'')+'" data-n="'+esc(n)+'">'+esc(n)+'</span>').join('');
+    names.querySelectorAll('.rqo').forEach(o=>o.onclick=()=>{ st.name=o.dataset.n; if(nm) nm.value=''; drawNames(); }); };
+  ov.querySelectorAll('.rqgen .s').forEach(x=>x.onclick=()=>{ st.gender=x.dataset.g; st.name=''; ov.querySelectorAll('.rqgen .s').forEach(y=>y.classList.toggle('on',y===x)); drawNames(); });
+  if(nm) nm.oninput=()=>{ if(nm.value.trim()){ st.name=''; names.querySelectorAll('.rqo.on').forEach(x=>x.classList.remove('on')); } };
+  drawNames();
+  const b=ov.querySelector('#rqGo'); if(!b) return;
+  b.onclick=()=>{ const body={kind:kind};
+    if(kind==='divorce'){ if(((R.divorce||{}).custody||[]).length&&!st.custody){ toast(RQERR.custody); return; } body.custody=st.custody; }
+    if(kind==='child'){ body.gender=st.gender; body.name=(nm&&nm.value.trim())||st.name; if(!body.name){ toast('✍️ Farzandga ism tanlang'); return; } }
+    b.disabled=true;
+    api('/app/api/request',body).then(r=>{ b.disabled=false;
+      if(r.result==='sent'){ d.requests=r.requests; const rc=document.getElementById('reqc'); if(rc) drawReqCard(rc,d); close(); haptic('success');
+        toast(kind==='quit'?'✅ Ariza bot egalariga yuborildi':kind==='divorce'?'💌 So‘rov '+((R.pair||{}).partner||'juftingiz')+'ga yuborildi':'💌 So‘rov '+((R.pair||{}).partner||'juftingiz')+'ga yuborildi'); }
+      else toast(RQERR[r.error]||'⚠️ Xatolik'); }).catch(()=>{ b.disabled=false; toast('⚠️ Aloqa xatosi'); }); };
+}
 // ---- 📰 NEWS (online gazeta) ----
 function nDate(){ const M=['yanvar','fevral','mart','aprel','may','iyun','iyul','avgust','sentabr','oktabr','noyabr','dekabr'];
   const t=new Date(); return t.getDate()+'-'+M[t.getMonth()]+', '+t.getFullYear(); }

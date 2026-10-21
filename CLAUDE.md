@@ -276,3 +276,10 @@
 - 👑 Web owner panel guruhlari (`.oseg` → `.ogrp`, tanlov `window.OGRP`): 📊 Statistika / 📰 Yangiliklar (`newsAdmin` — yozish,
   rasm, havolalar, ✏️📌👁🗑) / 🪙 EMP / 🏫 Ta'lim / ⚙️ Sozlamalar (`ownerFlags` → `/app/api/owner/flag`, `web_owner_flag`:
   `OWNER_FLAG_KEYS` all/emp/kami/avatar — bot panelidagi bilan bir xil `webapp_config`).
+- 📝 Arizalar web app'da (Profil → EMP kartasi tagida `.reqc` `#reqc`, `drawReqCard`/`openRequest` — pastdan chiquvchi `#rqv`):
+  💼 Ishdan bo'shash / 💔 Ajrashish (shartlar `divorce_terms_text` → `_plain`, farzand bo'lsa vasiy tanlovi) / 👶 Farzand ko'rish
+  (jins, `CHILD_NAMES` dan yoki o'z ismi 2–40, narx `next_child_cost`). `POST /app/api/request` → `web_request` (`create_rel_request`
+  `types.SimpleNamespace(bot=_EXCHANGE_LOOP_BOT)` bilan; farzand — `child_requests` status=pending + `child_request_message` →
+  juftga `family:consent` tugmalari, yetkazilmasa `cancelled`/`undeliverable`). Payload `requests` (`requests_payload`).
+  Juft roziligi va owner tasdig'i botda o'zgarmagan. Botdagi eski kirishlar (`rel:menu:quit|divorce`, `rel:divgo:*`, `?start=child`)
+  endi `REQ_WEB_TEXT` + `webapp_open_kb` (shaxsiy chatda WebApp `/app#req` → Profil'dagi kartaga scroll; guruhda bot havolasi).

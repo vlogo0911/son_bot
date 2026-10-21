@@ -3620,9 +3620,15 @@ def parent_role(user_id):
 
 
 def divorce_kids(pair_id):
+    """Juftlikning umumiy (o'z) farzandlari — o'gay farzandlar vasiylik tanloviga kirmaydi."""
     return db().execute(
-        "SELECT id, child_name, working FROM family_children WHERE pair_id=? ORDER BY id", (pair_id,)
+        "SELECT id, child_name, working FROM family_children WHERE pair_id=? AND step_id=0 ORDER BY id", (pair_id,)
     ).fetchall()
+
+
+def kid_is_parent(kid, uid):
+    """Ota-ona yoki o'gay ota/ona (vasiy ota-onaning hozirgi jufti)."""
+    return bool(kid) and (uid in (kid["parent1_id"], kid["parent2_id"]) or (kid.get("step_id") and uid == kid["step_id"]))
 
 
 def divorce_default_custody(pair):
@@ -3667,24 +3673,40 @@ def divorce_terms_text(pair, custody_id=None):
     return "\n".join(lines)
 
 
-def pair_reunite_kids(c, pair_id, a, b):
-    """Ajrashgan ota-ona qayta juftlashsa: ularning umumiy farzandlari yana yangi juftlikka (ikkalasiga umumiy)
-    o'tadi — vasiylik va aliment bekor qilinadi. Qaytaradi: nechta farzand."""
-    return c.execute(
-        "UPDATE family_children SET pair_id=?, custody_id=0, alimony_payer=0 "
+def pair_merge_kids(c, pair_id, a, b):
+    """Yangi juftlik tuzilganda farzandlar ikkalasiga umumiy bo'ladi (tranzaksiya ichida):
+    1) ajrashgan ota-ona qayta juftlashsa — umumiy farzandlari yangi juftlikka, vasiylik va aliment bekor;
+    2) boshqa odam bilan juftlashsa — vasiylikdagi farzandlari yangi juftlikka, yangi jufti o'gay ota/ona (step_id).
+       Aliment (ikkinchi o'z ota-onadan) davom etadi.
+    Qaytaradi: (qayta birlashgan, o'gay) farzandlar soni."""
+    reunited = c.execute(
+        "UPDATE family_children SET pair_id=?, custody_id=0, alimony_payer=0, step_id=0 "
         "WHERE (parent1_id=? AND parent2_id=?) OR (parent1_id=? AND parent2_id=?)",
         (pair_id, a, b, b, a),
     ).rowcount
+    step = 0
+    for x, y in ((a, b), (b, a)):
+        step += c.execute(
+            "UPDATE family_children SET pair_id=?, step_id=? WHERE custody_id=? AND parent1_id<>? AND parent2_id<>?",
+            (pair_id, y, x, y, y),
+        ).rowcount
+    return reunited, step
 
 
-async def notify_kids_reunited(bot, a, b, n):
-    if not n:
+async def notify_kids_merged(bot, a, b, merged):
+    reunited, step = merged
+    lines = []
+    if reunited:
+        lines.append(f"👨‍👩‍👧 Siz yana birgasiz! {reunited} ta farzandingiz endi yana ikkalangizga umumiy — "
+                     "vasiylik va aliment bekor qilindi.")
+    if step:
+        lines.append(f"👨‍👩‍👧‍👦 Oilangiz kattalashdi: oldingi nikohdan {step} ta farzand endi ikkalangizga umumiy "
+                     "(o‘gay ota/ona ham parvarish qila oladi).")
+    if not lines:
         return
-    text = (f"👨‍👩‍👧 Siz yana birgasiz! {n} ta farzandingiz endi yana ikkalangizga umumiy — "
-            "vasiylik va aliment bekor qilindi.")
     for uid in (a, b):
         try:
-            await bot.send_message(uid, text)
+            await bot.send_message(uid, "\n".join(lines))
         except TelegramError:
             pass
 
@@ -3713,14 +3735,16 @@ def divorce_settle(c, pair, custody_id):
         shares[to][1] += price
         c.execute("UPDATE gift_log SET recipient_id=? WHERE id=?", (to, gift_id))
 
-    kids = c.execute("SELECT id FROM family_children WHERE pair_id=?", (pair[0],)).fetchall()
+    # O'gay farzandlar o'z vasiy ota-onasida qoladi (o'gay aloqa uziladi, aliment o'zgarmaydi)
+    c.execute("UPDATE family_children SET step_id=0 WHERE pair_id=? AND step_id<>0", (pair[0],))
+    kids = c.execute("SELECT id FROM family_children WHERE pair_id=? AND custody_id=0", (pair[0],)).fetchall()
     payer = None
     if kids:
         if custody_id not in (a, b):
             custody_id = divorce_default_custody(pair)
         payer = b if custody_id == a else a
         c.execute(
-            "UPDATE family_children SET custody_id=?, alimony_payer=?, last_alimony=? WHERE pair_id=?",
+            "UPDATE family_children SET custody_id=?, alimony_payer=?, last_alimony=? WHERE pair_id=? AND custody_id=0",
             (custody_id, payer, int(time.time()), pair[0]),
         )
     return {
@@ -4284,8 +4308,8 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        VALUES (?, ?, ?, ?, 'active')""",
                     (requester, target, group_id or 0, now),
                 ).lastrowid
-                reunited = pair_reunite_kids(c, new_pair, requester, target)
-            await notify_kids_reunited(context.bot, requester, target, reunited)
+                merged = pair_merge_kids(c, new_pair, requester, target)
+            await notify_kids_merged(context.bot, requester, target, merged)
         elif kind == "divorce":
             pair = active_pair(requester)
             if (
@@ -11786,9 +11810,9 @@ async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            VALUES (?, ?, ?, ?, 'active')""",
                         (requester, target, group_id or 0, now),
                     ).lastrowid
-                    reunited = pair_reunite_kids(c, new_pair, requester, target)
-                    if reunited:
-                        details.append(f"#{rid}: {reunited} ta farzand yana umumiy")
+                    merged = pair_merge_kids(c, new_pair, requester, target)
+                    if any(merged):
+                        details.append(f"#{rid}: {sum(merged)} ta farzand umumiy bo‘ldi")
 
                 elif kind == "divorce":
                     pair = active_pair(requester)
@@ -12571,7 +12595,7 @@ def applicant_info(uid):
     birja = sum(value for *_, value in birja_portfolio_value(uid))
     pair = active_pair(uid)
     kids = c.execute(
-        "SELECT COUNT(*) FROM family_children WHERE parent1_id=? OR parent2_id=?", (uid, uid)
+        "SELECT COUNT(*) FROM family_children WHERE parent1_id=? OR parent2_id=? OR step_id=?", (uid, uid, uid)
     ).fetchone()[0]
     lines = [
         f"💰 Hamyon: <b>{fmt_money(wallet)}$</b>" + (" 🔻 (minusda)" if wallet < 0 else ""),
@@ -13829,6 +13853,7 @@ KID_COLUMNS = {
     "last_meal": "INTEGER NOT NULL DEFAULT 0",    # oxirgi ovqat vaqti (12 soat oralig'i)
     "gear": "TEXT NOT NULL DEFAULT ''",           # sotib olingan buyumlar (vergul bilan)
     "outfit": "TEXT NOT NULL DEFAULT ''",         # 3D personaj kiyimlari (JSON: hat/top/bottom/shoes/acc/emo)
+    "step_id": "INTEGER NOT NULL DEFAULT 0",      # o'gay ota/ona: vasiy ota-onaning yangi jufti (farzand ikkalasiga umumiy)
 }
 ALIMONY_PER_CHILD = 75      # $ / kun / farzand — farzand ishga kirguncha
 KID_FIELDS = ("id", "pair_id", "parent1_id", "parent2_id", "gender", "child_name", *KID_COLUMNS)
@@ -13944,8 +13969,8 @@ def kid_row(kid_id):
 
 def kids_of(user_id):
     rows = db().execute(
-        f"SELECT {', '.join(KID_FIELDS)} FROM family_children WHERE parent1_id=? OR parent2_id=? ORDER BY id",
-        (user_id, user_id),
+        f"SELECT {', '.join(KID_FIELDS)} FROM family_children WHERE parent1_id=? OR parent2_id=? OR step_id=? ORDER BY id",
+        (user_id, user_id, user_id),
     ).fetchall()
     return [dict(zip(KID_FIELDS, r)) for r in rows]
 
@@ -14042,7 +14067,7 @@ def kid_apply_money(kid, events):
 async def kid_apply_events(bot, kid, events):
     """Pul hodisalarini bajaradi va ota-onaga xabar yuboradi."""
     kid_apply_money(kid, events)
-    parents = [kid["parent1_id"], kid["parent2_id"]]
+    parents = [kid["parent1_id"], kid["parent2_id"]] + ([kid["step_id"]] if kid.get("step_id") else [])
     for event, data in events:
         if event in KID_MONEY_EVENTS:
             continue
@@ -14236,7 +14261,7 @@ async def cb_kid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     kid = kid_fresh(int(parts[3])) if len(parts) > 3 and parts[3].isdigit() else None
-    if not kid or uid not in (kid["parent1_id"], kid["parent2_id"]):
+    if not kid_is_parent(kid, uid):
         await q.answer(kid_t(uid, "not_parent"), show_alert=True)
         return
     name = escape(kid["child_name"])
@@ -18174,7 +18199,7 @@ def user_card(uid):
     pid = row[3] if row else None
     divorces = c.execute("SELECT COUNT(*) FROM pairs WHERE status='ended' AND (user1_id=? OR user2_id=?)",
                          (uid, uid)).fetchone()[0]
-    kids = c.execute("SELECT COUNT(*) FROM family_children WHERE parent1_id=? OR parent2_id=?", (uid, uid)).fetchone()[0]
+    kids = c.execute("SELECT COUNT(*) FROM family_children WHERE parent1_id=? OR parent2_id=? OR step_id=?", (uid, uid, uid)).fetchone()[0]
     return {"id": uid, "name": name, "username": row[1] if row else None, "gender": parent_role(uid), "age": age,
             "money": money, "money_fmt": fmt_money(money), "rank": rank, "level": level_name(None, points),
             "points": points, "games": games, "wins": wins,
@@ -19499,6 +19524,7 @@ async def webapp_payload(user_id):
             "meals": kid["meals"], "meals_need": kid_meals_need(kid["age"]),
             "next_meal": int(kid_eat_check(kid, int(time.time())) or 0), "gear": _items("gear"),
             "outfit": kid_outfit(kid), "parents": [_plain_name(kid["parent1_id"]), _plain_name(kid["parent2_id"])],
+            "step": _plain_name(kid["step_id"]) if kid.get("step_id") else None,
             "inst": ({"id": inst["id"], "name": inst["name"], "fee": inst["fee"]} if inst else None),
             "salary": KID_SALARY.get(kid["edu"], 0) if kid["working"] else 0,
             "food": _items("food"), "toy": _items("toy"), "fee": fee_due,
@@ -20148,7 +20174,7 @@ async def web_kid_action(uid, kid_id, act, item):
         kid = kid_fresh(int(kid_id))
     except (TypeError, ValueError):
         return {"error": "kid"}
-    if not kid or uid not in (kid["parent1_id"], kid["parent2_id"]):
+    if not kid_is_parent(kid, uid):
         return {"error": "not_parent"}
     if kid["working"]:
         return {"error": "working"}
@@ -20216,7 +20242,7 @@ async def web_kid_outfit(uid, kid_id, outfit):
         kid = kid_row(int(kid_id))
     except (TypeError, ValueError):
         return {"error": "kid"}
-    if not kid or uid not in (kid["parent1_id"], kid["parent2_id"]):
+    if not kid_is_parent(kid, uid):
         return {"error": "not_parent"}
     if not isinstance(outfit, dict):
         return {"error": "outfit"}
@@ -20235,7 +20261,7 @@ async def web_edu_enroll(uid, kid_id, inst_id):
         kid = kid_fresh(int(kid_id)); inst = edu_get(int(inst_id))
     except (TypeError, ValueError):
         return {"error": "kid"}
-    if not kid or uid not in (kid["parent1_id"], kid["parent2_id"]):
+    if not kid_is_parent(kid, uid):
         return {"error": "not_parent"}
     if kid["working"]:
         return {"error": "working"}
@@ -21249,7 +21275,7 @@ function render(res){
       '<div class="ktop"><div class="kava"><span class="kem">'+em+'</span><span class="kacc">'+S[2]+'</span></div>'+
       '<div class="kmeta"><div class="kname">'+esc(k.name)+'</div>'+
       '<div class="kchips"><span class="kchip">'+esc(k.age)+' yosh</span><span class="kchip st">'+S[3]+' · '+S[4]+'</span></div>'+
-      ((k.parents||[]).length?'<div class="kpar">👨‍👩‍👧 '+esc(k.parents[0])+' ❤️ '+esc(k.parents[1])+'</div>':'')+'</div></div>'+
+      ((k.parents||[]).length?'<div class="kpar">👨‍👩‍👧 '+esc(k.parents[0])+' ❤️ '+esc(k.parents[1])+(k.step?' · o‘gay: '+esc(k.step):'')+'</div>':'')+'</div></div>'+
       (k.working?'<div class="kwork">💼 Ishlaydi · kuniga <b>'+fmtMoney(k.salary)+'$</b> (ota-onaga teng)</div>':
       '<div class="kgrow"><div class="t"><span>🌱 Keyingi yoshgacha: 🍽 '+k.meals+'/'+k.meals_need+' ovqat</span><b>'+k.growth+'%</b></div><div class="track"><div class="fill" style="width:'+k.growth+'%"></div></div>'+
         '<div class="kmeal'+(k.next_meal?'':' ready')+'">'+(k.next_meal?'⏳ Keyingi ovqat: '+hm(k.next_meal):'🍽 Ovqatlanish vaqti!')+'</div></div>'+
@@ -22008,7 +22034,7 @@ function openKidStudio(k){
     return '<div class="kslot" data-s="'+s+'"><span class="ki">'+o[2]+'</span><span class="kn">'+KID3D.CAT[s].n+'</span></div>'; };
   ov.innerHTML='<div class="kst-in st-'+(k.stage_key||'baby')+'">'+
     '<div class="kst-hd"><div><div class="kst-name">'+esc(k.name)+'</div><div class="kst-sub">'+esc(k.age)+' yosh · 📏 ~'+KID3D.height(k.age,k.gender)+' sm · '+esc(k.stage)+
-      ((k.parents||[]).length?' · 👨‍👩‍👧 '+esc(k.parents[0])+' ❤️ '+esc(k.parents[1]):'')+'</div></div><span class="kst-x" id="kstX">✕</span></div>'+
+      ((k.parents||[]).length?' · 👨‍👩‍👧 '+esc(k.parents[0])+' ❤️ '+esc(k.parents[1])+(k.step?' · o‘gay: '+esc(k.step):''):'')+'</div></div><span class="kst-x" id="kstX">✕</span></div>'+
     '<div class="kst-stage" id="kstStage"><canvas id="kstCv"></canvas>'+
       '<div class="kst-col l">'+L.map(slotHtml).join('')+'</div><div class="kst-col r">'+Rr.map(slotHtml).join('')+'</div>'+
       '<div class="kst-load" id="kstLoad">⏳ 3D personaj yuklanmoqda…</div></div>'+

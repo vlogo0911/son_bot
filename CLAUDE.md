@@ -283,6 +283,9 @@
   juftga `family:consent` tugmalari, yetkazilmasa `cancelled`/`undeliverable`). Payload `requests` (`requests_payload`).
   Juft roziligi va owner tasdig'i botda o'zgarmagan. Botdagi eski kirishlar (`rel:menu:quit|divorce`, `rel:divgo:*`, `?start=child`)
   endi `REQ_WEB_TEXT` + `webapp_open_kb` (shaxsiy chatda WebApp `/app#req` → Profil'dagi kartaga scroll; guruhda bot havolasi).
-- 👨‍👩‍👧 Ajrashgan ota-ona qayta juftlashsa (`rel:owner` pair tasdig'i va /tasdiq): `pair_reunite_kids(c, new_pair, a, b)` — ularning
-  umumiy farzandlari (`parent1/parent2` = a,b) yangi juftlikka o'tadi, `custody_id`/`alimony_payer` = 0 (aliment to'xtaydi);
-  `notify_kids_reunited` ikkalasiga xabar. Web ajrashish oynasi botdagidek: "👨 Otada / 👩 Onada qolsin — ism" (`.rqopts.col`).
+- 👨‍👩‍👧 Yangi juftlik tuzilganda (`rel:owner` pair tasdig'i va /tasdiq) `pair_merge_kids(c, new_pair, a, b)` → (qayta, o'gay):
+  ajrashgan ota-ona qayta juftlashsa — umumiy farzandlari yangi juftlikka, `custody_id`/`alimony_payer`/`step_id` = 0 (aliment to'xtaydi);
+  boshqa odam bilan juftlashsa — vasiylikdagi (`custody_id`=x) farzandlar yangi juftlikka, yangi jufti o'gay ota/ona
+  (`family_children.step_id`): `kids_of`, profil sanoqlari, ruxsatlar (`kid_is_parent`), bildirishnomalar va web `kids_list.step` da
+  ko'rinadi; aliment (ikkinchi o'z ota-onadan) davom etadi, maosh faqat o'z ota-onaga. Ajrashishda (`divorce_settle`) o'gay farzandlar
+  vasiy ota-onasida qoladi (`step_id`=0), vasiylik tanloviga faqat o'z farzandlar (`divorce_kids`: `step_id=0`). `notify_kids_merged` xabari. Web ajrashish oynasi botdagidek: "👨 Otada / 👩 Onada qolsin — ism" (`.rqopts.col`).

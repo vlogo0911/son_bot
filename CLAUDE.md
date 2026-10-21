@@ -309,3 +309,13 @@
   silkinish + Telegram haptic. Boshqaruv — telefon klaviaturasi `#csv` (2/4/6/8, 1/3/7/9 diagonal, 5 o'q, * qurol, 0 o'qlash, # pauza,
   ✕ chiqish) va klaviatura (WASD/strelka, Space, Q, R, P, Esc). Ovoz — square beep (`SFX`). Rekord `/app/api/vip/score` → `vip_scores` (`web_vip_score`:
   faqat VIP, score ≤ level·7000, 8 s da bir).
+- 🎯 CLASSIC STRIKE (3D FPS, VIP → owners-only, original assetlar): alohida katalog `games/classic_strike/` — `cs_core.js` (`CS3D.U`,
+  `CS3D.Save` localStorage `classic_strike_v1` — sozlamalar/statistika/ochilishlar, `CS3D.Audio` Web Audio sintez), `cs_world.js`
+  (`CS3D.MapSystem.GameMap`: Desert Base / Urban Strike / Warehouse, 28×28 katak, A*, 3D ray/LOS, to'qnashuv), `cs_combat.js`
+  (`WeaponSystem` 7 qurol + effektlar + viewmodel, `EnemyAI.Bot` patrol/investigate/chase/attack/cover/reload/retreat, easy/normal/hard),
+  `cs_ui.js` (menyu, HUD, mobil tugmalar), `cs_game.js` (Engine, Input — multi-touch joystick/qarash/tugmalar + WASD/sichqoncha,
+  Player, Match, `RoundManager` tdm/dm/bomb/survival, `CS3D.launch({onResult,onExit})`), `cs_style.css` (faqat `.cs3d` ichida).
+  Server: `GET /app/games/classic_strike/<fayl>` (`CS_GAME_FILES` oq ro'yxati, `_game_file`); WEBAPP_HTML `CSTRIKE` loader
+  (three r128 `KID3D.load` + CSS + 5 skript, `?v=` = `cs_game_version()` xeshi, `__CS_VER__`). VIP sahifada `#vipCS` karta (STRIKE 2D
+  ham qoldi). Natija `vip/score` game=`cstrike` (`cstrike_check`: kills/heads/wave/rounds/win bo'yicha yuqori chegara), payload
+  `vip.cs_best`/`cs_top`.

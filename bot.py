@@ -19453,6 +19453,11 @@ def is_vip(uid):
     return uid in CAREER_OWNER_IDS or vip_until(uid) > time.time()
 
 
+def vip_enabled_for(uid):
+    """👑 VIP bo'limi (test): standart faqat ownerlar; owner panel → ⚙️ Sozlamalar'dan hamma uchun ochiladi."""
+    return web_enabled_for(uid) and (bool(webapp_flags().get("vip", 0)) or uid in CAREER_OWNER_IDS)
+
+
 def vip_top(game, limit=10):
     return [{"name": _plain_person(u), "best": b, "level": lv} for u, b, lv in db().execute(
         "SELECT user_id, best, level FROM vip_scores WHERE game=? ORDER BY best DESC, updated_at LIMIT ?", (game, limit))]
@@ -19461,7 +19466,8 @@ def vip_top(game, limit=10):
 def vip_payload(uid):
     until = vip_until(uid)
     row = db().execute("SELECT best FROM vip_scores WHERE game='strike' AND user_id=?", (uid,)).fetchone()
-    return {"vip": is_vip(uid), "owner": uid in CAREER_OWNER_IDS,
+    return {"vip": is_vip(uid), "owner": uid in CAREER_OWNER_IDS, "open": vip_enabled_for(uid),
+            "test": not webapp_flags().get("vip", 0),
             "until": tashkent_dt(until) if until > time.time() else None,
             "best": row[0] if row else 0, "top": vip_top("strike", 5)}
 
@@ -19494,7 +19500,7 @@ async def web_vip_grant(uid, body):
             c.execute("INSERT INTO vip_users(user_id, until, granted_by, created_at) VALUES (?,?,?,?) "
                       "ON CONFLICT(user_id) DO UPDATE SET until=excluded.until, granted_by=excluded.granted_by",
                       (target, until, uid, now))
-    if days and _EXCHANGE_LOOP_BOT is not None:
+    if days and _EXCHANGE_LOOP_BOT is not None and vip_enabled_for(target):   # test rejimida xabar yuborilmaydi
         try:
             await _EXCHANGE_LOOP_BOT.send_message(
                 target, f"👑 <b>Sizga {days} kunlik VIP berildi!</b>\nWeb app → 🎮 Games → 👑 VIP bo‘limida maxsus o‘yinlar ochildi.")
@@ -19506,7 +19512,7 @@ async def web_vip_grant(uid, body):
 async def web_vip_score(uid, body):
     """VIP o'yin natijasi (rekord). Klient hisoblaydi — chegaralar bilan."""
     game = body.get("game")
-    if game not in VIP_GAMES or not is_vip(uid):
+    if game not in VIP_GAMES or not is_vip(uid) or not vip_enabled_for(uid):
         return {"error": "vip"}
     try:
         score, level = int(body.get("score")), int(body.get("level"))
@@ -19635,7 +19641,7 @@ async def web_news_admin(uid, act, body):
 
 
 # ⚙️ Owner panel (web): xususiyatlarni hamma uchun ochish/yopish — bot panelidagi bilan bir xil flaglar
-OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar")
+OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip")
 
 
 def owner_flags_payload():
@@ -21661,7 +21667,7 @@ function render(res){
 
   // 🎮 GAMES — kategoriyalar (Kazino / VIP)
   app.appendChild(gamesPage(d));
-  app.appendChild(vipPage(d));
+  if((d.vip||{}).open) app.appendChild(vipPage(d));
 
   // KAZINO — o'yinlar lobbisi
   const cz=$('<div class="sec" id="s-casino"></div>');
@@ -21844,7 +21850,7 @@ function render(res){
   if(/(^|#)req\b/.test(location.hash||'') && !window.RQOPENED){ window.RQOPENED=1; TAB='profil';
     setTimeout(()=>{ const e=document.getElementById('reqc'); if(e) e.scrollIntoView({behavior:'smooth',block:'center'}); },400); }
   app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':b.dataset.back==='games'?'games':'casino'));
-  setTab(defs.some(x=>x[0]===TAB)||TAB==='bank'||TAB==='birja'||TAB==='casino'||TAB==='vip'||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
+  setTab(defs.some(x=>x[0]===TAB)||TAB==='bank'||TAB==='birja'||TAB==='casino'||(TAB==='vip'&&(d.vip||{}).open)||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
   ['s-crash','s-frog','s-kami'].forEach(id=>{ const sc=document.getElementById(id); if(!sc) return;
     sc.insertAdjacentHTML('afterbegin','<div class="sndbar"><span data-snd="m">🎵</span><span data-snd="s">🔊</span></div>');
     sc.querySelectorAll('.sndbar span').forEach(b=>b.onclick=()=>SND.toggle(b.dataset.snd)); });
@@ -23063,8 +23069,8 @@ function gamesPage(d){
   const sec=$('<div class="sec" id="s-games"></div>'), v=d.vip||{};
   sec.innerHTML='<h2>🎮 Games</h2><div class="gcat">'+
     '<div class="gcc" data-go="casino" data-tap="1"><div class="gci">'+CASINO_ICON.replace('width="27" height="27"','width="40" height="40"')+'</div><div><b>KAZINO</b><div class="hsub">Royal Crash · Hovuz'+(d.kami?' · Kamikaze':'')+' — hamyon puli bilan</div></div></div>'+
-    '<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">Eski telefonlardagi klassik o‘yinlar · STRIKE 2D</div></div>'+
-      '<span class="glk">'+(v.vip?'✅ VIP':'🔒 VIP')+'</span></div>'+
+    (v.open?'<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">Eski telefonlardagi klassik o‘yinlar · STRIKE 2D</div></div>'+
+      '<span class="glk">'+(v.test?'🧪 TEST':v.vip?'✅ VIP':'🔒 VIP')+'</span></div>':'')+
   '</div><div class="gnote">🎮 Kategoriya tanlang</div>';
   sec.querySelectorAll('.gcc').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
   return sec;
@@ -23293,7 +23299,7 @@ function newsAdmin(d){
   draw(d.news||[]); return box;
 }
 function ownerFlags(d){
-  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun']];
+  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun']];
   const box=$('<div class="card full"></div>');
   const draw=f=>{ box.innerHTML='<div class="lbl">⚙️ Xususiyatlar</div>'+F.map(([k,i,l])=>'<div class="oflag" data-k="'+k+'"><span>'+i+' '+l+'</span>'+
       '<span class="otg'+(f[k]?' on':'')+'"><i></i></span></div>').join('')+

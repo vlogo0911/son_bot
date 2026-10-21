@@ -298,7 +298,8 @@
 - 🎮 Web app Games: pastki qatorda "Kazino" o'rniga "🎮 Games" tab (`games`) → `#s-games` (`gamesPage`): kategoriyalar 🎰 Kazino
   (`setTab('casino')`, lobbi tepasida "‹ Games") va 👑 VIP (`#s-vip`, `vipPage`). `setTab` casino/vip/crash/frog/kami uchun Games tabini
   yoritadi. VIP: `vip_users` (until, ownerlar beradi), `is_vip` (ownerlar doim VIP), payload `vip` (`vip_payload`: vip/until/best/top),
-  ownerga `vip_list`; owner panel → 👑 VIP (`vipAdmin`, `/app/api/vip/grant` — `web_vip_grant`, 0 kun = olib qo'yish, berilganda bot xabari).
+  ownerga `vip_list`; bo'lim test — `vip_enabled_for` (webapp_config "vip" yoki owner; web Owner → ⚙️ Sozlamalar → "VIP o'yinlar —
+  hamma uchun", `OWNER_FLAG_KEYS`), yopiq bo'lsa Games'da VIP kartasi va `#s-vip` chiqmaydi, rekord qabul qilinmaydi; owner panel → 👑 VIP (`vipAdmin`, `/app/api/vip/grant` — `web_vip_grant`, 0 kun = olib qo'yish, berilganda bot xabari).
   VIP o'yin: 🕹 STRIKE 2D (`STRIKE` modul, WEBAPP_HTML ichida) — eski Nokia telefonlaridagi kontr-terror o'yinlari uslubidagi original
   o'yin (nom va grafika o'zimizniki): monoxrom LCD 168×120 canvas (pixelated), 3×5 piksel shrift, urug'li protsedura xarita
   (`genMap(level)`, flood-fill bilan ulanish), dushmanlar patrul/hujum (LOS), hitscan o'q + nishonga olish yordami, bosqichlar

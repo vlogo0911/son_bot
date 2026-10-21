@@ -289,3 +289,9 @@
   (`family_children.step_id`): `kids_of`, profil sanoqlari, ruxsatlar (`kid_is_parent`), bildirishnomalar va web `kids_list.step` da
   ko'rinadi; aliment (ikkinchi o'z ota-onadan) davom etadi, maosh faqat o'z ota-onaga. Ajrashishda (`divorce_settle`) o'gay farzandlar
   vasiy ota-onasida qoladi (`step_id`=0), vasiylik tanloviga faqat o'z farzandlar (`divorce_kids`: `step_id=0`). `notify_kids_merged` xabari. Web ajrashish oynasi botdagidek: "👨 Otada / 👩 Onada qolsin — ism" (`.rqopts.col`).
+- 📝 Kiruvchi so'rovlar web'da (Telegram xabari yetmasa ham qotib qolmaydi): `requests_payload` → `divorce.incoming` (partner_consent,
+  target=uid) va `child.incoming` (status pending, partner=uid) + `child.mine`; plitkada "💌 So'rov keldi" (`.rqt.hot`), Profil tabida
+  badge. Javob `POST /app/api/request/answer` → `web_request_answer`: botdagi `cb_relationship` (`rel:divorce:*` / `family:consent:*`)
+  `_WebCallback` soxta query bilan chaqiriladi — mantiq bir xil. O'zimniki: `/app/api/request/cancel` (`web_request_cancel`) va
+  `/app/api/request/remind` (`web_request_remind`, `REQ_REMIND_GAP` 10 daq). Ajrashish xabari `send_divorce_consent` (yetkazilmasa
+  `REL_SEND_FAILED` → web javobida `undelivered`).

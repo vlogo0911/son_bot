@@ -3667,6 +3667,28 @@ def divorce_terms_text(pair, custody_id=None):
     return "\n".join(lines)
 
 
+def pair_reunite_kids(c, pair_id, a, b):
+    """Ajrashgan ota-ona qayta juftlashsa: ularning umumiy farzandlari yana yangi juftlikka (ikkalasiga umumiy)
+    o'tadi — vasiylik va aliment bekor qilinadi. Qaytaradi: nechta farzand."""
+    return c.execute(
+        "UPDATE family_children SET pair_id=?, custody_id=0, alimony_payer=0 "
+        "WHERE (parent1_id=? AND parent2_id=?) OR (parent1_id=? AND parent2_id=?)",
+        (pair_id, a, b, b, a),
+    ).rowcount
+
+
+async def notify_kids_reunited(bot, a, b, n):
+    if not n:
+        return
+    text = (f"👨‍👩‍👧 Siz yana birgasiz! {n} ta farzandingiz endi yana ikkalangizga umumiy — "
+            "vasiylik va aliment bekor qilindi.")
+    for uid in (a, b):
+        try:
+            await bot.send_message(uid, text)
+        except TelegramError:
+            pass
+
+
 def divorce_settle(c, pair, custody_id):
     """Ajrashish tasdiqlanganda (tranzaksiya ichida): pul va sovg'alarni teng bo'ladi,
     farzandlar vasiyligi va alimentni belgilaydi. Qaytaradi: xabar uchun ma'lumot."""
@@ -4256,12 +4278,14 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.answer("Ishtirokchilardan biri allaqachon juftlikda.", show_alert=True)
                 return
             with c:
-                c.execute(
+                new_pair = c.execute(
                     """INSERT INTO pairs
                        (user1_id, user2_id, group_id, started_at, status)
                        VALUES (?, ?, ?, ?, 'active')""",
                     (requester, target, group_id or 0, now),
-                )
+                ).lastrowid
+                reunited = pair_reunite_kids(c, new_pair, requester, target)
+            await notify_kids_reunited(context.bot, requester, target, reunited)
         elif kind == "divorce":
             pair = active_pair(requester)
             if (
@@ -11756,12 +11780,15 @@ async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         details.append(f"#{rid}: juftlik holati mos emas")
                         continue
 
-                    c.execute(
+                    new_pair = c.execute(
                         """INSERT INTO pairs
                            (user1_id, user2_id, group_id, started_at, status)
                            VALUES (?, ?, ?, ?, 'active')""",
                         (requester, target, group_id or 0, now),
-                    )
+                    ).lastrowid
+                    reunited = pair_reunite_kids(c, new_pair, requester, target)
+                    if reunited:
+                        details.append(f"#{rid}: {reunited} ta farzand yana umumiy")
 
                 elif kind == "divorce":
                     pair = active_pair(requester)
@@ -19138,7 +19165,7 @@ def requests_payload(uid):
     if kids:
         for m in (pair[1], pair[2]):
             role = parent_role(m)
-            custody.append({"id": m, "name": _plain_person(m), "role": {"male": "Otada", "female": "Onada"}.get(role, "Shu odamda")})
+            custody.append({"id": m, "name": _plain_person(m), "role": {"male": "👨 Otada", "female": "👩 Onada"}.get(role, "🏠 Shu odamda")})
     out["divorce"].update({"terms": _plain(divorce_terms_text(pair)), "custody": custody, "kids": len(kids)})
     count = family_child_count(pair[0])
     pend = c.execute("SELECT child_name, gender, status, due_at FROM child_requests WHERE pair_id=? "
@@ -20626,6 +20653,7 @@ WEBAPP_HTML = r"""<!doctype html>
   .rqopts,.rqnames{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
   .rqo{padding:8px 12px;border-radius:999px;font-size:13px;font-weight:700;cursor:pointer;background:rgba(0,0,0,.35);box-shadow:inset 0 0 0 1px rgba(255,210,74,.3)}
   .rqo.on{color:#2b1b02;background:var(--g-metal)}
+  .rqopts.col{flex-direction:column}.rqopts.col .rqo{border-radius:12px;padding:11px 14px;font-size:14px}
   .rqsh .seg{margin-top:12px}.rqsh .btn.full{margin-top:14px}
   #rqName{box-sizing:border-box;width:100%}
   .btn.rqdanger{background:linear-gradient(180deg,#e0485c,#a81f34);color:#fff}
@@ -22596,7 +22624,10 @@ function openRequest(kind,d){
     else { can=true;
       h+='<div class="rqterms">'+esc(v.terms||'')+'</div>';
       if((v.custody||[]).length){ st.custody=0;
-        h+='<div class="lbl" style="margin-top:12px">👶 Farzandlar kim bilan qolsin?</div><div class="rqopts">'+v.custody.map(c=>'<span class="rqo" data-c="'+c.id+'">'+esc(c.role)+' · '+esc(c.name)+'</span>').join('')+'</div>'; }
+        h+='<div class="lbl" style="margin-top:12px">👶 Farzandlar ('+v.kids+' ta) kim bilan qolsin?</div><div class="rqopts col">'+
+          v.custody.map(c=>'<span class="rqo" data-c="'+c.id+'">'+esc(c.role)+' qolsin — '+esc(c.name)+'</span>').join('')+'</div>'+
+          '<p class="hsub">Tanlovingiz juftingizga yuboriladi — u rozi bo‘lsa, shunday bo‘ladi. Ikkinchi ota-ona har bir farzand uchun aliment to‘laydi.</p>'; }
+      else h+='<p class="hsub">Ajrashish so‘rovini yuborasizmi?</p>';
       h+='<p class="hsub">So‘rov avval '+esc(R.pair.partner)+'ga boradi; u rozi bo‘lsa, bot egalari tasdiqlaydi.</p>'; }
   } else { const ch=R.child;
     h='<h3>👶 Farzand ko‘rish</h3>'; go='👶 So‘rov yuborish';

@@ -283,3 +283,6 @@
   juftga `family:consent` tugmalari, yetkazilmasa `cancelled`/`undeliverable`). Payload `requests` (`requests_payload`).
   Juft roziligi va owner tasdig'i botda o'zgarmagan. Botdagi eski kirishlar (`rel:menu:quit|divorce`, `rel:divgo:*`, `?start=child`)
   endi `REQ_WEB_TEXT` + `webapp_open_kb` (shaxsiy chatda WebApp `/app#req` → Profil'dagi kartaga scroll; guruhda bot havolasi).
+- 👨‍👩‍👧 Ajrashgan ota-ona qayta juftlashsa (`rel:owner` pair tasdig'i va /tasdiq): `pair_reunite_kids(c, new_pair, a, b)` — ularning
+  umumiy farzandlari (`parent1/parent2` = a,b) yangi juftlikka o'tadi, `custody_id`/`alimony_payer` = 0 (aliment to'xtaydi);
+  `notify_kids_reunited` ikkalasiga xabar. Web ajrashish oynasi botdagidek: "👨 Otada / 👩 Onada qolsin — ism" (`.rqopts.col`).

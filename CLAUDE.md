@@ -303,6 +303,9 @@
   VIP o'yin: 🕹 STRIKE 2D (`STRIKE` modul, WEBAPP_HTML ichida) — eski Nokia telefonlaridagi kontr-terror o'yinlari uslubidagi original
   o'yin (nom va grafika o'zimizniki): monoxrom LCD 168×120 canvas (pixelated), 3×5 piksel shrift, urug'li protsedura xarita
   (`genMap(level)`, flood-fill bilan ulanish), dushmanlar patrul/hujum (LOS), hitscan o'q + nishonga olish yordami, bosqichlar
-  (dushmanlar 3+2·L, HP +35). Boshqaruv — telefon klaviaturasi `#csv` (2/4/6/8, 1/3/7/9 diagonal, 5 o'q, 0 o'qlash, * pauza, # chiqish)
-  va klaviatura (WASD/strelka, Space, R). Ovoz — square beep (`SFX`). Rekord `/app/api/vip/score` → `vip_scores` (`web_vip_score`:
-  faqat VIP, score ≤ level·4000, 8 s da bir).
+  (dushmanlar 3+2·L, HP +35). v2: qurollar `GUNS` (USP ∞ / AK avtomat / AWP 4 zarar, `*` almashtirish), dushman turlari `ET`
+  (T oddiy, H zirhli 4 HP, S snayper — nishonga olishda nuqtali lazer), narsalar `pk` (M aptechka +35, B o'q qutisi, A/S qurol; o'ljadan
+  tushadi), har 3-raund C4 (`BOMB_T` 60 s, ustida turib `DEFUSE` 2.5 s; portlasa o'yin tugaydi), ekrandan tashqari nishonga strelka,
+  silkinish + Telegram haptic. Boshqaruv — telefon klaviaturasi `#csv` (2/4/6/8, 1/3/7/9 diagonal, 5 o'q, * qurol, 0 o'qlash, # pauza,
+  ✕ chiqish) va klaviatura (WASD/strelka, Space, Q, R, P, Esc). Ovoz — square beep (`SFX`). Rekord `/app/api/vip/score` → `vip_scores` (`web_vip_score`:
+  faqat VIP, score ≤ level·7000, 8 s da bir).

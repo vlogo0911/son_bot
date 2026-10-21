@@ -17061,6 +17061,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_edu_enroll(uid, body.get("kid"), body.get("inst"))
         elif path in ("/app/api/edu/add", "/app/api/edu/update", "/app/api/edu/toggle"):
             coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
+        elif path == "/app/api/vip/grant":
+            coro = web_vip_grant(uid, body)
+        elif path == "/app/api/vip/score":
+            coro = web_vip_score(uid, body)
         elif path == "/app/api/request":
             coro = web_request(uid, body)
         elif path == "/app/api/request/answer":
@@ -18159,6 +18163,11 @@ def init_webapp():
             body TEXT NOT NULL DEFAULT '', img TEXT, links TEXT NOT NULL DEFAULT '[]', pinned INTEGER NOT NULL DEFAULT 0,
             active INTEGER NOT NULL DEFAULT 1, author_id INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""")
         c.execute("CREATE TABLE IF NOT EXISTS news_seen (user_id INTEGER PRIMARY KEY, last_id INTEGER NOT NULL DEFAULT 0)")
+        # 👑 VIP foydalanuvchilar (ownerlar beradi) va VIP o'yin rekordlari
+        c.execute("""CREATE TABLE IF NOT EXISTS vip_users (user_id INTEGER PRIMARY KEY, until INTEGER NOT NULL,
+            granted_by INTEGER, created_at INTEGER NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS vip_scores (game TEXT NOT NULL, user_id INTEGER NOT NULL, best INTEGER NOT NULL,
+            level INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL, PRIMARY KEY(game, user_id))""")
         # 🪙 EMP Coin test rejimdan chiqdi: bir marta hamma uchun yoqiladi (keyin owner panelda o'chirsa, o'sha qoladi)
         if c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('emp_launch', 1)").rowcount:
             c.execute("INSERT INTO webapp_config(key, value) VALUES ('emp', 1) "
@@ -19427,6 +19436,95 @@ REQ_WEB_TEXT = ("📝 <b>Arizalar endi web app'da</b>\n"
                 "Juftingiz roziligi va bot egalari tasdig‘i avvalgidek shu yerda (botda) keladi.")
 
 
+# ── 👑 VIP: ownerlar beradi (kunlar bilan); ownerlar doim VIP. VIP o'yinlar: STRIKE 2D (Nokia uslubi) ──
+VIP_MAX_DAYS = 3650
+VIP_GAMES = ("strike",)
+VIP_SCORE_MAX = 500000
+VIP_SCORE_GAP = 8
+_VIP_SCORE_AT = {}
+
+
+def vip_until(uid):
+    row = db().execute("SELECT until FROM vip_users WHERE user_id=?", (uid,)).fetchone()
+    return row[0] if row else 0
+
+
+def is_vip(uid):
+    return uid in CAREER_OWNER_IDS or vip_until(uid) > time.time()
+
+
+def vip_top(game, limit=10):
+    return [{"name": _plain_person(u), "best": b, "level": lv} for u, b, lv in db().execute(
+        "SELECT user_id, best, level FROM vip_scores WHERE game=? ORDER BY best DESC, updated_at LIMIT ?", (game, limit))]
+
+
+def vip_payload(uid):
+    until = vip_until(uid)
+    row = db().execute("SELECT best FROM vip_scores WHERE game='strike' AND user_id=?", (uid,)).fetchone()
+    return {"vip": is_vip(uid), "owner": uid in CAREER_OWNER_IDS,
+            "until": tashkent_dt(until) if until > time.time() else None,
+            "best": row[0] if row else 0, "top": vip_top("strike", 5)}
+
+
+def vip_list():
+    now = time.time()
+    return [{"id": u, "name": _plain_person(u), "until": tashkent_dt(t)} for u, t in db().execute(
+        "SELECT user_id, until FROM vip_users WHERE until>? ORDER BY until DESC", (now,))]
+
+
+async def web_vip_grant(uid, body):
+    """Ownerlar: ID/@username ga N kunlik VIP berish (0 — olib qo'yish)."""
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner_only"}
+    target = chat_resolve(body.get("q"))
+    if not target:
+        return {"error": "not_found"}
+    try:
+        days = int(body.get("days"))
+    except (TypeError, ValueError):
+        return {"error": "days"}
+    if not 0 <= days <= VIP_MAX_DAYS:
+        return {"error": "days"}
+    now = int(time.time())
+    with db() as c:
+        if days == 0:
+            c.execute("DELETE FROM vip_users WHERE user_id=?", (target,))
+        else:
+            until = max(now, vip_until(target)) + days * 86400
+            c.execute("INSERT INTO vip_users(user_id, until, granted_by, created_at) VALUES (?,?,?,?) "
+                      "ON CONFLICT(user_id) DO UPDATE SET until=excluded.until, granted_by=excluded.granted_by",
+                      (target, until, uid, now))
+    if days and _EXCHANGE_LOOP_BOT is not None:
+        try:
+            await _EXCHANGE_LOOP_BOT.send_message(
+                target, f"👑 <b>Sizga {days} kunlik VIP berildi!</b>\nWeb app → 🎮 Games → 👑 VIP bo‘limida maxsus o‘yinlar ochildi.")
+        except TelegramError:
+            pass
+    return {"result": "granted" if days else "removed", "name": _plain_person(target), "vip_list": vip_list()}
+
+
+async def web_vip_score(uid, body):
+    """VIP o'yin natijasi (rekord). Klient hisoblaydi — chegaralar bilan."""
+    game = body.get("game")
+    if game not in VIP_GAMES or not is_vip(uid):
+        return {"error": "vip"}
+    try:
+        score, level = int(body.get("score")), int(body.get("level"))
+    except (TypeError, ValueError):
+        return {"error": "score"}
+    if not (0 <= score <= VIP_SCORE_MAX and 1 <= level <= 99) or score > level * 4000:
+        return {"error": "score"}
+    if time.time() - _VIP_SCORE_AT.get(uid, 0) < VIP_SCORE_GAP:
+        return {"error": "rate"}
+    _VIP_SCORE_AT[uid] = time.time()
+    with db() as c:
+        c.execute("INSERT INTO vip_scores(game, user_id, best, level, updated_at) VALUES (?,?,?,?,?) "
+                  "ON CONFLICT(game, user_id) DO UPDATE SET best=MAX(best, excluded.best), "
+                  "level=CASE WHEN excluded.best>best THEN excluded.level ELSE level END, updated_at=excluded.updated_at",
+                  (game, uid, score, level, int(time.time())))
+    return {"result": "saved", "vip": vip_payload(uid)}
+
+
 # ── 📰 NEWS (online gazeta): ownerlar web app'dan yangilik / e'lon qo'yadi ──
 NEWS_MEDIA_DIR = os.path.join(VOLUME_PATH or BASE_DIR, "news_media")
 NEWS_IMG_SIDE = 1600
@@ -19699,6 +19797,8 @@ async def webapp_payload(user_id):
         "transfers": transfers_payload(user_id),
         "requests": requests_payload(user_id),
         "news": news_list(include_hidden=is_owner),
+        "vip": vip_payload(user_id),
+        "vip_list": vip_list() if is_owner else None,
         "news_unread": news_unread(user_id),
         "owner_flags": owner_flags_payload() if is_owner else None,
         "is_owner": is_owner,
@@ -20784,6 +20884,44 @@ WEBAPP_HTML = r"""<!doctype html>
   .gplay{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;color:#2b1b02;
     background:var(--g-metal);box-shadow:0 4px 12px rgba(0,0,0,.5)}
   .gnote{text-align:center;color:var(--dim);font-size:12px;margin-top:14px}
+  /* ───── 👑 VIP: STRIKE 2D (Nokia uslubi) ───── */
+  .csv{position:fixed;inset:0;z-index:80;display:none;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 30%,#1b2433,#05070b);
+    padding:calc(10px + env(safe-area-inset-top)) 12px calc(10px + env(safe-area-inset-bottom));overflow:auto;touch-action:none;user-select:none;-webkit-user-select:none}
+  .csv.show{display:flex}
+  .cs-ph{width:min(360px,100%);border-radius:46px 46px 70px 70px;padding:16px 18px 26px;
+    background:linear-gradient(160deg,#3b4658,#1d2430 55%,#11161e);box-shadow:inset 0 2px 0 rgba(255,255,255,.18),inset 0 -6px 18px rgba(0,0,0,.6),0 20px 50px rgba(0,0,0,.7)}
+  .cs-top{display:flex;justify-content:space-between;align-items:center;padding:2px 14px 10px}
+  .cs-brand{font:900 15px/1 Arial,Helvetica,sans-serif;letter-spacing:4px;color:#c9d3e2;text-shadow:0 1px 0 #000}
+  .cs-snd{cursor:pointer;font-size:15px;opacity:.8}
+  .cs-scr{border-radius:14px;padding:10px;background:#0c1117;box-shadow:inset 0 0 0 2px #2a3442,inset 0 4px 10px rgba(0,0,0,.8)}
+  .cs-scr canvas{display:block;width:100%;aspect-ratio:168/120;image-rendering:pixelated;image-rendering:crisp-edges;border-radius:4px;
+    box-shadow:0 0 18px rgba(195,211,154,.25)}
+  .cs-meta{text-align:center;font:700 10px/1 monospace;letter-spacing:2px;color:#7f8ea3;margin:10px 0 12px}
+  .cs-keys{display:grid;grid-template-columns:repeat(3,1fr);gap:9px 12px;padding:0 6px}
+  .cs-k{height:46px;border:0;border-radius:22px 22px 26px 26px;cursor:pointer;color:#e8edf5;touch-action:none;
+    background:linear-gradient(180deg,#5c6b80,#2f3a4a);box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 3px 0 #10151c,0 5px 10px rgba(0,0,0,.5);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;font-family:Arial,Helvetica,sans-serif}
+  .cs-k b{font-size:17px;line-height:1}.cs-k i{font-style:normal;font-size:9px;letter-spacing:1px;opacity:.75}
+  .cs-k[data-k="5"]{background:linear-gradient(180deg,#d9a53a,#9a6b14);color:#1b1103}
+  .cs-k.on{transform:translateY(2px);box-shadow:inset 0 1px 0 rgba(255,255,255,.2),0 1px 0 #10151c}
+  /* 🎮 Games lobbisi */
+  .gcat{display:grid;gap:12px}
+  .gcc{position:relative;display:flex;align-items:center;gap:14px;padding:18px;border-radius:20px;cursor:pointer;overflow:hidden;
+    background:linear-gradient(135deg,rgba(255,210,74,.14),rgba(0,0,0,.35));box-shadow:inset 0 0 0 1.5px rgba(255,214,110,.5),0 10px 24px rgba(0,0,0,.45)}
+  .gcc:active{transform:scale(.98)}
+  .gcc .gci{width:62px;height:62px;flex:none;border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:34px;
+    background:radial-gradient(circle at 35% 30%,#3a2a10,#120c05);box-shadow:inset 0 0 0 1.5px rgba(255,214,110,.55)}
+  .gcc b{display:block;font-family:Cinzel,serif;font-size:19px;letter-spacing:1px;color:#ffe08a}
+  .gcc .hsub{margin-top:3px}
+  .gcc .glk{position:absolute;top:12px;right:14px;font-size:11px;font-weight:800;padding:4px 9px;border-radius:999px;background:rgba(0,0,0,.5);color:#ffd56a}
+  .gcc.vip{background:linear-gradient(135deg,rgba(150,90,255,.22),rgba(0,0,0,.35));box-shadow:inset 0 0 0 1.5px rgba(200,160,255,.55),0 10px 24px rgba(0,0,0,.45)}
+  .vipg{display:flex;gap:14px;align-items:center;padding:14px;border-radius:18px;cursor:pointer;background:#0f140b;
+    box-shadow:inset 0 0 0 2px #3c4a2c,0 10px 24px rgba(0,0,0,.45)}
+  .vipg canvas{width:132px;aspect-ratio:168/120;image-rendering:pixelated;border-radius:6px;flex:none}
+  .vipg b{display:block;font:900 18px/1.1 monospace;letter-spacing:2px;color:#c3d39a}
+  .vipg .hsub{margin-top:6px;color:#9fb07a}
+  .viplock{text-align:center;padding:26px 16px}
+  .viplock .big{font-size:44px}
   /* ───── 📝 Arizalar ───── */
   .reqc{margin-top:12px}
   .rqg{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
@@ -21521,9 +21659,14 @@ function render(res){
   mo.querySelectorAll('.gcard').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
   app.appendChild(mo);
 
+  // 🎮 GAMES — kategoriyalar (Kazino / VIP)
+  app.appendChild(gamesPage(d));
+  app.appendChild(vipPage(d));
+
   // KAZINO — o'yinlar lobbisi
   const cz=$('<div class="sec" id="s-casino"></div>');
   cz.innerHTML=
+    '<div class="gback" data-back="games">‹ Games</div>'+
     '<h2>🎰 Kazino</h2>'+
     '<div class="glob">'+
       '<div class="gcard g-crash" data-go="crash"><div class="gimg" style="background-image:url(/app/a/crash.jpg)"></div>'+
@@ -21603,7 +21746,7 @@ function render(res){
   if(d.is_owner && d.owner){
     const o=$('<div class="sec" id="s-owner"></div>');
     o.appendChild($('<h2>👑 Owner panel</h2>'));
-    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
+    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['vip','👑','VIP'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
     const oseg=$('<div class="oseg">'+OG.map(([k,i,l])=>'<span data-g="'+k+'"><i>'+i+'</i>'+l+'</span>').join('')+'</div>');
     o.appendChild(oseg);
     const G={}; OG.forEach(([k])=>{ G[k]=$('<div class="ogrp" data-g="'+k+'"></div>'); o.appendChild(G[k]); });
@@ -21643,6 +21786,7 @@ function render(res){
     drawEdu(d.edu_all||[]);
     G.edu.appendChild(ed);
     G.news.appendChild(newsAdmin(d));
+    G.vip.appendChild(vipAdmin(d));
     G.set.appendChild(ownerFlags(d));
     if(d.emp&&d.emp.admin){ // 🪙 EMP paketlari — narxlarni ownerlar boshqaradi
       const ea=$('<div class="card full oemp"></div>');
@@ -21686,7 +21830,7 @@ function render(res){
 
   // TABS
   const tabs=$('<div class="tabs"></div>');
-  const defs=[['profil','👤','Profil'],['news','📰','News'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['moliya','💼','Moliya'],['farzand','👶','Oila'],['chat','💬','Chat'],['casino',CASINO_ICON,'Kazino']];
+  const defs=[['profil','👤','Profil'],['news','📰','News'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['moliya','💼','Moliya'],['farzand','👶','Oila'],['chat','💬','Chat'],['games','🎮','Games']];
   if(d.is_owner&&d.owner) defs.push(['owner','👑','Owner']);
   defs.forEach(([k,t,l])=>{
     const el=$('<div class="tab" data-k="'+k+'"><span class="ti">'+t+'</span><span class="tl">'+l+'</span></div>');
@@ -21699,8 +21843,8 @@ function render(res){
     if(n&&t&&!t.querySelector('.tbadge')){ const b=document.createElement('span'); b.className='tbadge'; b.textContent=n; t.appendChild(b); } })();
   if(/(^|#)req\b/.test(location.hash||'') && !window.RQOPENED){ window.RQOPENED=1; TAB='profil';
     setTimeout(()=>{ const e=document.getElementById('reqc'); if(e) e.scrollIntoView({behavior:'smooth',block:'center'}); },400); }
-  app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':'casino'));
-  setTab(defs.some(x=>x[0]===TAB)||TAB==='bank'||TAB==='birja'||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
+  app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':b.dataset.back==='games'?'games':'casino'));
+  setTab(defs.some(x=>x[0]===TAB)||TAB==='bank'||TAB==='birja'||TAB==='casino'||TAB==='vip'||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
   ['s-crash','s-frog','s-kami'].forEach(id=>{ const sc=document.getElementById(id); if(!sc) return;
     sc.insertAdjacentHTML('afterbegin','<div class="sndbar"><span data-snd="m">🎵</span><span data-snd="s">🔊</span></div>');
     sc.querySelectorAll('.sndbar span').forEach(b=>b.onclick=()=>SND.toggle(b.dataset.snd)); });
@@ -22752,6 +22896,215 @@ const CHERR={not_found:'🔎 Bunday foydalanuvchi topilmadi (botni ishlatgan bo�
   long:'📏 Xabar juda uzun (1000 belgigacha)',disabled:'🌐 Web app o‘chirilgan',user:'⚠️ Foydalanuvchi xato',
   image:'🖼 Rasmni o‘qib bo‘lmadi', img_daily:'📷 Bugungi rasm limiti tugadi (40 ta)', sticker:'🎭 Bunday stiker yo‘q', too_large:'📦 Rasm juda katta'};
 // rasmni telefonda kichraytirish (≤1280 px, JPEG) — trafik va server yuki kam
+// ---- 👑 VIP: STRIKE 2D — eski Nokia telefonlaridagi kontr-terror o'yini uslubida (monoxrom LCD, tugmachalar) ----
+const STRIKE=(function(){
+  const W=168,H=120,T=8,MW=40,MH=28, INK='#26351c', LCD='#c3d39a', MID='#7f9461';
+  // 3x5 piksel shrift
+  const F={A:'010101111101101',B:'110101110101110',C:'011100100100011',D:'110101101101110',E:'111100110100111',F:'111100110100100',
+    G:'011100101101011',H:'101101111101101',I:'111010010010111',J:'001001001101010',K:'101101110101101',L:'100100100100111',
+    M:'101111111101101',N:'110101101101101',O:'010101101101010',P:'110101110100100',Q:'010101101110011',R:'110101110101101',
+    S:'011100010001110',T:'111010010010010',U:'101101101101111',V:'101101101101010',W:'101101111111101',X:'101101010101101',
+    Y:'101101010010010',Z:'111001010100111','0':'111101101101111','1':'010110010010111','2':'110001010100111','3':'110001010001110',
+    '4':'101101111001001','5':'111100110001110','6':'011100111101111','7':'111001010010010','8':'111101111101111','9':'111101111001110',
+    ':':'000010000010000','-':'000000111000000','!':'010010010000010','.':'000000000000010','/':'001001010100100',' ':'000000000000000'};
+  function txt(g,s,x,y,col,sc){ sc=sc||1; g.fillStyle=col||INK; s=String(s).toUpperCase();
+    for(let i=0;i<s.length;i++){ const m=F[s[i]]||F[' ']; for(let p=0;p<15;p++) if(m[p]==='1') g.fillRect(x+i*4*sc+(p%3)*sc,y+((p/3)|0)*sc,sc,sc); } }
+  function tw(s,sc){ return String(s).length*4*(sc||1)-(sc||1); }
+  // urug'li tasodif — har bosqich xaritasi takrorlanadi
+  function rng(seed){ let a=seed>>>0||1; return ()=>{ a^=a<<13; a^=a>>>17; a^=a<<5; return ((a>>>0)%100000)/100000; }; }
+  function genMap(level){
+    const R=rng(level*7919+13), m=[];
+    for(let y=0;y<MH;y++){ m.push([]); for(let x=0;x<MW;x++) m[y].push(x===0||y===0||x===MW-1||y===MH-1?1:0); }
+    const segs=8+Math.min(10,level*2);
+    for(let i=0;i<segs;i++){ const hor=R()<.5, len=4+((R()*9)|0), x=2+((R()*(MW-6))|0), y=2+((R()*(MH-6))|0), gap=1+((R()*(len-2))|0);
+      for(let k=0;k<len;k++){ if(k===gap||k===gap+1) continue; const xx=hor?x+k:x, yy=hor?y:y+k; if(xx>0&&yy>0&&xx<MW-1&&yy<MH-1) m[yy][xx]=1; } }
+    for(let i=0;i<10+level;i++){ const x=2+((R()*(MW-5))|0), y=2+((R()*(MH-5))|0); m[y][x]=m[y][x+1]=m[y+1][x]=m[y+1][x+1]=2; }
+    for(let y=1;y<5;y++) for(let x=1;x<5;x++) m[y][x]=0;               // o'yinchi chiqadigan joy bo'sh
+    // ulanish: faqat o'yinchidan yetib boriladigan kataklar
+    const seen=new Set(['2,2']), q=[[2,2]];
+    while(q.length){ const [x,y]=q.shift(); for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){ const nx=x+dx, ny=y+dy, k=nx+','+ny;
+      if(!seen.has(k)&&!m[ny][nx]){ seen.add(k); q.push([nx,ny]); } } }
+    const free=[...seen].map(s=>s.split(',').map(Number)).filter(([x,y])=>x+y>16);
+    const n=Math.min(14,3+level*2), en=[];
+    for(let i=0;i<n&&free.length;i++){ const j=(R()*free.length)|0, [x,y]=free.splice(j,1)[0]; en.push({x:x*T+4,y:y*T+4}); }
+    return {m, en, free:[...seen].map(s=>s.split(',').map(Number))};
+  }
+  const solid=(S,px,py)=>{ const x=Math.floor(px/T), y=Math.floor(py/T); return x<0||y<0||x>=MW||y>=MH||S.map[y][x]>0; };
+  const hits=(S,x,y,r)=>solid(S,x-r,y-r)||solid(S,x+r,y-r)||solid(S,x-r,y+r)||solid(S,x+r,y+r);
+  function moveEnt(S,e,dx,dy){ if(!hits(S,e.x+dx,e.y,3)) e.x+=dx; if(!hits(S,e.x,e.y+dy,3)) e.y+=dy; }
+  function los(S,x1,y1,x2,y2){ const d=Math.hypot(x2-x1,y2-y1), n=Math.ceil(d/2);
+    for(let i=1;i<n;i++){ const t=i/n; if(solid(S,x1+(x2-x1)*t,y1+(y2-y1)*t)) return false; } return true; }
+  function ray(S,x,y,a,max){ const dx=Math.cos(a), dy=Math.sin(a); let d=0;
+    while(d<max){ d+=1.5; if(solid(S,x+dx*d,y+dy*d)) break; } return d; }
+  // ── ovoz: Nokia "beep" (kvadrat to'lqin) ──
+  let AC=null, muted=false;
+  function beep(f,dur,vol,type){ if(muted) return; try{ AC=AC||new (window.AudioContext||window.webkitAudioContext)();
+    const o=AC.createOscillator(), g=AC.createGain(), t=AC.currentTime; o.type=type||'square'; o.frequency.setValueAtTime(f,t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(40,f*.45),t+dur); g.gain.setValueAtTime(vol||.05,t); g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    o.connect(g); g.connect(AC.destination); o.start(t); o.stop(t+dur+.02); }catch(e){} }
+  const SFX={shot:()=>beep(880,.06,.05),enemy:()=>beep(520,.07,.035),hit:()=>beep(160,.12,.07,'sawtooth'),kill:()=>{beep(660,.05,.05);setTimeout(()=>beep(990,.08,.05),60);},
+    reload:()=>{beep(300,.04,.04);setTimeout(()=>beep(420,.05,.04),180);},round:()=>[523,659,784,1046].forEach((f,i)=>setTimeout(()=>beep(f,.09,.05),i*110)),
+    over:()=>[440,349,262,196].forEach((f,i)=>setTimeout(()=>beep(f,.16,.06),i*170)),empty:()=>beep(120,.04,.04)};
+
+  function newLevel(S){ const g=genMap(S.level); S.map=g.m; S.free=g.free;
+    S.en=g.en.map(p=>({x:p.x,y:p.y,hp:2,a:Math.random()*6.28,st:'patrol',tx:p.x,ty:p.y,react:0,cd:0,dead:false,flash:0}));
+    S.p.x=2.5*T; S.p.y=2.5*T; S.p.hp=Math.min(100,S.p.hp+(S.level>1?35:0)); S.p.ammo=30; S.p.reload=0; S.tr=[]; S.banner=110; if(!S.silent) SFX.round(); }
+  function reset(S){ S.level=1; S.score=0; S.kills=0; S.p={x:0,y:0,a:0,hp:100,ammo:30,mag:30,reload:0,cd:0,hurt:0}; S.over=false; S.paused=false; newLevel(S); }
+
+  function step(S,K){
+    if(S.over||S.paused) return;
+    const p=S.p; if(S.banner>0) S.banner--;
+    let dx=(K.r?1:0)-(K.l?1:0), dy=(K.d?1:0)-(K.u?1:0);
+    if(dx||dy){ const l=Math.hypot(dx,dy); dx/=l; dy/=l; p.a=Math.atan2(dy,dx); moveEnt(S,p,dx*.9,dy*.9); }
+    if(p.cd>0) p.cd--; if(p.hurt>0) p.hurt--;
+    if(p.reload>0){ p.reload--; if(!p.reload){ p.ammo=p.mag; } }
+    if(K.rl&&p.reload===0&&p.ammo<p.mag){ p.reload=70; SFX.reload(); K.rl=false; }
+    if(K.f&&p.cd===0&&p.reload===0&&S.banner<60){
+      if(p.ammo<=0){ p.reload=70; SFX.reload(); }
+      else { p.ammo--; p.cd=8; SFX.shot();
+        // yengil nishonga olish: 30° ichidagi ko'rinadigan eng yaqin dushman
+        let aim=p.a, best=1e9;
+        for(const e of S.en){ if(e.dead) continue; const da=Math.atan2(e.y-p.y,e.x-p.x), dd=Math.hypot(e.x-p.x,e.y-p.y);
+          let df=Math.abs(((da-p.a+Math.PI*3)%(Math.PI*2))-Math.PI); if(df<.52&&dd<110&&dd<best&&los(S,p.x,p.y,e.x,e.y)){ best=dd; aim=da; } }
+        aim+=(Math.random()-.5)*.06; const wall=ray(S,p.x,p.y,aim,140); let hitE=null, hd=wall;
+        for(const e of S.en){ if(e.dead) continue; const vx=e.x-p.x, vy=e.y-p.y, t=vx*Math.cos(aim)+vy*Math.sin(aim);
+          if(t<=0||t>hd) continue; const perp=Math.abs(-vx*Math.sin(aim)+vy*Math.cos(aim)); if(perp<3.2){ hd=t; hitE=e; } }
+        S.tr.push({x:p.x,y:p.y,a:aim,d:hd,l:4});
+        if(hitE){ hitE.hp--; hitE.flash=6; hitE.st='attack'; hitE.react=Math.min(hitE.react,8);
+          if(hitE.hp<=0){ hitE.dead=true; S.kills++; S.score+=100; SFX.kill(); } }
+        if(p.ammo===0){ p.reload=70; SFX.reload(); } } }
+    for(const e of S.en){ if(e.dead) continue; if(e.flash>0) e.flash--;
+      const d=Math.hypot(p.x-e.x,p.y-e.y), see=d<78&&los(S,e.x,e.y,p.x,p.y);
+      if(see){ if(e.st!=='attack'){ e.st='attack'; e.react=22+((Math.random()*24)|0); }
+        e.a=Math.atan2(p.y-e.y,p.x-e.x);
+        if(e.react>0) e.react--; else if(e.cd>0) e.cd--; else { e.cd=34+((Math.random()*22)|0); SFX.enemy();
+          const acc=Math.max(.18,.62-d/200), hit=Math.random()<acc; S.tr.push({x:e.x,y:e.y,a:e.a+(hit?0:(Math.random()-.5)*.5),d:hit?d:ray(S,e.x,e.y,e.a,90),l:3,en:1});
+          if(hit){ p.hp-=8+((Math.random()*7)|0); p.hurt=10; SFX.hit(); if(p.hp<=0){ p.hp=0; S.over=true; SFX.over(); S.onOver&&S.onOver(S); } } }
+        if(d>40) moveEnt(S,e,Math.cos(e.a)*.35,Math.sin(e.a)*.35);
+      } else {
+        if(e.st==='attack'){ e.st='hunt'; e.tx=p.x; e.ty=p.y; }
+        const tdx=e.tx-e.x, tdy=e.ty-e.y, td=Math.hypot(tdx,tdy);
+        if(td<2||Math.random()<.004){ const c=S.free[(Math.random()*S.free.length)|0]; if(Math.hypot(c[0]*T-e.x,c[1]*T-e.y)<90){ e.tx=c[0]*T+4; e.ty=c[1]*T+4; } e.st='patrol'; }
+        else { e.a=Math.atan2(tdy,tdx); const ox=e.x, oy=e.y; moveEnt(S,e,Math.cos(e.a)*.42,Math.sin(e.a)*.42); if(ox===e.x&&oy===e.y){ e.tx=e.x; e.ty=e.y; } } } }
+    S.tr=S.tr.filter(t=>--t.l>0);
+    if(S.en.every(e=>e.dead)&&!S.over){ S.score+=250*S.level; S.level++; newLevel(S); }
+  }
+  function pix(g,x,y){ g.fillRect(Math.round(x),Math.round(y),1,1); }
+  function line(g,x1,y1,x2,y2){ const n=Math.max(1,Math.ceil(Math.hypot(x2-x1,y2-y1))); for(let i=0;i<=n;i++) pix(g,x1+(x2-x1)*i/n,y1+(y2-y1)*i/n); }
+  function soldier(g,x,y,a,hollow){ x=Math.round(x); y=Math.round(y);
+    g.fillRect(x-3,y-2,7,5); g.fillRect(x-2,y-3,5,7);
+    if(hollow){ g.fillStyle=LCD; g.fillRect(x-2,y-1,5,3); g.fillRect(x-1,y-2,3,5); g.fillStyle=INK; g.fillRect(x-1,y-1,3,3); }
+    else { g.fillStyle=LCD; pix(g,x,y); g.fillStyle=INK; }
+    line(g,x+Math.cos(a)*3,y+Math.sin(a)*3,x+Math.cos(a)*7,y+Math.sin(a)*7); }
+  function draw(S,g){
+    const p=S.p, cx=Math.max(0,Math.min(MW*T-W,Math.round(p.x-W/2))), cy=Math.max(0,Math.min(MH*T-(H-10),Math.round(p.y-(H-10)/2)));
+    g.fillStyle=p.hurt>6?MID:LCD; g.fillRect(0,0,W,H);
+    g.save(); g.translate(-cx,-cy+10); g.fillStyle=INK;
+    const x0=(cx/T)|0, y0=(cy/T)|0;
+    for(let y=y0;y<=y0+16&&y<MH;y++) for(let x=x0;x<=x0+22&&x<MW;x++){ const v=S.map[y][x]; if(!v) continue;
+      if(v===1) g.fillRect(x*T,y*T,T,T);
+      else { g.fillRect(x*T,y*T,T,1); g.fillRect(x*T,y*T+T-1,T,1); g.fillRect(x*T,y*T,1,T); g.fillRect(x*T+T-1,y*T,1,T); line(g,x*T,y*T,x*T+T-1,y*T+T-1); } }
+    for(const e of S.en){ if(e.dead){ g.fillStyle=MID; const ex=Math.round(e.x), ey=Math.round(e.y); line(g,ex-2,ey-2,ex+2,ey+2); line(g,ex-2,ey+2,ex+2,ey-2); g.fillStyle=INK; }
+      else if(!(e.flash&1)) soldier(g,e.x,e.y,e.a,true); }
+    g.fillStyle=INK; for(const t of S.tr) line(g,t.x+Math.cos(t.a)*5,t.y+Math.sin(t.a)*5,t.x+Math.cos(t.a)*t.d,t.y+Math.sin(t.a)*t.d);
+    if(!(p.hurt&2)) soldier(g,p.x,p.y,p.a,false);
+    if(p.cd>5){ const fx=p.x+Math.cos(p.a)*9, fy=p.y+Math.sin(p.a)*9; pix(g,fx,fy); pix(g,fx+1,fy); pix(g,fx-1,fy); pix(g,fx,fy+1); pix(g,fx,fy-1); }
+    g.restore();
+    // HUD
+    g.fillStyle=INK; g.fillRect(0,0,W,9); g.fillStyle=LCD; g.fillRect(1,1,W-2,7);
+    txt(g,'HP '+p.hp,3,2); txt(g,p.reload?'RELOAD':('AMMO '+p.ammo),48,2); const left=S.en.filter(e=>!e.dead).length;
+    txt(g,'T '+left,104,2); txt(g,String(S.score),W-3-tw(S.score),2);
+    g.fillStyle=INK; for(let i=0;i<Math.ceil(p.hp/10);i++) g.fillRect(3+i*3,H-3,2,2);
+    if(S.banner>0){ const s='ROUND '+S.level, w=tw(s,2); g.fillStyle=LCD; g.fillRect((W-w)/2-4,44,w+8,20); g.fillStyle=INK; g.fillRect((W-w)/2-4,44,w+8,1); g.fillRect((W-w)/2-4,63,w+8,1);
+      txt(g,s,(W-w)/2,48,INK,2); txt(g,S.level===1?'KILL ALL T':'HP +35',(W-tw(S.level===1?'KILL ALL T':'HP +35'))/2,58); }
+    if(S.paused&&!S.over){ g.fillStyle=LCD; g.fillRect(44,46,80,22); g.fillStyle=INK; txt(g,'PAUSE',(W-tw('PAUSE',2))/2,50,INK,2); txt(g,'* DAVOM',(W-tw('* DAVOM'))/2,62); }
+    if(S.over){ g.fillStyle=LCD; g.fillRect(20,30,128,62); g.fillStyle=INK; g.fillRect(20,30,128,1); g.fillRect(20,91,128,1); g.fillRect(20,30,1,62); g.fillRect(147,30,1,62);
+      txt(g,'GAME OVER',(W-tw('GAME OVER',2))/2,36,INK,2); txt(g,'SCORE '+S.score,(W-tw('SCORE '+S.score))/2,52);
+      txt(g,'ROUND '+S.level+'  KILLS '+S.kills,(W-tw('ROUND '+S.level+'  KILLS '+S.kills))/2,60);
+      txt(g,'BEST '+Math.max(S.best||0,S.score),(W-tw('BEST '+Math.max(S.best||0,S.score)))/2,68); txt(g,'5 - YANA',(W-tw('5 - YANA'))/2,82); }
+  }
+  let RUN=null;
+  function open(opts){
+    opts=opts||{}; let ov=document.getElementById('csv'); if(!ov){ ov=document.createElement('div'); ov.id='csv'; document.body.appendChild(ov); }
+    const keys=[['1','↖'],['2','▲'],['3','↗'],['4','◀'],['5','FIRE'],['6','▶'],['7','↙'],['8','▼'],['9','↘'],['*','PAUSE'],['0','RELOAD'],['#','EXIT']];
+    ov.className='csv show';
+    ov.innerHTML='<div class="cs-ph"><div class="cs-top"><span class="cs-brand">EMPIRE</span><span class="cs-snd" id="csSnd">🔊</span></div>'+
+      '<div class="cs-scr"><canvas id="csC" width="168" height="120"></canvas></div><div class="cs-meta" id="csMeta">STRIKE 2D · VIP</div>'+
+      '<div class="cs-keys">'+keys.map(([k,l])=>'<button class="cs-k" data-k="'+k+'"><b>'+k+'</b><i>'+l+'</i></button>').join('')+'</div></div>';
+    const cv=ov.querySelector('#csC'), g=cv.getContext('2d'), K={};
+    const S={best:opts.best||0,onOver:s=>{ if(s.score>S.best) S.best=s.score; opts.onOver&&opts.onOver(s); }}; reset(S);
+    const MAP={'1':['u','l'],'2':['u'],'3':['u','r'],'4':['l'],'6':['r'],'7':['d','l'],'8':['d'],'9':['d','r'],'5':['f']};
+    const press=(k,on)=>{ if(k==='5'&&on&&S.over){ reset(S); return; } (MAP[k]||[]).forEach(x=>K[x]=on);
+      if(on&&k==='0') K.rl=true; if(on&&k==='*'&&!S.over) S.paused=!S.paused; if(on&&k==='#') close(); };
+    ov.querySelectorAll('.cs-k').forEach(b=>{ const k=b.dataset.k;
+      b.addEventListener('pointerdown',e=>{ e.preventDefault(); try{ b.setPointerCapture(e.pointerId); }catch(_){} b.classList.add('on'); press(k,true); });
+      const up=e=>{ b.classList.remove('on'); press(k,false); }; b.addEventListener('pointerup',up); b.addEventListener('pointercancel',up); b.addEventListener('lostpointercapture',up);
+      b.addEventListener('contextmenu',e=>e.preventDefault()); });
+    const KB={ArrowUp:'2',KeyW:'2',ArrowDown:'8',KeyS:'8',ArrowLeft:'4',KeyA:'4',ArrowRight:'6',KeyD:'6',Space:'5',KeyR:'0',KeyP:'*',Escape:'#'};
+    const kd=e=>{ const k=KB[e.code]; if(k){ e.preventDefault(); press(k,true); } }, ku=e=>{ const k=KB[e.code]; if(k) press(k,false); };
+    addEventListener('keydown',kd); addEventListener('keyup',ku);
+    const sb=ov.querySelector('#csSnd'); sb.onclick=()=>{ muted=!muted; sb.textContent=muted?'🔇':'🔊'; };
+    let last=performance.now(), acc=0, alive=true;
+    function frame(now){ if(!alive) return; acc+=Math.min(100,now-last); last=now;
+      if(!document.hidden) while(acc>=1000/60){ step(S,K); acc-=1000/60; } else acc=0;
+      draw(S,g); requestAnimationFrame(frame); }
+    requestAnimationFrame(frame);
+    function close(){ alive=false; removeEventListener('keydown',kd); removeEventListener('keyup',ku); ov.className='csv'; ov.innerHTML=''; RUN=null; opts.onClose&&opts.onClose(); }
+    RUN={S,close}; return RUN;
+  }
+  function preview(cv){ const S={silent:true}; reset(S); S.banner=0; S.p.a=.5; S.en.slice(0,2).forEach((e,i)=>{ e.x=S.p.x+30+i*22; e.y=S.p.y+14+i*8; });
+    for(const e of S.en.slice(0,2)) for(let y=-1;y<=1;y++) for(let x=-1;x<=1;x++){ const tx=Math.floor(e.x/T)+x, ty=Math.floor(e.y/T)+y; if(S.map[ty]) S.map[ty][tx]=0; }
+    S.tr=[{x:S.p.x,y:S.p.y,a:Math.atan2(S.en[0].y-S.p.y,S.en[0].x-S.p.x),d:Math.hypot(S.en[0].y-S.p.y,S.en[0].x-S.p.x),l:2}]; S.p.a=S.tr[0].a; S.p.cd=7;
+    draw(S,cv.getContext('2d')); }
+  return {open, preview, _gen:genMap, _step:step, _reset:reset};
+})();
+// ---- 🎮 Games: Kazino + 👑 VIP ----
+function gamesPage(d){
+  const sec=$('<div class="sec" id="s-games"></div>'), v=d.vip||{};
+  sec.innerHTML='<h2>🎮 Games</h2><div class="gcat">'+
+    '<div class="gcc" data-go="casino" data-tap="1"><div class="gci">'+CASINO_ICON.replace('width="27" height="27"','width="40" height="40"')+'</div><div><b>KAZINO</b><div class="hsub">Royal Crash · Hovuz'+(d.kami?' · Kamikaze':'')+' — hamyon puli bilan</div></div></div>'+
+    '<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">Eski telefonlardagi klassik o‘yinlar · STRIKE 2D</div></div>'+
+      '<span class="glk">'+(v.vip?'✅ VIP':'🔒 VIP')+'</span></div>'+
+  '</div><div class="gnote">🎮 Kategoriya tanlang</div>';
+  sec.querySelectorAll('.gcc').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
+  return sec;
+}
+function vipPage(d){
+  const sec=$('<div class="sec" id="s-vip"></div>'), v=d.vip||{};
+  const top=(v.top||[]).map((t,i)=>'<div class="row"><span>'+(i+1)+'. '+esc(t.name)+'</span><b>'+fmtMoney(t.best)+' · R'+t.level+'</b></div>').join('');
+  sec.innerHTML='<div class="gback" data-back="games">‹ Games</div><h2>👑 VIP o‘yinlar</h2>'+
+    (v.vip?'<div class="vipg" id="vipStrike" data-tap="1"><canvas width="168" height="120" id="vipPrev"></canvas><div><b>STRIKE 2D</b>'+
+        '<div class="hsub">Nokia uslubidagi kontr-terror: barcha terroristlarni yo‘q qiling. 2/4/6/8 — yurish, 5 — o‘q, 0 — o‘qlash.</div>'+
+        '<div class="hsub">🏆 Rekordingiz: <b id="vipBest">'+fmtMoney(v.best||0)+'</b></div></div></div>'+
+        (v.until?'<div class="hsub" style="margin-top:8px">👑 VIP muddati: '+esc(v.until)+'</div>':(v.owner?'<div class="hsub" style="margin-top:8px">👑 Owner — doimiy VIP</div>':''))+
+        '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 STRIKE 2D — TOP</div>'+(top||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'
+      :'<div class="card full viplock"><div class="big">🔒</div><b>Bu bo‘lim faqat VIP foydalanuvchilar uchun</b>'+
+        '<div class="hsub" style="margin-top:6px">VIP maqomini bot egalari beradi. Ichida: STRIKE 2D — eski Nokia telefonlaridagi kontr-terror o‘yini uslubida.</div></div>');
+  const card=sec.querySelector('#vipStrike');
+  if(card){ try{ STRIKE.preview(sec.querySelector('#vipPrev')); }catch(e){}
+    card.onclick=()=>{ SND.music&&SND.music(null); STRIKE.open({best:v.best||0, onOver:s=>{
+      api('/app/api/vip/score',{game:'strike',score:s.score,level:s.level}).then(r=>{ if(r.vip){ d.vip=r.vip; const b=document.getElementById('vipBest'); if(b) b.textContent=fmtMoney(r.vip.best); } }).catch(()=>{}); }}); }; }
+  return sec;
+}
+function vipAdmin(d){
+  const box=$('<div class="card full"></div>');
+  const ERR={owner_only:'👑 Faqat ownerlar',not_found:'🔎 Foydalanuvchi topilmadi (botni ishlatgan bo‘lishi kerak)',days:'📅 Kun 0–3650 bo‘lsin'};
+  const draw=list=>{ d.vip_list=list;
+    box.innerHTML='<div class="lbl">👑 VIP berish</div>'+
+      '<div class="frow"><input class="bet" id="vgQ" placeholder="ID yoki @username" style="text-align:left" autocomplete="off"></div>'+
+      '<div class="chips vgd">'+[7,30,90,365].map(n=>'<span class="chip" data-n="'+n+'">'+n+' kun</span>').join('')+'</div>'+
+      '<div class="frow"><input class="bet" id="vgD" type="number" inputmode="numeric" value="30" placeholder="Kunlar (0 — olib qo‘yish)"></div>'+
+      '<button class="btn go full" id="vgS">👑 VIP berish</button>'+
+      '<div class="lbl" style="margin-top:16px">VIP foydalanuvchilar ('+list.length+')</div>'+
+      (list.length?list.map(x=>'<div class="npost"><span class="npi e">👑</span><div class="npm"><b>'+esc(x.name)+'</b><div class="hsub">ID '+x.id+' · '+esc(x.until)+' gacha</div></div>'+
+        '<span class="na" data-rm="'+x.id+'" title="Olib qo‘yish">🗑</span></div>').join(''):'<div class="hsub">Hali VIP yo‘q (ownerlar doim VIP)</div>');
+    box.querySelectorAll('.vgd .chip').forEach(c=>c.onclick=()=>{ app_q(box,'#vgD').value=c.dataset.n; });
+    const send=(q,days)=>api('/app/api/vip/grant',{q:q,days:days}).then(r=>{ if(r.result){ toast(r.result==='granted'?'✅ '+r.name+' — VIP berildi':'✅ VIP olib qo‘yildi'); draw(r.vip_list); }
+      else toast(ERR[r.error]||'⚠️ Xatolik'); });
+    app_q(box,'#vgS').onclick=()=>{ const q=app_q(box,'#vgQ').value.trim(); if(!q){ toast('🔎 ID yoki @username kiriting'); return; } send(q,app_q(box,'#vgD').value); };
+    box.querySelectorAll('[data-rm]').forEach(x=>x.onclick=()=>send(x.dataset.rm,0)); };
+  draw(d.vip_list||[]); return box;
+}
 // ---- 📝 Arizalar (ishdan bo'shash / ajrashish / farzand ko'rish) ----
 const RQERR={no_job:'💼 Sizda hozir kasb yo‘q',already:'⏳ Bu turdagi ariza allaqachon ko‘rib chiqilmoqda',no_pair:'💞 Sizda hozir juft yo‘q',
   custody:'👶 Farzandlar kim bilan qolishini tanlang',gender:'👶 Jinsini tanlang',name:'✍️ Ism 2–40 harfdan iborat bo‘lsin',max:'👶 Ko‘pi bilan 5 ta farzand bo‘ladi',
@@ -23428,7 +23781,7 @@ function kidErr(e,wait){
 function setTab(k){
   TAB=k;
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==='s-'+k));
-  const tk=(k==='crash'||k==='frog'||k==='kami')?'casino':(k==='bank'||k==='birja')?'moliya':k;
+  const tk=(k==='crash'||k==='frog'||k==='kami'||k==='casino'||k==='vip')?'games':(k==='bank'||k==='birja')?'moliya':k;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===tk));
   if(k==='crash' && window.CR) window.CR.poke();
   if(k==='news' && window.DD) newsSeen(window.DD);

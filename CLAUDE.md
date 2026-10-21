@@ -295,3 +295,13 @@
   `_WebCallback` soxta query bilan chaqiriladi — mantiq bir xil. O'zimniki: `/app/api/request/cancel` (`web_request_cancel`) va
   `/app/api/request/remind` (`web_request_remind`, `REQ_REMIND_GAP` 10 daq). Ajrashish xabari `send_divorce_consent` (yetkazilmasa
   `REL_SEND_FAILED` → web javobida `undelivered`).
+- 🎮 Web app Games: pastki qatorda "Kazino" o'rniga "🎮 Games" tab (`games`) → `#s-games` (`gamesPage`): kategoriyalar 🎰 Kazino
+  (`setTab('casino')`, lobbi tepasida "‹ Games") va 👑 VIP (`#s-vip`, `vipPage`). `setTab` casino/vip/crash/frog/kami uchun Games tabini
+  yoritadi. VIP: `vip_users` (until, ownerlar beradi), `is_vip` (ownerlar doim VIP), payload `vip` (`vip_payload`: vip/until/best/top),
+  ownerga `vip_list`; owner panel → 👑 VIP (`vipAdmin`, `/app/api/vip/grant` — `web_vip_grant`, 0 kun = olib qo'yish, berilganda bot xabari).
+  VIP o'yin: 🕹 STRIKE 2D (`STRIKE` modul, WEBAPP_HTML ichida) — eski Nokia telefonlaridagi kontr-terror o'yinlari uslubidagi original
+  o'yin (nom va grafika o'zimizniki): monoxrom LCD 168×120 canvas (pixelated), 3×5 piksel shrift, urug'li protsedura xarita
+  (`genMap(level)`, flood-fill bilan ulanish), dushmanlar patrul/hujum (LOS), hitscan o'q + nishonga olish yordami, bosqichlar
+  (dushmanlar 3+2·L, HP +35). Boshqaruv — telefon klaviaturasi `#csv` (2/4/6/8, 1/3/7/9 diagonal, 5 o'q, 0 o'qlash, * pauza, # chiqish)
+  va klaviatura (WASD/strelka, Space, R). Ovoz — square beep (`SFX`). Rekord `/app/api/vip/score` → `vip_scores` (`web_vip_score`:
+  faqat VIP, score ≤ level·4000, 8 s da bir).

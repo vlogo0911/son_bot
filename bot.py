@@ -3781,6 +3781,30 @@ async def divorce_notify(bot, st):
     await log_money_event(bot, text)
 
 
+REL_SEND_FAILED = set()   # juftga Telegram'da yetkazilmagan ajrashish so'rovlari (web'da ogohlantirish uchun)
+
+
+async def send_divorce_consent(bot, rid, requester_id, target_id, custody_id):
+    """Juftga ajrashish so'rovi (✅ Roziman / ❌ Rad etaman). Yetkazilsa True."""
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Roziman", callback_data=f"rel:divorce:yes:{rid}"),
+        InlineKeyboardButton("❌ Rad etaman", callback_data=f"rel:divorce:no:{rid}"),
+    ]])
+    try:
+        await bot.send_message(
+            chat_id=target_id,
+            text=f"💔 <b>Ajrashish so‘rovi</b>\n"
+                 f"{person_name(requester_id)} siz bilan ajrashishni so‘radi.\n\n"
+                 + divorce_terms_text(active_pair(requester_id), custody_id)
+                 + "\n\nShu shartlarga rozimisiz? (Web app → Profil → 📝 Arizalar orqali ham javob berish mumkin)",
+            reply_markup=kb,
+        )
+        return True
+    except TelegramError as e:
+        logger.warning("Ajrashish so‘rovi juftiga yuborilmadi (%s): %s", target_id, e)
+        return False
+
+
 async def create_rel_request(application, request_type, requester_id,
                              target_id=None, group_id=None, custody_id=None):
     c = db()
@@ -3807,21 +3831,8 @@ async def create_rel_request(application, request_type, requester_id,
         request_id = cur.lastrowid
 
     if request_type == "divorce":
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Roziman", callback_data=f"rel:divorce:yes:{request_id}"),
-            InlineKeyboardButton("❌ Rad etaman", callback_data=f"rel:divorce:no:{request_id}"),
-        ]])
-        try:
-            await application.bot.send_message(
-                chat_id=target_id,
-                text=f"💔 <b>Ajrashish so‘rovi</b>\n"
-                     f"{person_name(requester_id)} siz bilan ajrashishni so‘radi.\n\n"
-                     + divorce_terms_text(active_pair(requester_id), custody_id)
-                     + "\n\nShu shartlarga rozimisiz?",
-                reply_markup=kb,
-            )
-        except TelegramError:
-            logger.warning("Ajrashish so‘rovi juftiga yuborilmadi: %s", target_id)
+        if not await send_divorce_consent(application.bot, request_id, requester_id, target_id, custody_id):
+            REL_SEND_FAILED.add(request_id)
             return request_id
     else:
         labels = {
@@ -17052,6 +17063,12 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/request":
             coro = web_request(uid, body)
+        elif path == "/app/api/request/answer":
+            coro = web_request_answer(uid, body)
+        elif path == "/app/api/request/cancel":
+            coro = web_request_cancel(uid, body)
+        elif path == "/app/api/request/remind":
+            coro = web_request_remind(uid, body)
         elif path == "/app/api/news/seen":
             coro = web_news_seen(uid, body.get("last"))
         elif path in ("/app/api/news/add", "/app/api/news/update", "/app/api/news/delete", "/app/api/news/pin", "/app/api/news/toggle"):
@@ -19179,10 +19196,15 @@ def requests_payload(uid):
         "SELECT request_type, status FROM pair_requests WHERE requester_id=? AND request_type IN ('quit_job','divorce') "
         "AND status IN ('pending','partner_consent')", (uid,))}
     out = {"quit": {"profession": profession_name(prof, uid) if prof else None, "pending": "quit_job" in open_},
-           "pair": None, "divorce": {"pending": open_.get("divorce")}, "child": None}
+           "pair": None, "divorce": {"pending": open_.get("divorce"), "incoming": None}, "child": None}
     pair = active_pair(uid)
     if not pair:
         return out
+    inc = c.execute("SELECT id, requester_id, custody_id FROM pair_requests WHERE request_type='divorce' AND target_id=? "
+                    "AND status='partner_consent' ORDER BY id DESC LIMIT 1", (uid,)).fetchone()
+    if inc:
+        out["divorce"]["incoming"] = {"id": inc[0], "from": _plain_person(inc[1]),
+                                      "terms": _plain(divorce_terms_text(pair, inc[2]))}
     partner = pair[2] if pair[1] == uid else pair[1]
     out["pair"] = {"partner": _plain_person(partner), "partner_id": partner}
     kids = divorce_kids(pair[0])
@@ -19196,7 +19218,12 @@ def requests_payload(uid):
     pend = c.execute("SELECT child_name, gender, status, due_at FROM child_requests WHERE pair_id=? "
                      "AND status IN ('selecting','pending','approved') ORDER BY id DESC LIMIT 1", (pair[0],)).fetchone()
     lang = family_lang(uid)
+    cin = c.execute("SELECT id, requester_id, gender, child_name FROM child_requests WHERE partner_id=? AND pair_id=? "
+                    "AND status='pending' ORDER BY id DESC LIMIT 1", (uid, pair[0])).fetchone()
     out["child"] = {"count": count, "max": 5, "cost": next_child_cost(pair[0]),
+                    "incoming": {"id": cin[0], "from": _plain_person(cin[1]), "gender": cin[2], "name": cin[3]} if cin else None,
+                    "mine": bool(pend) and c.execute("SELECT 1 FROM child_requests WHERE pair_id=? AND requester_id=? AND status='pending'",
+                                                     (pair[0], uid)).fetchone() is not None,
                     "pending": {"name": pend[0], "gender": pend[1], "status": pend[2],
                                 "due": tashkent_dt(int(datetime.fromisoformat(pend[3]).timestamp())) if pend[3] else None} if pend else None,
                     "names": {g: list(CHILD_NAMES.get(g, {}).get(lang) or CHILD_NAMES.get(g, {}).get("uz") or []) for g in ("boy", "girl")}}
@@ -19252,6 +19279,9 @@ async def web_request(uid, body):
         rid = await create_rel_request(app_, "divorce", uid, target_id=target, custody_id=custody or None)
         if not rid:
             return {"error": "already"}
+        if rid in REL_SEND_FAILED:
+            REL_SEND_FAILED.discard(rid)
+            return {"result": "sent", "kind": kind, "undelivered": True, "requests": requests_payload(uid)}
     elif kind == "child":
         pair = active_pair(uid)
         if not pair:
@@ -19282,6 +19312,103 @@ async def web_request(uid, body):
     else:
         return {"error": "kind"}
     return {"result": "sent", "kind": kind, "requests": requests_payload(uid)}
+
+
+class _WebCallback:
+    """Bot callback handlerini web'dan chaqirish uchun soxta CallbackQuery (javob/xabar matnlarini yig'adi)."""
+    def __init__(self, data, uid):
+        self.data, self.from_user, self.message = data, types.SimpleNamespace(id=uid), None
+        self.alerts, self.edits = [], []
+
+    async def answer(self, text=None, show_alert=False, **_k):
+        self.alerts.append((text, show_alert))
+
+    async def edit_message_text(self, text, **_k):
+        self.edits.append(text)
+
+
+async def web_request_answer(uid, body):
+    """Kiruvchi so'rovga web'dan javob: kind divorce|child, answer yes|no — botdagi bilan aynan bir xil mantiq."""
+    if not web_enabled_for(uid):
+        return {"error": "disabled"}
+    bot_ = _EXCHANGE_LOOP_BOT
+    if bot_ is None:
+        return {"error": "bot"}
+    kind, answer = body.get("kind"), body.get("answer")
+    try:
+        rid = int(body.get("id"))
+    except (TypeError, ValueError):
+        return {"error": "id"}
+    if kind not in ("divorce", "child") or answer not in ("yes", "no"):
+        return {"error": "kind"}
+    data = f"rel:divorce:{answer}:{rid}" if kind == "divorce" else f"family:consent:{answer}:{rid}"
+    q = _WebCallback(data, uid)
+    app_ = types.SimpleNamespace(bot=bot_)
+    ctx = types.SimpleNamespace(bot=bot_, application=app_, user_data={}, args=[])
+    await cb_relationship(types.SimpleNamespace(callback_query=q, effective_user=q.from_user, effective_chat=None,
+                                                effective_message=None), ctx)
+    bad = [t for t, alert in q.alerts if alert]
+    if bad:
+        return {"error": "msg", "msg": _plain(bad[0] or "")}
+    return {"result": "answered", "msg": _plain(q.edits[-1]) if q.edits else "", "requests": requests_payload(uid)}
+
+
+REQ_REMIND_GAP = 600
+_REQ_REMIND = {}
+
+
+async def web_request_cancel(uid, body):
+    """O'zi yuborgan, hali hal qilinmagan arizani bekor qilish."""
+    kind = body.get("kind")
+    c = db()
+    with c:
+        if kind == "quit":
+            n = c.execute("UPDATE pair_requests SET status='cancelled' WHERE requester_id=? AND request_type='quit_job' "
+                          "AND status='pending'", (uid,)).rowcount
+        elif kind == "divorce":
+            n = c.execute("UPDATE pair_requests SET status='cancelled' WHERE requester_id=? AND request_type='divorce' "
+                          "AND status IN ('partner_consent','pending')", (uid,)).rowcount
+        elif kind == "child":
+            n = c.execute("UPDATE child_requests SET status='cancelled' WHERE requester_id=? AND status='pending'",
+                          (uid,)).rowcount
+        else:
+            return {"error": "kind"}
+    if not n:
+        return {"error": "none"}
+    return {"result": "cancelled", "requests": requests_payload(uid)}
+
+
+async def web_request_remind(uid, body):
+    """Juftga rozilik so'rovini qayta yuborish (10 daqiqada bir marta)."""
+    kind = body.get("kind")
+    bot_ = _EXCHANGE_LOOP_BOT
+    if bot_ is None:
+        return {"error": "bot"}
+    key = (uid, kind)
+    if time.time() - _REQ_REMIND.get(key, 0) < REQ_REMIND_GAP:
+        return {"error": "wait", "wait": int(REQ_REMIND_GAP - (time.time() - _REQ_REMIND[key]))}
+    c = db()
+    if kind == "divorce":
+        row = c.execute("SELECT id, target_id, custody_id FROM pair_requests WHERE requester_id=? AND request_type='divorce' "
+                        "AND status='partner_consent' ORDER BY id DESC LIMIT 1", (uid,)).fetchone()
+        if not row:
+            return {"error": "none"}
+        ok = await send_divorce_consent(bot_, row[0], uid, row[1], row[2])
+    elif kind == "child":
+        row = c.execute("SELECT id, partner_id, gender, child_name FROM child_requests WHERE requester_id=? AND status='pending' "
+                        "ORDER BY id DESC LIMIT 1", (uid,)).fetchone()
+        if not row:
+            return {"error": "none"}
+        text, kb = child_request_message(row[0], uid, row[1], row[2], row[3])
+        try:
+            await bot_.send_message(row[1], text, reply_markup=kb, parse_mode="HTML")
+            ok = True
+        except TelegramError:
+            ok = False
+    else:
+        return {"error": "kind"}
+    _REQ_REMIND[key] = time.time()
+    return {"result": "reminded" if ok else "undelivered"}
 
 
 def webapp_open_kb(private, bot_username=None, label="📝 Web app'da ariza yuborish"):
@@ -20682,6 +20809,10 @@ WEBAPP_HTML = r"""<!doctype html>
   .rqopts.col{flex-direction:column}.rqopts.col .rqo{border-radius:12px;padding:11px 14px;font-size:14px}
   .rqsh .seg{margin-top:12px}.rqsh .btn.full{margin-top:14px}
   #rqName{box-sizing:border-box;width:100%}
+  .rqrow{display:flex;gap:8px;margin-top:12px}.rqrow .btn{flex:1}
+  .rqp.in{background:rgba(226,87,122,.14);box-shadow:inset 0 0 0 1px rgba(226,87,122,.45)}
+  .rqt.hot{box-shadow:inset 0 0 0 1.5px #e2577a,0 0 16px rgba(226,87,122,.45);animation:rqhot 1.6s ease-in-out infinite}
+  @keyframes rqhot{50%{box-shadow:inset 0 0 0 1.5px #ff8aa6,0 0 24px rgba(226,87,122,.7)}}
   .btn.rqdanger{background:linear-gradient(180deg,#e0485c,#a81f34);color:#fff}
   /* ───── 📰 NEWS — online gazeta ───── */
   .npaper{border-radius:18px;padding:14px 14px 18px;background:linear-gradient(180deg,#17110a,#0e0a06);box-shadow:inset 0 0 0 1px rgba(255,210,74,.35),0 12px 30px rgba(0,0,0,.5)}
@@ -21564,6 +21695,8 @@ function render(res){
   });
   app.appendChild(tabs);
   setNewsBadge(d.news_unread||0);
+  (function(){ const R=d.requests||{}, n=((R.divorce||{}).incoming?1:0)+((R.child||{}).incoming?1:0), t=document.querySelector('.tab[data-k="profil"]');
+    if(n&&t&&!t.querySelector('.tbadge')){ const b=document.createElement('span'); b.className='tbadge'; b.textContent=n; t.appendChild(b); } })();
   if(/(^|#)req\b/.test(location.hash||'') && !window.RQOPENED){ window.RQOPENED=1; TAB='profil';
     setTimeout(()=>{ const e=document.getElementById('reqc'); if(e) e.scrollIntoView({behavior:'smooth',block:'center'}); },400); }
   app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':'casino'));
@@ -22626,11 +22759,15 @@ const RQERR={no_job:'💼 Sizda hozir kasb yo‘q',already:'⏳ Bu turdagi ariza
 function reqTiles(d){ const R=d.requests||{}, q=R.quit||{}, dv=R.divorce||{}, ch=R.child;
   return [
     {k:'quit',i:'💼',t:'Ishdan bo‘shash',s:q.pending?'⏳ Ko‘rib chiqilmoqda':(q.profession?q.profession:'Kasb yo‘q'),on:!!q.pending},
-    {k:'divorce',i:'💔',t:'Ajrashish',s:dv.pending?(dv.pending==='partner_consent'?'⏳ Juft roziligi':'⏳ Ko‘rib chiqilmoqda'):(R.pair?R.pair.partner:'Juft yo‘q'),on:!!dv.pending},
-    {k:'child',i:'👶',t:'Farzand ko‘rish',s:ch&&ch.pending?(ch.pending.status==='approved'?'🍼 Yo‘lda':'⏳ Rozilik kutilmoqda'):(ch?ch.count+'/5 farzand':'Juft yo‘q'),on:!!(ch&&ch.pending)}];
+    {k:'divorce',i:'💔',t:'Ajrashish',s:dv.incoming?'💌 So‘rov keldi':dv.pending?(dv.pending==='partner_consent'?'⏳ Juft roziligi':'⏳ Ko‘rib chiqilmoqda'):(R.pair?R.pair.partner:'Juft yo‘q'),on:!!(dv.pending||dv.incoming),hot:!!dv.incoming},
+    {k:'child',i:'👶',t:'Farzand ko‘rish',s:ch&&ch.incoming?'💌 So‘rov keldi':ch&&ch.pending?(ch.pending.status==='approved'?'🍼 Yo‘lda':'⏳ Rozilik kutilmoqda'):(ch?ch.count+'/5 farzand':'Juft yo‘q'),on:!!(ch&&ch.pending),hot:!!(ch&&ch.incoming)}];
 }
+function rqAnswer(kind,id){ return '<div class="rqrow"><button class="btn go" data-ans="yes" data-kind="'+kind+'" data-id="'+id+'">✅ Roziman</button>'+
+  '<button class="btn rqdanger" data-ans="no" data-kind="'+kind+'" data-id="'+id+'">❌ Rad etaman</button></div>'; }
+function rqMine(kind,remind){ return '<div class="rqrow">'+(remind?'<button class="btn" data-remind="'+kind+'">🔔 Qayta yuborish</button>':'')+
+  '<button class="btn" data-cancel="'+kind+'">❌ Bekor qilish</button></div>'; }
 function drawReqCard(rc,d){
-  rc.innerHTML='<div class="lbl">📝 Arizalar</div><div class="rqg">'+reqTiles(d).map(x=>'<div class="rqt'+(x.on?' on':'')+'" data-k="'+x.k+'" data-tap="1">'+
+  rc.innerHTML='<div class="lbl">📝 Arizalar</div><div class="rqg">'+reqTiles(d).map(x=>'<div class="rqt'+(x.on?' on':'')+(x.hot?' hot':'')+'" data-k="'+x.k+'" data-tap="1">'+
     '<span class="rqi">'+x.i+'</span><b>'+x.t+'</b><span class="rqs">'+esc(x.s)+'</span></div>').join('')+'</div>'+
     '<div class="hsub" style="margin-top:8px">Juft roziligi va bot egalari tasdig‘i botga keladi.</div>';
   rc.querySelectorAll('.rqt').forEach(t=>t.onclick=()=>openRequest(t.dataset.k,d));
@@ -22640,13 +22777,15 @@ function openRequest(kind,d){
   const R=d.requests||{}, st={gender:'boy',name:'',custody:0}; let h='', can=false, go='📤 Ariza yuborish', danger=false;
   if(kind==='quit'){ const q=R.quit||{};
     h='<h3>💼 Ishdan bo‘shash</h3>';
-    if(q.pending) h+='<p class="rqp">⏳ Arizangiz bot egalarida ko‘rib chiqilmoqda.</p>';
+    if(q.pending) h+='<p class="rqp">⏳ Arizangiz bot egalarida ko‘rib chiqilmoqda.</p>'+rqMine('quit',false);
     else if(!q.profession) h+='<p class="rqp">Sizda hozir kasb yo‘q. Kasbni botda tanlaysiz.</p>';
     else { can=true; h+='<p>Hozirgi kasbingiz: <b>'+esc(q.profession)+'</b></p><p class="hsub">Ariza bot egalariga yuboriladi. Tasdiqlangach, botda yangi kasb tanlaysiz.</p>'; }
   } else if(kind==='divorce'){ const v=R.divorce||{};
     h='<h3>💔 Ajrashish</h3>'; danger=true; go='💔 So‘rov yuborish';
     if(!R.pair) h+='<p class="rqp">Sizda hozir juft yo‘q.</p>';
-    else if(v.pending) h+='<p class="rqp">'+(v.pending==='partner_consent'?'⏳ So‘rov '+esc(R.pair.partner)+'ga yuborilgan, uning roziligi kutilmoqda.':'⏳ Ariza bot egalarida ko‘rib chiqilmoqda.')+'</p>';
+    else if(v.incoming) h+='<p class="rqp in">💌 <b>'+esc(v.incoming.from)+'</b> siz bilan ajrashishni so‘radi.</p><div class="rqterms">'+esc(v.incoming.terms)+'</div>'+rqAnswer('divorce',v.incoming.id);
+    else if(v.pending) h+='<p class="rqp">'+(v.pending==='partner_consent'?'⏳ So‘rov '+esc(R.pair.partner)+'ga yuborilgan, uning roziligi kutilmoqda.':'⏳ Ariza bot egalarida ko‘rib chiqilmoqda.')+'</p>'+
+      rqMine('divorce',v.pending==='partner_consent');
     else { can=true;
       h+='<div class="rqterms">'+esc(v.terms||'')+'</div>';
       if((v.custody||[]).length){ st.custody=0;
@@ -22658,7 +22797,10 @@ function openRequest(kind,d){
   } else { const ch=R.child;
     h='<h3>👶 Farzand ko‘rish</h3>'; go='👶 So‘rov yuborish';
     if(!R.pair||!ch) h+='<p class="rqp">Farzand ko‘rish uchun avval juftlik tuzing.</p>';
-    else if(ch.pending) h+='<p class="rqp">'+(ch.pending.status==='approved'?'🍼 '+esc(ch.pending.name||'Farzand')+' yo‘lda'+(ch.pending.due?' · '+esc(ch.pending.due):'')+'.':'⏳ '+esc(R.pair.partner)+' roziligi kutilmoqda'+(ch.pending.name?' ('+esc(ch.pending.name)+')':'')+'.')+'</p>';
+    else if(ch.incoming) h+='<p class="rqp in">💌 <b>'+esc(ch.incoming.from)+'</b> farzand ko‘rishni taklif qildi: '+
+      (ch.incoming.gender==='girl'?'👧 qiz':'👦 o‘g‘il')+', ismi <b>'+esc(ch.incoming.name||'')+'</b>.</p>'+
+      '<p class="hsub">Rozi bo‘lsangiz, '+esc(ch.incoming.from)+' hamyonidan '+(ch.cost?fmtMoney(ch.cost)+'$':'to‘lovsiz')+' yechiladi.</p>'+rqAnswer('child',ch.incoming.id);
+    else if(ch.pending) h+='<p class="rqp">'+(ch.pending.status==='approved'?'🍼 '+esc(ch.pending.name||'Farzand')+' yo‘lda'+(ch.pending.due?' · '+esc(ch.pending.due):'')+'.':'⏳ '+esc(R.pair.partner)+' roziligi kutilmoqda'+(ch.pending.name?' ('+esc(ch.pending.name)+')':'')+'.')+'</p>'+(ch.mine?rqMine('child',true):'');
     else if(ch.count>=ch.max) h+='<p class="rqp">Sizda allaqachon '+ch.max+' ta farzand bor.</p>';
     else { can=true;
       h+='<div class="chips"><span class="chip">👶 '+ch.count+'/'+ch.max+'</span><span class="chip">💸 '+(ch.cost?fmtMoney(ch.cost)+'$':'Bepul')+'</span></div>'+
@@ -22680,6 +22822,20 @@ function openRequest(kind,d){
   ov.querySelectorAll('.rqgen .s').forEach(x=>x.onclick=()=>{ st.gender=x.dataset.g; st.name=''; ov.querySelectorAll('.rqgen .s').forEach(y=>y.classList.toggle('on',y===x)); drawNames(); });
   if(nm) nm.oninput=()=>{ if(nm.value.trim()){ st.name=''; names.querySelectorAll('.rqo.on').forEach(x=>x.classList.remove('on')); } };
   drawNames();
+  const done=r=>{ if(r.requests){ d.requests=r.requests; const rc=document.getElementById('reqc'); if(rc) drawReqCard(rc,d); } };
+  ov.querySelectorAll('[data-ans]').forEach(x=>x.onclick=()=>{ x.disabled=true;
+    api('/app/api/request/answer',{kind:x.dataset.kind,id:+x.dataset.id,answer:x.dataset.ans}).then(r=>{ x.disabled=false;
+      if(r.result){ done(r); close(); haptic('success'); toast(x.dataset.ans==='yes'?'✅ '+(r.msg||'Rozilik berildi'):'❌ Rad etildi'); }
+      else toast(r.msg?'⚠️ '+r.msg:(RQERR[r.error]||'⚠️ Xatolik')); }).catch(()=>{ x.disabled=false; toast('⚠️ Aloqa xatosi'); }); });
+  ov.querySelectorAll('[data-cancel]').forEach(x=>x.onclick=()=>{ x.disabled=true;
+    api('/app/api/request/cancel',{kind:x.dataset.cancel}).then(r=>{ x.disabled=false;
+      if(r.result){ done(r); close(); toast('✅ Ariza bekor qilindi'); } else toast('⚠️ Bekor qilinadigan ariza yo‘q'); }).catch(()=>{ x.disabled=false; toast('⚠️ Aloqa xatosi'); }); });
+  ov.querySelectorAll('[data-remind]').forEach(x=>x.onclick=()=>{ x.disabled=true;
+    api('/app/api/request/remind',{kind:x.dataset.remind}).then(r=>{ x.disabled=false;
+      if(r.result==='reminded') toast('🔔 '+((R.pair||{}).partner||'Juftingiz')+'ga qayta yuborildi');
+      else if(r.result==='undelivered') toast('📭 Telegram’da yetkazilmadi — juftingiz web app → Profil → Arizalar orqali javob bera oladi');
+      else if(r.error==='wait') toast('⏳ '+Math.ceil(r.wait/60)+' daqiqadan keyin qayta yuborish mumkin');
+      else toast('⚠️ Xatolik'); }).catch(()=>{ x.disabled=false; toast('⚠️ Aloqa xatosi'); }); });
   const b=ov.querySelector('#rqGo'); if(!b) return;
   b.onclick=()=>{ const body={kind:kind};
     if(kind==='divorce'){ if(((R.divorce||{}).custody||[]).length&&!st.custody){ toast(RQERR.custody); return; } body.custody=st.custody; }
@@ -22687,6 +22843,7 @@ function openRequest(kind,d){
     b.disabled=true;
     api('/app/api/request',body).then(r=>{ b.disabled=false;
       if(r.result==='sent'){ d.requests=r.requests; const rc=document.getElementById('reqc'); if(rc) drawReqCard(rc,d); close(); haptic('success');
+        if(r.undelivered){ toast('📭 So‘rov saqlandi, lekin Telegram’da yetkazilmadi — juftingiz web app → Profil → Arizalar orqali javob beradi'); return; }
         toast(kind==='quit'?'✅ Ariza bot egalariga yuborildi':kind==='divorce'?'💌 So‘rov '+((R.pair||{}).partner||'juftingiz')+'ga yuborildi':'💌 So‘rov '+((R.pair||{}).partner||'juftingiz')+'ga yuborildi'); }
       else toast(RQERR[r.error]||'⚠️ Xatolik'); }).catch(()=>{ b.disabled=false; toast('⚠️ Aloqa xatosi'); }); };
 }

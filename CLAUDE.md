@@ -384,3 +384,14 @@
   strike 2D raund), 🧱 Blokchilar (bstorm), 🚇 Yuguruvchilar (mdash, a=masofa), 🐍 Ilonchilar (nsnake).
 - 🐍 NEON SNAKE: ekrandagi D-pad standart yoniq (`defaults().dpad=true`, saqlash `v: 2`; eski v1 saqlanganlar ham yoqiladi),
   sozlamalardan o'chirsa saqlanadi.
+- 📅 Kredit endi OYLIK foiz bilan: `LOAN_TERM_DAYS` 30, `LOAN_DAYS=(30,)`, `loan_due(amount, days, rate)` = amount + amount·rate·days/30
+  (banklar `loan_rate` — oylik), `loan_daily(due)`. Yangi kredit `bank_loans.plan='monthly'` (+ `paid`, `next_at` ustunlari, migratsiya
+  `init_bank`): `bank_settle_due` har kuni round(due·n/30) gacha yechadi (balans minusga tushishi mumkin, `n_inst` xabari), 30-kunda
+  status `paid`. `active_loan()[3]` = QOLGAN qarz (due − paid) — to'lash/ko'rsatish shu bilan. Eski 1–7 kunlik kreditlar `plan='once'` —
+  eski qoidada (`due_at` da birdan). Web payload `bank.loan`: monthly/daily/paid/total.
+- 🧹 Kredit amnistiyasi (web Owner → ⚙️ Sozlamalar, `amnestyCard`, ikki bosqichli tasdiq): `/app/api/owner/amnesty` → `web_amnesty`
+  (faqat ownerlar, `confirm` shart): faol kreditlarning qolgan qarzi hamyondan yechiladi, status `forgiven`; so'ng `money<0` → 0;
+  ta'sirlanganlarga bot xabari, `log_money_event`. Ko'rinish `amnesty_preview` (payload `amnesty`).
+- ⚖️ Ajrimchilar: web Owner → ⚖️ Ajrimchilar (`judgeAdmin`, `/app/api/judges/{add,remove}` → `web_judge_admin`, jadval `judges`,
+  `is_judge`/`judges()` kesh). `notify_pair_owners` — `JUDGE_KINDS` (pair, divorce) arizalari ownerlar + ajrimchilarga; `rel:owner`
+  callback ajrimchiga faqat shu turlarda ruxsat (ishdan bo'shash va boshqa owner amallari — yo'q).

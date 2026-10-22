@@ -168,7 +168,8 @@
           '<p><b>📱 Telefon</b>: mashina o‘zi gaz beradi. <b>◀ ▶</b> — rul (yoki sozlamalarda telefonni qiyshaytirish). <b>DRIFT</b> — tormoz; burilishda bosib tursangiz drift qilasiz (fan beradi). <b>FIRE</b> — tanlangan power-up oldinga, <b>↶</b> — orqaga. Power-up belgilarini bossangiz — keyingisiga o‘tadi. <b>🎥</b> — kamera.</p>' +
           '<p><b>⌨ Kompyuter</b>: ←/→ yoki A/D — rul, ↓/S/Shift — drift, Space/W/↑ — oldinga otish, E — orqaga, Q/Tab — almashtirish, C — kamera, Esc/P — pauza.</p>' +
           '<p><b>⚡ Power-up’lar</b> (trassadagi belgilarni yig‘ing, 3 tagacha): ' + Object.keys(PU).map((k) => PU[k].icon + ' <b>' + PU[k].name + '</b> — ' + PU[k].d).join('; ') + '.</p>' +
-          '<p><b>✦ Fanlar</b>: zarbalar, raqibni sindirish, drift va quvib o‘tish uchun. Fanlar yangi mashinalarni ochadi; poygalar yangi trassalarni.</p></div>';
+          '<p><b>✦ Fanlar</b>: zarbalar, raqibni sindirish, drift va quvib o‘tish uchun. Fanlar yangi mashinalarni ochadi; poygalar yangi trassalarni.</p>' +
+          '<p class="nr-cred">3D mashina modeli: “Car Concept” — Eric Chadwick, Khronos Group glTF Sample Assets (asli: Unity Fan, CC0), litsenziya <b>CC BY 4.0</b>. O‘zgartirilgan: logotiplar va salon olib tashlangan, soddalashtirilgan, ranglar o‘zgartirilgan.</p></div>';
       }
       m.innerHTML = '<div class="nr-mwrap">' + h + '</div>'; m.classList.add('on');
       m.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => { A.init(); A.resume(); const g = b.dataset.go; if (g === 'play') H.play(); else if (g === 'exit') H.exit(); else this.showMenu(g); }));
@@ -226,12 +227,19 @@
   const GP = Game.prototype;
   GP.setQuality = function () { const E = this.engine; if (!E) return; const q = NR.Save.data.settings.quality; E.auto = q === 'auto'; E.quality = E.auto ? (weakDevice() ? 'low' : 'medium') : q; E.prScale = 1; E.applyQuality(); E.resize(); };
   GP.start = function () {
-    A.init(); A.resume(); this.cleanup();
+    A.init(); A.resume();
+    // Realistik 3D mashina modellari (bir marta yuklanadi; xato bo'lsa oddiy modellar bilan davom etadi)
+    if (this.opts.assets && !NR.Models.hi && !NR.Models.failed) {
+      if (this.loadingCars) return; this.loadingCars = true; UI.toast('⏳ 3D mashinalar yuklanmoqda…');
+      NR.Models.load(this.opts.assets, this.opts.ver, this.opts.lib).then(() => { this.loadingCars = false; if (this.alive) this.start(); });
+      return;
+    }
+    this.cleanup();
     const S = NR.Save.data, L = S.last; if (!NR.Save.trackOpen(L.track)) L.track = 'harbor'; if (!NR.Save.carOpen(L.car)) L.car = 'viper';
     try {
       this.scene = new THREE.Scene(); this.track = new NR.World.Track(L.track); this.track.build(this.scene, this.engine.quality);
       this.race = new NR.Race.Race({ scene: this.scene, quality: this.engine.quality, diff: L.diff, mode: L.mode, track: this.track, car: L.car, cars: this.engine.quality === 'low' ? 6 : 8,
-        playerName: this.opts.playerName || 'Siz', onEvent: (k, c, a, b) => this.onEvent(k, c, a, b), shake: (v) => (this.shakeA = Math.max(this.shakeA, v)) });
+        playerName: this.opts.playerName || 'Siz', renderer: this.engine.renderer, onEvent: (k, c, a, b) => this.onEvent(k, c, a, b), shake: (v) => (this.shakeA = Math.max(this.shakeA, v)) });
     } catch (e) { console.error(e); UI.toast('⚠️ Poyga ishga tushmadi: ' + e.message); this.cleanup(); UI.showMenu('main'); return; }
     UI.mapBase = null; UI.mm = null; UI.cache = {}; UI.e.feed.innerHTML = '';
     this.paused = false; UI.pause(false); this.input.release(); UI.playing(true); this.camInit = true;
@@ -325,7 +333,7 @@
     this.alive = false; cancelAnimationFrame(this.raf); this.cleanup();
     if (this.input) this.input.dispose(UI.ctl, this.root);
     if (this.engine) this.engine.dispose();
-    NR.Race.disposeShared(); A.dispose();
+    NR.Race.disposeShared(); NR.Models.dispose(); A.dispose();
     document.removeEventListener('visibilitychange', this.onVis);
     const tg = window.Telegram && window.Telegram.WebApp; try { tg && tg.enableVerticalSwipes && tg.enableVerticalSwipes(); } catch (e) { /* */ }
     document.body.style.overflow = this.prevOverflow || ''; this.root.remove(); NR.current = null;

@@ -337,3 +337,12 @@
   `boxM` — UV metr bo'yicha (cho'zilmaydi), gradient osmon + quyosh, tuman = ufq rangi, devor tagida AO lentalari (instanced), devor
   qirralari, arena tashqarisida siluetlar, ombor tomi/chiroqlari, mashina kabinasi/g'ildiraklari, botlarda jilet/ryukzak/etik + oyoq
   soyasi. Engine: zaif qurilmada (`deviceMemory<=3` yoki `hardwareConcurrency<=4`) auto → low; medium/high'da antialias.
+- 🚗 NEON RUSH realistik mashinalar: `games/neon_rush/car_hi.glb` (~34k uchburchak, yaqin) + `car_lo.glb` (~9k, uzoq LOD, teksturasiz) —
+  "Car Concept" (Eric Chadwick / Khronos glTF-Sample-Assets, **CC BY 4.0**; asli Unity Fan CC0), Khronos logotiplari/salon olib tashlangan,
+  `tools/cars/build.mjs` (gltf-transform: prune/join/simplify/webp/quantize/meshopt) + `tools/cars/README.md`. Atribusiya o'yin ichida
+  (HOW TO PLAY → `.nr-cred`). Klient: `NR3D.Models.load(assets, ver)` (jsdelivr three@0.128 GLTFLoader + meshopt_decoder; xato bo'lsa
+  protsedura mashinalarga qaytadi), `prepModel` (frustumCulled=false — kvantlangan geometriya, tekstura LinearEncoding, rang/shina/disk
+  sozlamalari), `modelFor`: o'yinchi — hi, botlar — `THREE.LOD` (hi <14 m, lo), past sifat — `loLambert`; bo'yoq har mashinaga klon
+  (`paintMats`, `ACCENT`, `SHAPE` masshtab), `envFor` — trassa osmoni + neon panellardan PMREM (scene.environment, poyga tugaganda
+  render target tozalanadi). Web: `NRUSH` launch `assets:'/app/games/neon_rush/'`, `ver`; GLB'lar `NR_GAME_FILES` da (`model/gltf-binary`).
+  Tormoz endi orqaga yurgizmaydi (start sanog'ida mashina orqaga ketib qolardi).

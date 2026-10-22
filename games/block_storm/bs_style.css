@@ -1,0 +1,111 @@
+/* BLOCK STORM — all selectors scoped under .bstorm */
+.bstorm{position:fixed;inset:0;z-index:9000;touch-action:none;overflow:hidden;background:#070816;color:#e8ecff;
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-user-select:none;user-select:none;
+  -webkit-tap-highlight-color:transparent;overscroll-behavior:none;-webkit-touch-callout:none;line-height:1.3}
+.bstorm *{box-sizing:border-box}
+.bstorm .bs-cv{position:absolute;left:0;top:0;display:block;touch-action:none}
+.bstorm button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;-webkit-tap-highlight-color:transparent}
+
+/* pause button */
+.bstorm .bs-pbtn{position:absolute;top:calc(8px + env(safe-area-inset-top,0px));right:8px;width:44px;height:44px;border-radius:14px;
+  display:none;align-items:center;justify-content:center;gap:6px;background:rgba(20,22,52,.72);
+  border:1px solid rgba(160,180,255,.25);box-shadow:0 4px 18px rgba(0,0,0,.35);z-index:3}
+.bstorm .bs-pbtn i{display:block;width:5px;height:16px;border-radius:2px;background:#e8ecff}
+.bstorm .bs-pbtn:active{transform:scale(.92)}
+
+/* on-screen controls */
+.bstorm .bs-ctrl{position:absolute;inset:0;pointer-events:none;z-index:2}
+.bstorm .bs-k{position:absolute;pointer-events:auto;touch-action:none;display:flex;align-items:center;justify-content:center;
+  border-radius:18px;background:linear-gradient(180deg,rgba(60,66,130,.55),rgba(24,26,60,.65));
+  border:1px solid rgba(170,190,255,.28);box-shadow:inset 0 1px 0 rgba(255,255,255,.18),0 4px 14px rgba(0,0,0,.35);
+  color:#eef2ff;font-weight:800;transition:transform .06s,background .06s;-webkit-user-select:none;user-select:none}
+.bstorm .bs-k.on{transform:scale(.92);background:linear-gradient(180deg,rgba(110,120,230,.7),rgba(50,54,120,.8))}
+.bstorm .bs-k1{background:linear-gradient(180deg,rgba(80,170,255,.55),rgba(40,60,160,.65))}
+.bstorm .bs-k2{background:linear-gradient(180deg,rgba(255,110,150,.5),rgba(120,30,80,.6))}
+.bstorm .bs-k3 span{font-size:.5em;letter-spacing:.08em}
+
+/* screens */
+.bstorm .bs-scr{position:absolute;inset:0;display:none;align-items:center;justify-content:center;z-index:5;
+  padding:calc(12px + env(safe-area-inset-top,0px)) 16px calc(12px + env(safe-area-inset-bottom,0px))}
+.bstorm .bs-scr.on{display:flex}
+.bstorm .bs-s-pause,.bstorm .bs-s-over{background:rgba(4,5,16,.45);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+.bstorm .bs-s-settings,.bstorm .bs-s-help,.bstorm .bs-s-mode{background:rgba(4,5,16,.35)}
+.bstorm .bs-menu{width:100%;max-width:380px;display:flex;flex-direction:column;align-items:stretch;gap:10px;position:relative;
+  max-height:100%;overflow-y:auto;touch-action:pan-y}
+.bstorm .bs-x{position:fixed;top:calc(10px + env(safe-area-inset-top,0px));right:10px;width:42px;height:42px;border-radius:50%;
+  background:rgba(20,22,52,.75);border:1px solid rgba(160,180,255,.25);font-size:18px;font-weight:700;z-index:6}
+.bstorm .bs-logo{text-align:center;margin:4px 0 2px}
+.bstorm .bs-logo h1{margin:6px 0 0;font-weight:900;letter-spacing:.06em;line-height:.95;font-size:clamp(34px,11vw,54px);font-style:italic}
+.bstorm .bs-logo h1 span{display:block;color:#fff;text-shadow:0 0 18px rgba(125,211,252,.6)}
+.bstorm .bs-logo h1 b{display:block;background:linear-gradient(90deg,#38bdf8,#a78bfa 45%,#f472b6);-webkit-background-clip:text;background-clip:text;
+  color:transparent;filter:drop-shadow(0 0 14px rgba(167,139,250,.55));font-weight:900}
+.bstorm .bs-cubes{display:flex;justify-content:center;gap:6px;height:30px}
+.bstorm .bs-cubes i{width:26px;height:26px;border-radius:6px;background:linear-gradient(135deg,#fff 0%,var(--c) 38%,#000 160%);
+  box-shadow:0 0 14px var(--c),inset 0 2px 0 rgba(255,255,255,.5);animation:bsBob 2.4s ease-in-out infinite}
+.bstorm .bs-cubes i:nth-child(2){animation-delay:.2s}.bstorm .bs-cubes i:nth-child(3){animation-delay:.4s}.bstorm .bs-cubes i:nth-child(4){animation-delay:.6s}
+@keyframes bsBob{0%,100%{transform:translateY(0) rotate(0)}50%{transform:translateY(-6px) rotate(8deg)}}
+.bstorm .bs-hi{text-align:center;color:rgba(220,228,255,.8);font-size:15px;margin-bottom:4px}
+.bstorm .bs-hi b{color:#fff}
+.bstorm .bs-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:52px;padding:8px 14px;border-radius:16px;
+  background:linear-gradient(180deg,rgba(46,50,104,.82),rgba(22,24,58,.88));border:1px solid rgba(160,180,255,.22);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 6px 18px rgba(0,0,0,.3);font-weight:800;font-size:16px;letter-spacing:.06em;
+  transition:transform .08s}
+.bstorm .bs-btn small{font-size:11px;font-weight:600;letter-spacing:.02em;opacity:.65;margin-top:1px}
+.bstorm .bs-btn b{color:#7dd3fc}
+.bstorm .bs-btn:active{transform:scale(.97)}
+.bstorm .bs-main{min-height:62px;font-size:20px;background:linear-gradient(135deg,#38bdf8,#7c5cff 55%,#e05cff);border-color:rgba(255,255,255,.35);
+  box-shadow:0 0 24px rgba(124,92,255,.5),inset 0 1px 0 rgba(255,255,255,.45);text-shadow:0 1px 2px rgba(0,0,0,.35)}
+.bstorm .bs-main small{opacity:.85}
+.bstorm .bs-best{text-align:center;font-size:14px;color:rgba(220,228,255,.75)}
+.bstorm .bs-best b{color:#fde68a}
+.bstorm .bs-foot{text-align:center;font-size:11px;color:rgba(200,210,255,.4)}
+
+.bstorm .bs-panel{width:100%;max-width:420px;max-height:100%;display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:22px;
+  background:linear-gradient(180deg,rgba(24,26,62,.94),rgba(10,11,30,.96));border:1px solid rgba(160,180,255,.22);
+  box-shadow:0 20px 60px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.03) inset}
+.bstorm .bs-small{max-width:340px;overflow-y:auto;touch-action:pan-y}
+.bstorm .bs-head{display:flex;align-items:center;gap:10px}
+.bstorm .bs-head h2{margin:0;font-size:20px;letter-spacing:.12em;font-weight:900}
+.bstorm .bs-back{width:38px;height:38px;border-radius:12px;background:rgba(255,255,255,.07);font-size:24px;line-height:1}
+.bstorm .bs-big{margin:2px 0 4px;text-align:center;font-size:24px;font-weight:900;letter-spacing:.08em;font-style:italic;
+  background:linear-gradient(90deg,#7dd3fc,#c4b5fd,#f9a8d4);-webkit-background-clip:text;background-clip:text;color:transparent}
+.bstorm .bs-scroll{overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;gap:8px;min-height:0;flex:1 1 auto}
+.bstorm .bs-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.045);font-size:14px;font-weight:600}
+.bstorm .bs-row input[type=range]{flex:1;max-width:150px;accent-color:#8b7cff;touch-action:pan-x}
+.bstorm .bs-rv{width:30px;text-align:right;font-size:13px;color:#c4b5fd}
+.bstorm .bs-tog{width:50px;height:28px;border-radius:14px;background:rgba(255,255,255,.14);position:relative;flex:none;transition:background .15s}
+.bstorm .bs-tog i{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#cbd5e1;transition:left .15s,background .15s}
+.bstorm .bs-tog.on{background:linear-gradient(90deg,#38bdf8,#8b5cf6)}
+.bstorm .bs-tog.on i{left:25px;background:#fff}
+.bstorm .bs-seg{display:flex;gap:4px;background:rgba(0,0,0,.25);padding:3px;border-radius:12px;flex:none}
+.bstorm .bs-seg button{padding:6px 9px;border-radius:9px;font-size:12px;font-weight:700;color:rgba(220,228,255,.7)}
+.bstorm .bs-seg button.on{background:linear-gradient(135deg,#38bdf8,#8b5cf6);color:#fff}
+.bstorm .bs-card{display:flex;flex-direction:column;align-items:flex-start;gap:3px;text-align:left;padding:12px 14px;border-radius:16px;
+  background:rgba(255,255,255,.05);border:1px solid rgba(160,180,255,.15)}
+.bstorm .bs-card b{font-size:18px;font-weight:900;letter-spacing:.04em}
+.bstorm .bs-card span{font-size:13px;color:rgba(220,228,255,.75)}
+.bstorm .bs-card em{font-style:normal;font-size:12px;color:#fde68a}
+.bstorm .bs-card.on{border-color:#8b7cff;background:linear-gradient(135deg,rgba(56,189,248,.18),rgba(139,92,246,.25));box-shadow:0 0 18px rgba(139,92,246,.35)}
+.bstorm .bs-help{font-size:14px;color:rgba(225,232,255,.88)}
+.bstorm .bs-help h3{margin:6px 0 0;font-size:14px;letter-spacing:.08em;color:#7dd3fc}
+.bstorm .bs-help p{margin:0}
+.bstorm .bs-help ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:3px}
+.bstorm .bs-dim{color:rgba(220,228,255,.6)}
+.bstorm .bs-res .bs-score{text-align:center;font-size:42px;font-weight:900;color:#fff;text-shadow:0 0 22px rgba(125,211,252,.6);line-height:1.05}
+.bstorm .bs-rec{text-align:center;font-weight:900;color:#fde68a;letter-spacing:.1em;animation:bsPulse 1s ease-in-out infinite}
+@keyframes bsPulse{50%{transform:scale(1.08);text-shadow:0 0 16px #fbbf24}}
+.bstorm .bs-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:4px 0}
+.bstorm .bs-grid div{background:rgba(255,255,255,.05);border-radius:12px;padding:7px 6px;text-align:center}
+.bstorm .bs-grid small{display:block;font-size:10px;letter-spacing:.06em;color:rgba(200,210,255,.6);text-transform:uppercase}
+.bstorm .bs-grid b{font-size:15px}
+@media (max-height:480px){
+  .bstorm .bs-menu{max-width:560px;display:grid;grid-template-columns:1fr 1fr;align-content:center}
+  .bstorm .bs-logo,.bstorm .bs-hi,.bstorm .bs-best,.bstorm .bs-foot{grid-column:1/-1}
+  .bstorm .bs-logo h1{font-size:34px}.bstorm .bs-logo h1 span,.bstorm .bs-logo h1 b{display:inline;margin:0 6px}
+  .bstorm .bs-cubes{display:none}
+  .bstorm .bs-main{grid-column:1/-1;min-height:52px}
+  .bstorm .bs-btn{min-height:46px}
+  .bstorm .bs-panel{padding:10px}
+  .bstorm .bs-res .bs-score{font-size:30px}
+  .bstorm .bs-grid{grid-template-columns:repeat(6,1fr)}
+}

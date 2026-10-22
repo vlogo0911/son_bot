@@ -6,6 +6,8 @@
 - Railway shu repodan avtomatik deploy qiladi (GitHub commit statuslarida ko'rinadi).
   Agar main commitida status/deployment paydo bo'lmasa — Railway webhook'i ishlamagan: Railway'da "Deploy latest commit" yoki yangi push.
   Railway "New builds are temporarily paused" bo'lsa — push ham deploy qilmaydi, pauza tugagach "Deploy latest commit" bosiladi.
+  Deploy tekshiruvi: `https://api.github.com/repos/vlogo0911/son_bot/deployments` (radiant-heart / exquisite-ambition production) va commit statuslari.
+- Qo'shni bot: `vlogo0911/mafia-bot` (aiogram, Postgres+Redis) — son_bot Railway loyihasida alohida servis bo'ladi, o'z reposi va CLAUDE.md'si bor.
 - Bot `BOT_TOKEN` env'dan o'qiydi; baza `RAILWAY_VOLUME_MOUNT_PATH/game.db` (volume bo'lmasa repo ichidagi `game.db`).
 - Tillar: `uz`, `eng`, `ru`, `kz` (`LANGS`, `CRASH_TEXT`, ...).
 - `/emps` menyusi: `menu_kb()`; pul tikiladigan o'yinlar `🎰 Casino` bo'limida (`casino_kb()`) —

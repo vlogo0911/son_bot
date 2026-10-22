@@ -302,7 +302,8 @@
     if (s.cycle) { s.cycle = false; this.cycle(); }
     if (R.state === 'race' && !R.player.finished) { if (s.fire) R.use(R.player, false); if (s.back) R.use(R.player, true); }
     s.fire = s.back = false;
-    const pin = { steer: this.input.steer(), throttle: 1, brake: this.input.brake() };
+    // fizikada heading oshsa mashina ekranda chapga buriladi → o'yinchi uchun belgi teskari (▶ = o'ngga)
+    const pin = { steer: -this.input.steer(), throttle: 1, brake: this.input.brake() };
     // fizika qadami: katta dt bo'lsa ikkiga bo'linadi (barqarorlik)
     const steps = dt > 0.034 ? 2 : 1; for (let i = 0; i < steps; i++) R.update(dt / steps, pin);
     if (!this.race) return;

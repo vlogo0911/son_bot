@@ -19530,9 +19530,9 @@ def nsnake_check(body, score):
         foods, golds, mult, level, secs = (int(float(body.get(k) or 0)) for k in ("foods", "golds", "maxMult", "level", "time"))
     except (TypeError, ValueError):
         return None
-    if not (0 <= foods <= 5000 and 0 <= golds <= 2000 and 1 <= mult <= 10 and 0 <= secs <= 7200 and foods + golds <= secs * 12 + 10):
+    if not (0 <= foods <= 5000 and 0 <= golds <= 2000 and 0 <= mult <= 10 and 0 <= secs <= 7200 and foods + golds <= secs * 12 + 10):
         return None
-    if not 0 <= score <= min((foods * 10 + golds * 50) * mult, VIP_SCORE_MAX):
+    if not 0 <= score <= min((foods * 10 + golds * 50) * max(1, mult), VIP_SCORE_MAX):
         return None
     return max(1, min(99, level))
 

@@ -5,6 +5,7 @@
   `*.backup*` / `*.before_*` fayllar faqat eski zaxira nusxalar.
 - Railway shu repodan avtomatik deploy qiladi (GitHub commit statuslarida ko'rinadi).
   Agar main commitida status/deployment paydo bo'lmasa — Railway webhook'i ishlamagan: Railway'da "Deploy latest commit" yoki yangi push.
+  Railway "New builds are temporarily paused" bo'lsa — push ham deploy qilmaydi, pauza tugagach "Deploy latest commit" bosiladi.
 - Bot `BOT_TOKEN` env'dan o'qiydi; baza `RAILWAY_VOLUME_MOUNT_PATH/game.db` (volume bo'lmasa repo ichidagi `game.db`).
 - Tillar: `uz`, `eng`, `ru`, `kz` (`LANGS`, `CRASH_TEXT`, ...).
 - `/emps` menyusi: `menu_kb()`; pul tikiladigan o'yinlar `🎰 Casino` bo'limida (`casino_kb()`) —

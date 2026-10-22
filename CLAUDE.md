@@ -346,3 +346,19 @@
   (`paintMats`, `ACCENT`, `SHAPE` masshtab), `envFor` — trassa osmoni + neon panellardan PMREM (scene.environment, poyga tugaganda
   render target tozalanadi). Web: `NRUSH` launch `assets:'/app/games/neon_rush/'`, `ver`; GLB'lar `NR_GAME_FILES` da (`model/gltf-binary`).
   Tormoz endi orqaga yurgizmaydi (start sanog'ida mashina orqaga ketib qolardi).
+- 🚇 METRO DASH (3D cheksiz runner, ORIGINAL o'yin; VIP → owners-only test): `games/metro_dash/` — `md_core.js` (`MDASH.U`, `MDASH.Save`
+  localStorage `metro_dash_v1` — tangalar/personajlar/taxtalar, `MDASH.Audio` sintez + hip-hop chiptune), `md_world.js` (`MDASH.Assets`
+  — `md_world.glb` nomlangan tugunlar + `md_char_<m|f><a-f>.glb` animatsiyali personajlar, `World`: 3 yo'lak `LANES` ±1.5, shpallar
+  instanced, graffiti devorlar (canvas), binolar, generator `generate` — trains/rampTrain/barriers/mixed/moving/wall2/coins naqshlari,
+  har doim o'tib bo'ladigan yo'l; `groundAt` — poyezd tomi `ROOF` 1.57 / rampa), `md_game.js` (Engine avto-sifat, `Game.step` 1/120
+  qadam: sakrash/sirpanish/yo'lak, old tomondan urilish → crash, yondan → qoqilish + 🚨 dron (`CHASE_T` 8 s ichida 2-qoqilish = ushlanish),
+  power-up `PU` magnet/jet/boots/x2, 🛹 uchar taxta (ikki marta bosish, 1 urilishdan qutqaradi), `MDASH.launch({assets, ver, onResult, onExit})`),
+  `md_style.css` (`.mdash`). Modellar Kenney **CC0** (Train Kit, City Kit Commercial, Mini Characters), qayta yig'ish `tools/runner/`.
+  Natija `vip/score` game=`mdash` (`mdash_check`: dist ≤ 17·t+20, score ≤ 2·dist+5, coins ≤ 2·dist+50; level = masofa).
+- 🐍 NEON SNAKE (`games/neon_snake/`, `window.NSNK`, 2D canvas, three yuklanmaydi — `game3d(..., no3d=true)`): Classic/Portal/Labirint,
+  kombo x1–x10, oltin olma, power-up'lar; `nsnake_check`: score ≤ (foods·10 + golds·50)·maxMult, maxMult ≤ 10.
+  🧱 BLOCK STORM (`games/block_storm/`, `window.BSTORM`, 2D canvas; "Tetris" nomi/brendi ishlatilmaydi): 7-bag, SRS kick, hold, ghost,
+  T-spin, B2B, kombo, Marafon/Sprint 40/Zen; `bstorm_check`: lines·10 ≤ pieces·4, score ≤ (lines·1800 + pieces·60)·maxLevel (≤30),
+  `VIP_GAME_MAX["bstorm"]`. Tekshiruvlar `VIP_CHECKS` lug'atida; payload `vip.md_*/ns_*/bs_*` (best/top).
+- 🤖 Loyiha agentlari `.claude/agents/`: architect, debugger (opus, effort max), game-dev, qa-tester, reviewer, asset-builder (opus, high),
+  deploy-watcher (sonnet). Agentlar commit/push qilmaydi — bosh sessiya qiladi.

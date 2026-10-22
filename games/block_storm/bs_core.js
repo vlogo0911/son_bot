@@ -30,7 +30,7 @@
     CELLS.push(rots); BOXN.push(n);
   }
   var SPAWN_X = [0, 3, 3, 3, 4, 3, 3, 3];
-  var SPAWN_Y = HID - 2;
+  var SPAWN_Y = HID - 1; // piece appears fully inside the visible well after the initial one-row drop
 
   // Rotation offset tests, written with y pointing UP (converted below).
   var K_STD_CW = [

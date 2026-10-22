@@ -371,12 +371,12 @@
     if (!land) {
       var top = 56; // room for the pause button row
       var ctrlH = btn ? btn * 2 + 26 : 10;
-      c = Math.floor(Math.min((Wp - 2 * g - 8) / 13.6, (Hp - top - ctrlH - 2.9 * 0 - 12) / 20.2, 44));
+      c = Math.floor(Math.min((Wp - 2 * g - 8) / 13.2, (Hp - top - ctrlH - 12) / 20.2, 44));
       // HUD row (hold + stats) sits above the board inside "top"
       var hudH = Math.max(46, Math.round(c * 2.6));
       c = Math.floor(Math.min(c, (Hp - 10 - hudH - 10 - ctrlH) / 20.2));
       c = Math.max(8, c);
-      var side = Math.round(c * 3.6), bw = c * 10, tot = bw + 8 + side;
+      var side = Math.round(c * 3.1), bw = c * 10, tot = bw + 8 + side;
       var y0 = Math.max(10, Math.round((Hp - ctrlH - (hudH + 8 + c * 20)) / 2));
       L.bx = Math.round((Wp - tot) / 2); L.by = y0 + hudH + 8;
       L.hold = { x: L.bx, y: y0, w: Math.round(c * 3.6), h: hudH };
@@ -433,6 +433,10 @@
     gb.addColorStop(0, rgba(col[0], 0.95)); gb.addColorStop(1, rgba(col[1], 0.95));
     x.fillStyle = gb; rr(x, m, m, w - 2 * m, h - 2 * m, p + 4); x.fill();
     x.restore();
+    // gloss on frame (under the well so it only tints the rim)
+    var gg = x.createLinearGradient(0, m, 0, m + p * 1.2);
+    gg.addColorStop(0, 'rgba(255,255,255,0.45)'); gg.addColorStop(1, 'rgba(255,255,255,0)');
+    x.fillStyle = gg; rr(x, m + 2, m + 1, w - 2 * m - 4, p * 1.2, p * 0.6); x.fill();
     var gi = x.createLinearGradient(0, m + p, 0, h - m - p);
     gi.addColorStop(0, 'rgba(14,16,40,0.96)'); gi.addColorStop(1, 'rgba(6,7,20,0.97)');
     x.fillStyle = gi; rr(x, m + p - 1, m + p - 1, L.bw + 2, L.bh + 2, 4); x.fill();
@@ -441,10 +445,6 @@
     for (var i = 1; i < 10; i++) { x.moveTo(m + p + i * c + 0.5, m + p); x.lineTo(m + p + i * c + 0.5, m + p + L.bh); }
     for (i = 1; i < 20; i++) { x.moveTo(m + p, m + p + i * c + 0.5); x.lineTo(m + p + L.bw, m + p + i * c + 0.5); }
     x.stroke();
-    // gloss on frame
-    var gg = x.createLinearGradient(0, m, 0, m + p * 3);
-    gg.addColorStop(0, 'rgba(255,255,255,0.35)'); gg.addColorStop(1, 'rgba(255,255,255,0)');
-    x.fillStyle = gg; rr(x, m + 2, m + 1, w - 2 * m - 4, p * 2, p); x.fill();
     this.panel = cv; this.panelOff = p + m; this.panelW = w; this.panelH = h;
     this.panelLevel = this.engine ? this.engine.level : 1;
   };
@@ -1045,7 +1045,7 @@
     var greyRows = over ? Math.min(20, Math.floor((1 - Math.max(0, this.endT) / 1.1) * 26)) : 0;
     // locked cells
     var clearing = e.clearT > 0, cf = clearing ? e.clearT / e.clearDelay : 0;
-    for (var y = HID - 2; y < H; y++) {
+    for (var y = HID; y < H; y++) {
       var isClr = false;
       if (clearing) for (var q = 0; q < e.clearN; q++) if (e.clearRows[q] === y) isClr = true;
       var py = L.by + (y - HID) * c;
@@ -1089,7 +1089,7 @@
       var fy = this.set.smooth ? e.fallFrac() * c : 0;
       var lockGlow = e.landed && e.grounded() ? Math.min(1, e.lockT / e.lockDelay) : 0;
       for (i = 0; i < 8; i += 2) {
-        var ay = e.py + cl[i + 1]; if (ay < HID - 1) continue;
+        var ay = e.py + cl[i + 1]; if (ay < HID) continue;
         var ax = L.bx + (e.px + cl[i]) * c, ayy = L.by + (ay - HID) * c + fy;
         ctx.drawImage(spr[e.pt], ax, ayy, c, c);
         if (lockGlow > 0) { ctx.globalAlpha = lockGlow * 0.35; ctx.drawImage(this.flashSpr, ax, ayy, c, c); ctx.globalAlpha = 1; }
@@ -1221,6 +1221,8 @@
       var sz = Math.round(c * 1.25 * p.size * sc), x = L.bx + L.bw / 2, y = L.by + L.bh * 0.3 + p.y * c * 1.9 - k * c * 0.8;
       ctx.globalAlpha = Math.max(0, a);
       ctx.font = '900 italic ' + sz + 'px ' + F;
+      var tw = ctx.measureText(p.text).width;
+      if (tw > L.bw * 0.9) { sz = Math.floor(sz * L.bw * 0.9 / tw); ctx.font = '900 italic ' + sz + 'px ' + F; }
       ctx.shadowColor = p.col; ctx.shadowBlur = 18;
       ctx.lineWidth = Math.max(2, sz * 0.09); ctx.strokeStyle = 'rgba(10,8,30,0.85)';
       ctx.strokeText(p.text, x, y);

@@ -372,6 +372,8 @@
   `loan_sum` — `bank_loans`), 🎰 Qimorvozlar (`gamble_all`/`gamble_crash|frog|kami`), 💞 Juftliklar (faol `pairs`, birga kunlar + farzand),
   💔 Ajrashganlar (`pairs.status='ended'`), 👶 Farzandlilar (`family_children` parent1/2), 🎁 Sovg'alar (`gifts_sent` — sender, `gifts_held` —
   hozirgi egasi `gift_log.recipient_id`). Podium (1–3) + ro'yxat (TOP 15) + "Sizning o'rningiz". Server `tops_payload(uid)` (payload `tops`),
+  test rejimi `tops_enabled_for` (webapp_config "tops" yoki `can_test`; Owner → ⚙️ Sozlamalar "TOP kategoriyalari — hamma uchun",
+  `OWNER_FLAG_KEYS`), yopiq bo'lsa oddiy userga eski "Eng boylar" ro'yxati (`d.top`), payload `tops_test`;
   ro'yxatlar `_top_lists` 60 s kesh (`TOP_CACHE_TTL`), manbalar `_top_sources` (boylik/kredit/qimor reytingiga ownerlar kirmaydi).
   Qimor statistikasi `gamble_stats` (user_id, game, plays, wagered, won, best_win, best_mult) — `gamble_note` web Crash/Hovuz/Kamikaze
   tikish, yutuq, bekor qilish/qaytarishda (deploy'dan keyin yig'ila boshlagan).

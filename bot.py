@@ -19819,7 +19819,7 @@ async def web_news_admin(uid, act, body):
 
 
 # ⚙️ Owner panel (web): xususiyatlarni hamma uchun ochish/yopish — bot panelidagi bilan bir xil flaglar
-OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip")
+OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip", "tops")
 
 
 def owner_flags_payload():
@@ -19984,7 +19984,8 @@ async def webapp_payload(user_id):
         "vip": vip_payload(user_id),
         "vip_list": vip_list() if is_owner else None,
         "testers": tester_list() if is_owner else None,
-        "tops": tops_payload(user_id),
+        "tops": tops_payload(user_id) if tops_enabled_for(user_id) else None,
+        "tops_test": not webapp_flags().get("tops", 0),
         "is_tester": is_tester(user_id),
         "news_unread": news_unread(user_id),
         "owner_flags": owner_flags_payload() if is_owner else None,
@@ -20071,6 +20072,11 @@ def _top_lists():
                      "a": int(k or 0), "b": 0} for _, a, b, d, k in pairs]
     _TOP_CACHE.update(t=now, data=out)
     return out
+
+
+def tops_enabled_for(uid):
+    """🏆 Kategoriyali TOP (test): standart ownerlar va testerlar; Owner → ⚙️ Sozlamalar'dan hamma uchun ochiladi."""
+    return bool(webapp_flags().get("tops", 0)) or can_test(uid)
 
 
 def tops_payload(uid):
@@ -21795,8 +21801,20 @@ function render(res){
 
   // REYTING — kategoriyalar bo'yicha TOP
   const r=$('<div class="sec" id="s-reyting"></div>');
-  r.appendChild($('<h2>🏆 Rekordchilar</h2>'));
-  topsRender(r,d);
+  if(d.tops){ r.appendChild($('<h2>🏆 Rekordchilar'+(d.tops_test?' <span class="avtest">TEST</span>':'')+'</h2>')); topsRender(r,d); }
+  else{   // test rejimida oddiy foydalanuvchilarga eski "Eng boylar" ro'yxati
+    r.appendChild($('<h2>💎 Eng boylar TOP</h2>'));
+    const list=$('<div class="card full"></div>');
+    (d.top||[]).forEach((t,i)=>{
+      const g=i===0?'g1':i===1?'g2':i===2?'g3':'';
+      list.appendChild($('<div class="row '+(t.me?'me':'')+'">'+
+        '<div style="display:flex;align-items:center;gap:10px"><span class="rk '+g+'">'+(i+1)+'</span>'+
+        '<span>'+esc(t.name)+(t.me?' <span style="color:var(--cyan)">(siz)</span>':'')+'</span></div>'+
+        '<b class="val neon" style="font-size:15px">'+esc(t.money_fmt)+'$</b></div>'));
+    });
+    if(!(d.top||[]).length) list.appendChild($('<div class="center">Hali ma’lumot yo‘q</div>'));
+    r.appendChild(list);
+  }
   app.appendChild(r);
 
   // BANK
@@ -23908,7 +23926,7 @@ function newsAdmin(d){
   draw(d.news||[]); return box;
 }
 function ownerFlags(d){
-  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun']];
+  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun'],['tops','🏆','TOP kategoriyalari — hamma uchun']];
   const box=$('<div class="card full"></div>');
   const draw=f=>{ box.innerHTML='<div class="lbl">⚙️ Xususiyatlar</div>'+F.map(([k,i,l])=>'<div class="oflag" data-k="'+k+'"><span>'+i+' '+l+'</span>'+
       '<span class="otg'+(f[k]?' on':'')+'"><i></i></span></div>').join('')+

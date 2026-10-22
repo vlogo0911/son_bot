@@ -19456,7 +19456,8 @@ REQ_WEB_TEXT = ("📝 <b>Arizalar endi web app'da</b>\n"
 
 # ── 👑 VIP: ownerlar beradi (kunlar bilan); ownerlar doim VIP. VIP o'yinlar: STRIKE 2D (Nokia uslubi) ──
 VIP_MAX_DAYS = 3650
-VIP_GAMES = ("strike", "cstrike", "nrush")
+VIP_GAMES = ("strike", "cstrike", "nrush", "mdash", "nsnake", "bstorm")
+VIP_GAME_MAX = {"bstorm": 9999999}     # BLOCK STORM ochkolari katta; boshqalar — VIP_SCORE_MAX
 VIP_SCORE_MAX = 500000
 VIP_SCORE_GAP = 8
 _VIP_SCORE_AT = {}
@@ -19510,6 +19511,48 @@ def nrush_check(body, score):
     return place
 
 
+def mdash_check(body, score):
+    """🚇 METRO DASH: ochko = masofa (x2 bilan ko'pi 2×); tezlik ≤ 16 m/s. Mos bo'lsa level (masofa, m)."""
+    try:
+        coins, dist, secs = (int(body.get(k) or 0) for k in ("coins", "distance", "time"))
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= secs <= 3600 and 0 <= dist <= secs * 17 + 20 and 0 <= coins <= dist * 2 + 50):
+        return None
+    if not 0 <= score <= min(dist * 2 + 5, VIP_SCORE_MAX):
+        return None
+    return dist
+
+
+def nsnake_check(body, score):
+    """🐍 NEON SNAKE: ochko ≤ (ovqat·10 + oltin·50) × eng katta kombo (≤10). Mos bo'lsa level (bosqich/tezlik)."""
+    try:
+        foods, golds, mult, level, secs = (int(float(body.get(k) or 0)) for k in ("foods", "golds", "maxMult", "level", "time"))
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= foods <= 5000 and 0 <= golds <= 2000 and 0 <= mult <= 10 and 0 <= secs <= 7200 and foods + golds <= secs * 12 + 10):
+        return None
+    if not 0 <= score <= min((foods * 10 + golds * 50) * max(1, mult), VIP_SCORE_MAX):
+        return None
+    return max(1, min(99, level))
+
+
+def bstorm_check(body, score):
+    """🧱 BLOCK STORM: qator uchun 10 katak (har bo'lak 4) → lines ≤ pieces·0.4; ochko ≤ (lines·1800 + pieces·60) × maks. daraja."""
+    try:
+        lines, pieces, maxlv, secs = (int(float(body.get(k) or 0)) for k in ("lines", "pieces", "maxLevel", "time"))
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= pieces <= 20000 and 0 <= lines * 10 <= pieces * 4 and 1 <= maxlv <= 30 and 0 <= secs <= 14400 and pieces <= secs * 15 + 10):
+        return None
+    if not 0 <= score <= min((lines * 1800 + pieces * 60) * maxlv, VIP_GAME_MAX["bstorm"]):
+        return None
+    return maxlv
+
+
+VIP_CHECKS = {"cstrike": cstrike_check, "nrush": nrush_check, "mdash": mdash_check, "nsnake": nsnake_check, "bstorm": bstorm_check}
+
+
 def vip_best(game, uid):
     row = db().execute("SELECT best FROM vip_scores WHERE game=? AND user_id=?", (game, uid)).fetchone()
     return row[0] if row else 0
@@ -19522,7 +19565,10 @@ def vip_payload(uid):
             "until": tashkent_dt(until) if until > time.time() else None,
             "best": vip_best("strike", uid), "top": vip_top("strike", 5),
             "cs_best": vip_best("cstrike", uid), "cs_top": vip_top("cstrike", 5),
-            "nr_best": vip_best("nrush", uid), "nr_top": vip_top("nrush", 5)}
+            "nr_best": vip_best("nrush", uid), "nr_top": vip_top("nrush", 5),
+            "md_best": vip_best("mdash", uid), "md_top": vip_top("mdash", 5),
+            "ns_best": vip_best("nsnake", uid), "ns_top": vip_top("nsnake", 5),
+            "bs_best": vip_best("bstorm", uid), "bs_top": vip_top("bstorm", 5)}
 
 
 def vip_list():
@@ -19567,12 +19613,13 @@ async def web_vip_score(uid, body):
     game = body.get("game")
     if game not in VIP_GAMES or not is_vip(uid) or not vip_enabled_for(uid):
         return {"error": "vip"}
+    check = VIP_CHECKS.get(game)
     try:
-        score, level = int(body.get("score")), int(body.get("level") or 0 if game in ("cstrike", "nrush") else body.get("level"))
+        score, level = int(body.get("score")), int(body.get("level") or 0 if check else body.get("level"))
     except (TypeError, ValueError):
         return {"error": "score"}
-    if game in ("cstrike", "nrush"):
-        level = (cstrike_check if game == "cstrike" else nrush_check)(body, score)
+    if check:
+        level = check(body, score)
         if level is None:
             return {"error": "score"}
     elif not (0 <= score <= VIP_SCORE_MAX and 1 <= level <= 99) or score > level * 7000:
@@ -20626,7 +20673,22 @@ NR_GAME_FILES = {"nr_core.js": "application/javascript; charset=utf-8", "nr_worl
                  "nr_race.js": "application/javascript; charset=utf-8", "nr_game.js": "application/javascript; charset=utf-8",
                  "nr_style.css": "text/css; charset=utf-8",
                  "car_hi.glb": "model/gltf-binary", "car_lo.glb": "model/gltf-binary"}   # CC BY 4.0 model, tools/cars/
-GAME_DIRS = {"classic_strike": (CS_GAME_DIR, CS_GAME_FILES), "neon_rush": (NR_GAME_DIR, NR_GAME_FILES)}
+# 🚇 METRO DASH (3D cheksiz runner, VIP): games/metro_dash/ — Kenney (CC0) modellari, tools/runner/
+MD_GAME_DIR = os.path.join(BASE_DIR, "games", "metro_dash")
+MD_GAME_FILES = {"md_core.js": "application/javascript; charset=utf-8", "md_world.js": "application/javascript; charset=utf-8",
+                 "md_game.js": "application/javascript; charset=utf-8", "md_style.css": "text/css; charset=utf-8",
+                 "md_world.glb": "model/gltf-binary",
+                 **{f"md_char_{g}{k}.glb": "model/gltf-binary" for g in "mf" for k in "abcdef"}}
+# 🐍 NEON SNAKE va 🧱 BLOCK STORM (2D canvas, VIP): games/neon_snake/, games/block_storm/
+NS_GAME_DIR = os.path.join(BASE_DIR, "games", "neon_snake")
+NS_GAME_FILES = {"ns_core.js": "application/javascript; charset=utf-8", "ns_game.js": "application/javascript; charset=utf-8",
+                 "ns_style.css": "text/css; charset=utf-8"}
+BS_GAME_DIR = os.path.join(BASE_DIR, "games", "block_storm")
+BS_GAME_FILES = {"bs_core.js": "application/javascript; charset=utf-8", "bs_game.js": "application/javascript; charset=utf-8",
+                 "bs_style.css": "text/css; charset=utf-8"}
+GAME_DIRS = {"classic_strike": (CS_GAME_DIR, CS_GAME_FILES), "neon_rush": (NR_GAME_DIR, NR_GAME_FILES),
+             "metro_dash": (MD_GAME_DIR, MD_GAME_FILES), "neon_snake": (NS_GAME_DIR, NS_GAME_FILES),
+             "block_storm": (BS_GAME_DIR, BS_GAME_FILES)}
 
 
 def cs_game_version(game="classic_strike"):
@@ -21025,6 +21087,21 @@ WEBAPP_HTML = r"""<!doctype html>
   .csg.nrg .cst{font-style:italic;color:#fff;text-shadow:0 0 10px #22e4ff}
   .csg.nrg .csn{font-style:italic;color:#ff2bd6;text-shadow:0 0 16px rgba(255,43,214,.7)}
   .csg.nrg .csp{background:linear-gradient(90deg,#ff2bd6,#7a2bff);color:#fff}
+  .csg.mdg{background:radial-gradient(120% 140% at 85% 10%,rgba(255,204,0,.35),transparent 55%),radial-gradient(90% 90% at 0% 100%,rgba(47,168,255,.3),transparent 60%),linear-gradient(160deg,#103a6a,#071528 75%);
+    box-shadow:inset 0 0 0 1px rgba(255,204,0,.55),0 10px 24px rgba(0,0,0,.45)}
+  .csg.mdg .cst{color:#ffd400;letter-spacing:6px}
+  .csg.mdg .csn{color:#ff3b6b;text-shadow:0 3px 0 #102a4a,0 0 14px rgba(255,59,107,.5)}
+  .csg.mdg .csp{background:linear-gradient(180deg,#ffe14a,#ff9d00);color:#5a2a00}
+  .csg.nsg{background:radial-gradient(120% 140% at 85% 10%,rgba(57,255,136,.3),transparent 55%),linear-gradient(160deg,#04201a,#020a08 75%);
+    box-shadow:inset 0 0 0 1px rgba(57,255,136,.5),0 10px 24px rgba(0,0,0,.45)}
+  .csg.nsg .cst{color:#b8ffd9}
+  .csg.nsg .csn{color:#39ff88;text-shadow:0 0 16px rgba(57,255,136,.7)}
+  .csg.nsg .csp{background:linear-gradient(90deg,#39ff88,#00c2ff);color:#03140c}
+  .csg.bsg{background:radial-gradient(120% 140% at 85% 10%,rgba(160,90,255,.38),transparent 55%),radial-gradient(90% 90% at 0% 100%,rgba(0,220,255,.22),transparent 60%),linear-gradient(160deg,#140a30,#06030f 75%);
+    box-shadow:inset 0 0 0 1px rgba(160,90,255,.6),0 10px 24px rgba(0,0,0,.45)}
+  .csg.bsg .cst{color:#e6dcff}
+  .csg.bsg .csn{color:#b07cff;text-shadow:0 0 16px rgba(160,90,255,.75)}
+  .csg.bsg .csp{background:linear-gradient(90deg,#00d8ff,#a05aff);color:#fff}
   .viplock{text-align:center;padding:26px 16px}
   .viplock .big{font-size:44px}
   /* ───── 📝 Arizalar ───── */
@@ -23245,7 +23322,7 @@ function gamesPage(d){
   const sec=$('<div class="sec" id="s-games"></div>'), v=d.vip||{};
   sec.innerHTML='<h2>🎮 Games</h2><div class="gcat">'+
     '<div class="gcc" data-go="casino" data-tap="1"><div class="gci">'+CASINO_ICON.replace('width="27" height="27"','width="40" height="40"')+'</div><div><b>KAZINO</b><div class="hsub">Royal Crash · Hovuz'+(d.kami?' · Kamikaze':'')+' — hamyon puli bilan</div></div></div>'+
-    (v.open?'<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">CLASSIC STRIKE · NEON RUSH · STRIKE 2D</div></div>'+
+    (v.open?'<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">CLASSIC STRIKE · NEON RUSH · METRO DASH · NEON SNAKE · BLOCK STORM · STRIKE 2D</div></div>'+
       '<span class="glk">'+(v.test?'🧪 TEST':v.vip?'✅ VIP':'🔒 VIP')+'</span></div>':'')+
   '</div><div class="gnote">🎮 Kategoriya tanlang</div>';
   sec.querySelectorAll('.gcc').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
@@ -23256,6 +23333,9 @@ function vipPage(d){
   const top=(v.top||[]).map((t,i)=>'<div class="row"><span>'+(i+1)+'. '+esc(t.name)+'</span><b>'+fmtMoney(t.best)+' · R'+t.level+'</b></div>').join('');
   const cstop=(v.cs_top||[]).map((t,i)=>'<div class="row"><span>'+(i+1)+'. '+esc(t.name)+'</span><b>'+fmtMoney(t.best)+' · '+t.level+' frag</b></div>').join('');
   const nrtop=(v.nr_top||[]).map((t,i)=>'<div class="row"><span>'+(i+1)+'. '+esc(t.name)+'</span><b>'+fmtMoney(t.best)+' · '+t.level+'-o‘rin</b></div>').join('');
+  const tops=(arr,suf)=>(arr||[]).map((t,i)=>'<div class="row"><span>'+(i+1)+'. '+esc(t.name)+'</span><b>'+fmtMoney(t.best)+' · '+suf(t.level)+'</b></div>').join('');
+  const mdtop=tops(v.md_top,l=>fmtMoney(l)+' m'), nstop=tops(v.ns_top,l=>'L'+l), bstop=tops(v.bs_top,l=>l+'-daraja');
+  const topCard=(t,h)=>'<div class="card full" style="margin-top:12px"><div class="lbl">🏆 '+t+' — TOP</div>'+(h||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>';
   sec.innerHTML='<div class="gback" data-back="games">‹ Games</div><h2>👑 VIP o‘yinlar</h2>'+
     (v.vip?'<div class="csg" id="vipCS" data-tap="1"><div class="csx">🎯</div><div class="cst">CLASSIC</div><div class="csn">STRIKE</div>'+
         '<div class="hsub">3D taktik shooter: 7 qurol, aqlli botlar, 3 xarita (Desert Base · Urban Strike · Warehouse), TDM · Deathmatch · Bomb Mission · Survival.</div>'+
@@ -23263,6 +23343,15 @@ function vipPage(d){
         '<div class="csg nrg" id="vipNR" data-tap="1"><div class="csx">🏁</div><div class="cst">NEON</div><div class="csn">RUSH</div>'+
         '<div class="hsub">3D jangovar poyga: neon shahar trassalari, 8 ta power-up (raketa, mina, zarba to‘lqini, nitro…), drift, 4 mashina.</div>'+
         '<div class="hsub">🏆 Rekordingiz: <b id="vipNrBest">'+fmtMoney(v.nr_best||0)+'</b></div><span class="csp">▶ POYGA</span></div>'+
+        '<div class="csg mdg" id="vipMD" data-tap="1"><div class="csx">🚇</div><div class="cst">METRO</div><div class="csn">DASH</div>'+
+        '<div class="hsub">3D cheksiz yugurish: poyezdlar ustidan sakrang, to‘siqlar ostidan sirpaning, dron quvlaydi! Jetpak, magnit, super sakrash, 12 personaj.</div>'+
+        '<div class="hsub">🏆 Rekordingiz: <b id="vipMdBest">'+fmtMoney(v.md_best||0)+'</b></div><span class="csp">▶ YUGURISH</span></div>'+
+        '<div class="csg nsg" id="vipNS" data-tap="1"><div class="csx">🐍</div><div class="cst">NEON</div><div class="csn">SNAKE</div>'+
+        '<div class="hsub">Klassik ilon — neon grafika, kombo ko‘paytiruvchi, oltin olma, labirint bosqichlari.</div>'+
+        '<div class="hsub">🏆 Rekordingiz: <b id="vipNsBest">'+fmtMoney(v.ns_best||0)+'</b></div><span class="csp">▶ O‘YNASH</span></div>'+
+        '<div class="csg bsg" id="vipBS" data-tap="1"><div class="csx">🧱</div><div class="cst">BLOCK</div><div class="csn">STORM</div>'+
+        '<div class="hsub">Tushayotgan bloklar boshqotirmasi: qatorlarni to‘ldiring, kombo va T-spin, Marafon · Sprint · Zen.</div>'+
+        '<div class="hsub">🏆 Rekordingiz: <b id="vipBsBest">'+fmtMoney(v.bs_best||0)+'</b></div><span class="csp">▶ O‘YNASH</span></div>'+
         '<div class="vipg" id="vipStrike" data-tap="1"><canvas width="168" height="120" id="vipPrev"></canvas><div><b>STRIKE 2D</b>'+
         '<div class="hsub">Nokia uslubidagi kontr-terror: terroristlarni yo‘q qiling, har 3-raundda C4 bombani zararsizlantiring. USP · AK · AWP, aptechka va o‘q qutilari.</div>'+
         '<div class="hsub">2/4/6/8 — yurish · 5 — o‘q · * — qurol · 0 — o‘qlash · # — pauza</div>'+
@@ -23270,10 +23359,11 @@ function vipPage(d){
         (v.until?'<div class="hsub" style="margin-top:8px">👑 VIP muddati: '+esc(v.until)+'</div>':(v.owner?'<div class="hsub" style="margin-top:8px">👑 Owner — doimiy VIP</div>':''))+
         '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 CLASSIC STRIKE — TOP</div>'+(cstop||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'+
         '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 NEON RUSH — TOP</div>'+(nrtop||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'+
+        topCard('METRO DASH',mdtop)+topCard('NEON SNAKE',nstop)+topCard('BLOCK STORM',bstop)+
         '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 STRIKE 2D — TOP</div>'+(top||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'
       :'<div class="card full viplock"><div class="big">🔒</div><b>Bu bo‘lim faqat VIP foydalanuvchilar uchun</b>'+
         '<div class="hsub" style="margin-top:6px">VIP maqomini bot egalari beradi. Ichida: STRIKE 2D — eski Nokia telefonlaridagi kontr-terror o‘yini uslubida.</div></div>');
-  [['#vipCS',CSTRIKE,'▶ O‘YNASH'],['#vipNR',NRUSH,'▶ POYGA']].forEach(([sel,G,lab])=>{ const cs=sec.querySelector(sel); if(!cs) return;
+  [['#vipCS',CSTRIKE,'▶ O‘YNASH'],['#vipNR',NRUSH,'▶ POYGA'],['#vipMD',MDASHG,'▶ YUGURISH'],['#vipNS',NSNAKE,'▶ O‘YNASH'],['#vipBS',BSTORMG,'▶ O‘YNASH']].forEach(([sel,G,lab])=>{ const cs=sec.querySelector(sel); if(!cs) return;
     cs.onclick=()=>{ if(cs.dataset.busy) return; cs.dataset.busy='1'; SND.music&&SND.music(null);
       const lb=cs.querySelector('.csp'); lb.textContent='⏳ Yuklanmoqda…';
       G.open(d).catch(()=>toast('⚠️ O‘yin yuklanmadi — internetni tekshiring')).finally(()=>{ delete cs.dataset.busy; lb.textContent=lab; }); }; });
@@ -23284,12 +23374,12 @@ function vipPage(d){
   return sec;
 }
 // ---- 🎮 VIP 3D o'yinlar yuklovchisi (alohida katalog /app/games/<o'yin>/, o'z CSS'i; three r128 — KID3D.load) ----
-function game3d(dir, ver, files, css, glob){
+function game3d(dir, ver, files, css, glob, no3d){
   const BASE='/app/games/'+dir+'/', V='?v='+ver; let ld=null;
   const js=f=>new Promise((ok,bad)=>{ const s=document.createElement('script'); s.src=BASE+f+V; s.onload=ok; s.onerror=()=>{ s.remove(); bad(new Error(f)); }; document.head.appendChild(s); });
   const sheet=()=>new Promise(ok=>{ const id='css_'+dir; if(document.getElementById(id)) return ok(); const l=document.createElement('link'); l.id=id; l.rel='stylesheet'; l.href=BASE+css+V; l.onload=ok; l.onerror=ok; document.head.appendChild(l); });
   return function load(){ if(window[glob]&&window[glob].launch) return Promise.resolve(window[glob]); if(ld) return ld;
-    ld=KID3D.load().then(sheet).then(()=>files.reduce((p,f)=>p.then(()=>js(f)),Promise.resolve())).then(()=>window[glob]).catch(e=>{ ld=null; throw e; });
+    ld=(no3d?Promise.resolve():KID3D.load()).then(sheet).then(()=>files.reduce((p,f)=>p.then(()=>js(f)),Promise.resolve())).then(()=>window[glob]).catch(e=>{ ld=null; throw e; });
     return ld; };
 }
 const vipSaved=(d,key,id)=>x=>{ if(x.vip){ d.vip=x.vip; const b=document.getElementById(id); if(b) b.textContent=fmtMoney(x.vip[key]); } };
@@ -23304,6 +23394,25 @@ const CSTRIKE=(()=>{ const load=game3d('classic_strike','__CS_VER__',['cs_core.j
 const NRUSH=(()=>{ const load=game3d('neon_rush','__NR_VER__',['nr_core.js','nr_world.js','nr_race.js','nr_game.js'],'nr_style.css','NR3D');
   function open(d){ return load().then(G=>{ G.launch({ playerName:(d.name||'Siz').slice(0,14), assets:'/app/games/neon_rush/', ver:'__NR_VER__',
     onResult:r=>{ api('/app/api/vip/score',{game:'nrush',score:r.score,place:r.place,cars:r.cars,fans:r.fans,hits:r.hits,wrecks:r.wrecks,track:r.track}).then(vipSaved(d,'nr_best','vipNrBest')).catch(()=>{}); },
+    onExit:()=>{} }); }); }
+  return {open, load};
+})();
+// 🚇 METRO DASH (3D runner) · 🐍 NEON SNAKE · 🧱 BLOCK STORM
+const MDASHG=(()=>{ const load=game3d('metro_dash','__MD_VER__',['md_core.js','md_world.js','md_game.js'],'md_style.css','MDASH');
+  function open(d){ return load().then(G=>{ G.launch({ playerName:(d.name||'Siz').slice(0,14), assets:'/app/games/metro_dash/', ver:'__MD_VER__',
+    onResult:r=>{ api('/app/api/vip/score',{game:'mdash',score:r.score,coins:r.coins,distance:r.distance,time:r.time}).then(vipSaved(d,'md_best','vipMdBest')).catch(()=>{}); },
+    onExit:()=>{} }); }); }
+  return {open, load};
+})();
+const NSNAKE=(()=>{ const load=game3d('neon_snake','__NS_VER__',['ns_core.js','ns_game.js'],'ns_style.css','NSNK',true);
+  function open(d){ return load().then(G=>{ G.launch({ playerName:(d.name||'Siz').slice(0,14),
+    onResult:r=>{ api('/app/api/vip/score',{game:'nsnake',score:r.score,foods:r.foods,golds:r.golds,maxMult:r.maxMult,level:r.level,mode:r.mode,time:r.time}).then(vipSaved(d,'ns_best','vipNsBest')).catch(()=>{}); },
+    onExit:()=>{} }); }); }
+  return {open, load};
+})();
+const BSTORMG=(()=>{ const load=game3d('block_storm','__BS_VER__',['bs_core.js','bs_game.js'],'bs_style.css','BSTORM',true);
+  function open(d){ return load().then(G=>{ G.launch({ playerName:(d.name||'Siz').slice(0,14),
+    onResult:r=>{ api('/app/api/vip/score',{game:'bstorm',score:r.score,lines:r.lines,level:r.level,pieces:r.pieces,maxLevel:r.maxLevel,mode:r.mode,time:r.time}).then(vipSaved(d,'bs_best','vipBsBest')).catch(()=>{}); },
     onExit:()=>{} }); }); }
   return {open, load};
 })();
@@ -24017,7 +24126,9 @@ boot();
 </script>
 </body>
 </html>"""
-WEBAPP_HTML = WEBAPP_HTML.replace("__CS_VER__", cs_game_version()).replace("__NR_VER__", cs_game_version("neon_rush"))
+WEBAPP_HTML = (WEBAPP_HTML.replace("__CS_VER__", cs_game_version()).replace("__NR_VER__", cs_game_version("neon_rush"))
+               .replace("__MD_VER__", cs_game_version("metro_dash")).replace("__NS_VER__", cs_game_version("neon_snake"))
+               .replace("__BS_VER__", cs_game_version("block_storm")))
 
 
 def main():

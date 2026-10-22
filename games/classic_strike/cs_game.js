@@ -13,8 +13,9 @@
   function Engine(view) {
     this.view = view;
     const q = CS3D.Save.data.settings.quality;
-    this.quality = q === 'auto' ? 'medium' : q; this.auto = q === 'auto';
-    this.renderer = new THREE.WebGLRenderer({ antialias: this.quality === 'high', powerPreference: 'high-performance', alpha: false });
+    const weak = (navigator.deviceMemory && navigator.deviceMemory <= 3) || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4);
+    this.quality = q === 'auto' ? (weak ? 'low' : 'medium') : q; this.auto = q === 'auto';
+    this.renderer = new THREE.WebGLRenderer({ antialias: this.quality !== 'low', powerPreference: 'high-performance', alpha: false });
     this.renderer.autoClear = false;
     view.appendChild(this.renderer.domElement);
     this.camera = new THREE.PerspectiveCamera(75, 1, 0.05, 160);
@@ -26,7 +27,7 @@
     this.resize();
   }
   Engine.prototype.applyQuality = function () {
-    const dpr = window.devicePixelRatio || 1, base = { low: 0.65, medium: 1, high: 1.6 }[this.quality] || 1;
+    const dpr = window.devicePixelRatio || 1, base = { low: 0.7, medium: 1.1, high: 1.6 }[this.quality] || 1;
     this.renderer.setPixelRatio(Math.min(dpr, base) * this.prScale);
     this.renderer.shadowMap.enabled = this.quality === 'high';
   };

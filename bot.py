@@ -16887,8 +16887,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             self._avatar(int(path.rsplit("/", 1)[1]))
         elif path.startswith("/app/a/") and path.rsplit("/", 1)[1] in WEBAPP_ASSETS:
             self._asset(path.rsplit("/", 1)[1])
-        elif path.startswith("/app/games/classic_strike/") and path.rsplit("/", 1)[1] in CS_GAME_FILES:
-            self._game_file(path.rsplit("/", 1)[1])
+        elif path.count("/") == 4 and path.split("/")[3] in GAME_DIRS and path.rsplit("/", 1)[1] in GAME_DIRS[path.split("/")[3]][1]:
+            self._game_file(path.split("/")[3], path.rsplit("/", 1)[1])
         elif re.fullmatch(r"/app/chatimg/[0-9a-f]{32}\.jpg", path):
             self._chatimg(path.rsplit("/", 1)[1])
         elif re.fullmatch(r"/app/newsimg/[0-9a-f]{32}\.jpg", path):
@@ -16946,16 +16946,17 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _game_file(self, name):
-        """🎯 CLASSIC STRIKE fayllari — repo ichidagi games/classic_strike/ dan (faqat ro'yxatdagilar)."""
+    def _game_file(self, game, name):
+        """🎮 VIP 3D o'yin fayllari — repo ichidagi games/<o'yin>/ dan (faqat GAME_DIRS ro'yxatidagilar)."""
+        folder, files = GAME_DIRS[game]
         try:
-            with open(os.path.join(CS_GAME_DIR, name), "rb") as f:
+            with open(os.path.join(folder, name), "rb") as f:
                 data = f.read()
         except OSError:
             self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
             return
         self.send_response(200)
-        self.send_header("Content-Type", CS_GAME_FILES[name])
+        self.send_header("Content-Type", files[name])
         self.send_header("Cache-Control", "public, max-age=86400")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -19455,7 +19456,7 @@ REQ_WEB_TEXT = ("📝 <b>Arizalar endi web app'da</b>\n"
 
 # ── 👑 VIP: ownerlar beradi (kunlar bilan); ownerlar doim VIP. VIP o'yinlar: STRIKE 2D (Nokia uslubi) ──
 VIP_MAX_DAYS = 3650
-VIP_GAMES = ("strike", "cstrike")
+VIP_GAMES = ("strike", "cstrike", "nrush")
 VIP_SCORE_MAX = 500000
 VIP_SCORE_GAP = 8
 _VIP_SCORE_AT = {}
@@ -19495,6 +19496,20 @@ def cstrike_check(body, score):
     return max(1, min(99, kills))
 
 
+def nrush_check(body, score):
+    """🏁 NEON RUSH natijasi: klient formulasi (nr_game.js GP.finish) bo'yicha yuqori chegara. Mos bo'lsa level (o'rin)."""
+    try:
+        place, cars, fans, hits, wrecks = (int(body.get(k) or 0) for k in ("place", "cars", "fans", "hits", "wrecks"))
+    except (TypeError, ValueError):
+        return None
+    if not (6 <= cars <= 8 and 1 <= place <= cars and 0 <= hits <= 300 and 0 <= wrecks <= 100 and 0 <= fans <= 500 + hits * 220 + 4000):
+        return None
+    cap = round(((cars - place + 1) * 250 + fans + hits * 30) * 1.4)
+    if not 0 <= score <= min(cap, VIP_SCORE_MAX):
+        return None
+    return place
+
+
 def vip_best(game, uid):
     row = db().execute("SELECT best FROM vip_scores WHERE game=? AND user_id=?", (game, uid)).fetchone()
     return row[0] if row else 0
@@ -19506,7 +19521,8 @@ def vip_payload(uid):
             "test": not webapp_flags().get("vip", 0),
             "until": tashkent_dt(until) if until > time.time() else None,
             "best": vip_best("strike", uid), "top": vip_top("strike", 5),
-            "cs_best": vip_best("cstrike", uid), "cs_top": vip_top("cstrike", 5)}
+            "cs_best": vip_best("cstrike", uid), "cs_top": vip_top("cstrike", 5),
+            "nr_best": vip_best("nrush", uid), "nr_top": vip_top("nrush", 5)}
 
 
 def vip_list():
@@ -19552,11 +19568,11 @@ async def web_vip_score(uid, body):
     if game not in VIP_GAMES or not is_vip(uid) or not vip_enabled_for(uid):
         return {"error": "vip"}
     try:
-        score, level = int(body.get("score")), int(body.get("level") or 0 if game == "cstrike" else body.get("level"))
+        score, level = int(body.get("score")), int(body.get("level") or 0 if game in ("cstrike", "nrush") else body.get("level"))
     except (TypeError, ValueError):
         return {"error": "score"}
-    if game == "cstrike":
-        level = cstrike_check(body, score)
+    if game in ("cstrike", "nrush"):
+        level = (cstrike_check if game == "cstrike" else nrush_check)(body, score)
         if level is None:
             return {"error": "score"}
     elif not (0 <= score <= VIP_SCORE_MAX and 1 <= level <= 99) or score > level * 7000:
@@ -20604,11 +20620,20 @@ CS_GAME_FILES = {"cs_core.js": "application/javascript; charset=utf-8", "cs_worl
                  "cs_game.js": "application/javascript; charset=utf-8", "cs_style.css": "text/css; charset=utf-8"}
 
 
-def cs_game_version():
+# 🏁 NEON RUSH (3D arkada poyga, VIP): games/neon_rush/
+NR_GAME_DIR = os.path.join(BASE_DIR, "games", "neon_rush")
+NR_GAME_FILES = {"nr_core.js": "application/javascript; charset=utf-8", "nr_world.js": "application/javascript; charset=utf-8",
+                 "nr_race.js": "application/javascript; charset=utf-8", "nr_game.js": "application/javascript; charset=utf-8",
+                 "nr_style.css": "text/css; charset=utf-8"}
+GAME_DIRS = {"classic_strike": (CS_GAME_DIR, CS_GAME_FILES), "neon_rush": (NR_GAME_DIR, NR_GAME_FILES)}
+
+
+def cs_game_version(game="classic_strike"):
+    folder, files = GAME_DIRS[game]
     h = hashlib.sha1()
-    for n in sorted(CS_GAME_FILES):
+    for n in sorted(files):
         try:
-            with open(os.path.join(CS_GAME_DIR, n), "rb") as f:
+            with open(os.path.join(folder, n), "rb") as f:
                 h.update(f.read())
         except OSError:
             pass
@@ -20994,6 +21019,11 @@ WEBAPP_HTML = r"""<!doctype html>
   .csg .csx{position:absolute;right:14px;top:14px;font-size:30px;opacity:.9}
   .csg .hsub{margin-top:6px;color:#c9d1dc}
   .csg .csp{display:inline-block;margin-top:10px;padding:8px 16px;border-radius:10px;background:linear-gradient(180deg,#f6c25a,#d8901e);color:#1b1305;font-weight:900;letter-spacing:1px}
+  .csg.nrg{background:radial-gradient(120% 140% at 85% 10%,rgba(255,43,214,.35),transparent 55%),radial-gradient(90% 90% at 0% 100%,rgba(34,228,255,.22),transparent 60%),linear-gradient(160deg,#1a0b2e,#05020c 75%);
+    box-shadow:inset 0 0 0 1px rgba(255,43,214,.55),0 10px 24px rgba(0,0,0,.45)}
+  .csg.nrg .cst{font-style:italic;color:#fff;text-shadow:0 0 10px #22e4ff}
+  .csg.nrg .csn{font-style:italic;color:#ff2bd6;text-shadow:0 0 16px rgba(255,43,214,.7)}
+  .csg.nrg .csp{background:linear-gradient(90deg,#ff2bd6,#7a2bff);color:#fff}
   .viplock{text-align:center;padding:26px 16px}
   .viplock .big{font-size:44px}
   /* ───── 📝 Arizalar ───── */
@@ -23214,7 +23244,7 @@ function gamesPage(d){
   const sec=$('<div class="sec" id="s-games"></div>'), v=d.vip||{};
   sec.innerHTML='<h2>🎮 Games</h2><div class="gcat">'+
     '<div class="gcc" data-go="casino" data-tap="1"><div class="gci">'+CASINO_ICON.replace('width="27" height="27"','width="40" height="40"')+'</div><div><b>KAZINO</b><div class="hsub">Royal Crash · Hovuz'+(d.kami?' · Kamikaze':'')+' — hamyon puli bilan</div></div></div>'+
-    (v.open?'<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">Eski telefonlardagi klassik o‘yinlar · STRIKE 2D</div></div>'+
+    (v.open?'<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">CLASSIC STRIKE · NEON RUSH · STRIKE 2D</div></div>'+
       '<span class="glk">'+(v.test?'🧪 TEST':v.vip?'✅ VIP':'🔒 VIP')+'</span></div>':'')+
   '</div><div class="gnote">🎮 Kategoriya tanlang</div>';
   sec.querySelectorAll('.gcc').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
@@ -23224,40 +23254,55 @@ function vipPage(d){
   const sec=$('<div class="sec" id="s-vip"></div>'), v=d.vip||{};
   const top=(v.top||[]).map((t,i)=>'<div class="row"><span>'+(i+1)+'. '+esc(t.name)+'</span><b>'+fmtMoney(t.best)+' · R'+t.level+'</b></div>').join('');
   const cstop=(v.cs_top||[]).map((t,i)=>'<div class="row"><span>'+(i+1)+'. '+esc(t.name)+'</span><b>'+fmtMoney(t.best)+' · '+t.level+' frag</b></div>').join('');
+  const nrtop=(v.nr_top||[]).map((t,i)=>'<div class="row"><span>'+(i+1)+'. '+esc(t.name)+'</span><b>'+fmtMoney(t.best)+' · '+t.level+'-o‘rin</b></div>').join('');
   sec.innerHTML='<div class="gback" data-back="games">‹ Games</div><h2>👑 VIP o‘yinlar</h2>'+
     (v.vip?'<div class="csg" id="vipCS" data-tap="1"><div class="csx">🎯</div><div class="cst">CLASSIC</div><div class="csn">STRIKE</div>'+
         '<div class="hsub">3D taktik shooter: 7 qurol, aqlli botlar, 3 xarita (Desert Base · Urban Strike · Warehouse), TDM · Deathmatch · Bomb Mission · Survival.</div>'+
         '<div class="hsub">🏆 Rekordingiz: <b id="vipCsBest">'+fmtMoney(v.cs_best||0)+'</b></div><span class="csp">▶ O‘YNASH</span></div>'+
+        '<div class="csg nrg" id="vipNR" data-tap="1"><div class="csx">🏁</div><div class="cst">NEON</div><div class="csn">RUSH</div>'+
+        '<div class="hsub">3D jangovar poyga: neon shahar trassalari, 8 ta power-up (raketa, mina, zarba to‘lqini, nitro…), drift, 4 mashina.</div>'+
+        '<div class="hsub">🏆 Rekordingiz: <b id="vipNrBest">'+fmtMoney(v.nr_best||0)+'</b></div><span class="csp">▶ POYGA</span></div>'+
         '<div class="vipg" id="vipStrike" data-tap="1"><canvas width="168" height="120" id="vipPrev"></canvas><div><b>STRIKE 2D</b>'+
         '<div class="hsub">Nokia uslubidagi kontr-terror: terroristlarni yo‘q qiling, har 3-raundda C4 bombani zararsizlantiring. USP · AK · AWP, aptechka va o‘q qutilari.</div>'+
         '<div class="hsub">2/4/6/8 — yurish · 5 — o‘q · * — qurol · 0 — o‘qlash · # — pauza</div>'+
         '<div class="hsub">🏆 Rekordingiz: <b id="vipBest">'+fmtMoney(v.best||0)+'</b></div></div></div>'+
         (v.until?'<div class="hsub" style="margin-top:8px">👑 VIP muddati: '+esc(v.until)+'</div>':(v.owner?'<div class="hsub" style="margin-top:8px">👑 Owner — doimiy VIP</div>':''))+
         '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 CLASSIC STRIKE — TOP</div>'+(cstop||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'+
+        '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 NEON RUSH — TOP</div>'+(nrtop||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'+
         '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 STRIKE 2D — TOP</div>'+(top||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'
       :'<div class="card full viplock"><div class="big">🔒</div><b>Bu bo‘lim faqat VIP foydalanuvchilar uchun</b>'+
         '<div class="hsub" style="margin-top:6px">VIP maqomini bot egalari beradi. Ichida: STRIKE 2D — eski Nokia telefonlaridagi kontr-terror o‘yini uslubida.</div></div>');
-  const cs=sec.querySelector('#vipCS');
-  if(cs) cs.onclick=()=>{ if(cs.dataset.busy) return; cs.dataset.busy='1'; SND.music&&SND.music(null);
-    const lb=cs.querySelector('.csp'); lb.textContent='⏳ Yuklanmoqda…';
-    CSTRIKE.open(d).catch(()=>toast('⚠️ O‘yin yuklanmadi — internetni tekshiring')).finally(()=>{ delete cs.dataset.busy; lb.textContent='▶ O‘YNASH'; }); };
+  [['#vipCS',CSTRIKE,'▶ O‘YNASH'],['#vipNR',NRUSH,'▶ POYGA']].forEach(([sel,G,lab])=>{ const cs=sec.querySelector(sel); if(!cs) return;
+    cs.onclick=()=>{ if(cs.dataset.busy) return; cs.dataset.busy='1'; SND.music&&SND.music(null);
+      const lb=cs.querySelector('.csp'); lb.textContent='⏳ Yuklanmoqda…';
+      G.open(d).catch(()=>toast('⚠️ O‘yin yuklanmadi — internetni tekshiring')).finally(()=>{ delete cs.dataset.busy; lb.textContent=lab; }); }; });
   const card=sec.querySelector('#vipStrike');
   if(card){ try{ STRIKE.preview(sec.querySelector('#vipPrev')); }catch(e){}
     card.onclick=()=>{ SND.music&&SND.music(null); STRIKE.open({best:v.best||0, onOver:s=>{
       api('/app/api/vip/score',{game:'strike',score:s.score,level:s.level}).then(r=>{ if(r.vip){ d.vip=r.vip; const b=document.getElementById('vipBest'); if(b) b.textContent=fmtMoney(r.vip.best); } }).catch(()=>{}); }}); }; }
   return sec;
 }
-// ---- 🎯 CLASSIC STRIKE (3D, alohida katalog: /app/games/classic_strike/, o'z CSS'i — .cs3d) ----
-const CSTRIKE=(()=>{ const BASE='/app/games/classic_strike/', V='?v=__CS_VER__', FILES=['cs_core.js','cs_world.js','cs_combat.js','cs_ui.js','cs_game.js'];
-  let ld=null;
+// ---- 🎮 VIP 3D o'yinlar yuklovchisi (alohida katalog /app/games/<o'yin>/, o'z CSS'i; three r128 — KID3D.load) ----
+function game3d(dir, ver, files, css, glob){
+  const BASE='/app/games/'+dir+'/', V='?v='+ver; let ld=null;
   const js=f=>new Promise((ok,bad)=>{ const s=document.createElement('script'); s.src=BASE+f+V; s.onload=ok; s.onerror=()=>{ s.remove(); bad(new Error(f)); }; document.head.appendChild(s); });
-  const css=()=>new Promise(ok=>{ if(document.getElementById('csCss')) return ok(); const l=document.createElement('link'); l.id='csCss'; l.rel='stylesheet'; l.href=BASE+'cs_style.css'+V; l.onload=ok; l.onerror=ok; document.head.appendChild(l); });
-  function load(){ if(window.CS3D&&window.CS3D.launch) return Promise.resolve(); if(ld) return ld;
-    ld=KID3D.load().then(css).then(()=>FILES.reduce((p,f)=>p.then(()=>js(f)),Promise.resolve())).catch(e=>{ ld=null; throw e; });
-    return ld; }
-  function open(d){ return load().then(()=>{ window.CS3D.launch({
-    onResult:r=>{ api('/app/api/vip/score',{game:'cstrike',score:r.score,kills:r.kills,heads:r.heads,wave:r.wave||0,rounds:r.roundsW||0,win:!!r.win,mode:r.mode})
-      .then(x=>{ if(x.vip){ d.vip=x.vip; const b=document.getElementById('vipCsBest'); if(b) b.textContent=fmtMoney(x.vip.cs_best); } }).catch(()=>{}); },
+  const sheet=()=>new Promise(ok=>{ const id='css_'+dir; if(document.getElementById(id)) return ok(); const l=document.createElement('link'); l.id=id; l.rel='stylesheet'; l.href=BASE+css+V; l.onload=ok; l.onerror=ok; document.head.appendChild(l); });
+  return function load(){ if(window[glob]&&window[glob].launch) return Promise.resolve(window[glob]); if(ld) return ld;
+    ld=KID3D.load().then(sheet).then(()=>files.reduce((p,f)=>p.then(()=>js(f)),Promise.resolve())).then(()=>window[glob]).catch(e=>{ ld=null; throw e; });
+    return ld; };
+}
+const vipSaved=(d,key,id)=>x=>{ if(x.vip){ d.vip=x.vip; const b=document.getElementById(id); if(b) b.textContent=fmtMoney(x.vip[key]); } };
+// 🎯 CLASSIC STRIKE (3D FPS)
+const CSTRIKE=(()=>{ const load=game3d('classic_strike','__CS_VER__',['cs_core.js','cs_world.js','cs_combat.js','cs_ui.js','cs_game.js'],'cs_style.css','CS3D');
+  function open(d){ return load().then(G=>{ G.launch({
+    onResult:r=>{ api('/app/api/vip/score',{game:'cstrike',score:r.score,kills:r.kills,heads:r.heads,wave:r.wave||0,rounds:r.roundsW||0,win:!!r.win,mode:r.mode}).then(vipSaved(d,'cs_best','vipCsBest')).catch(()=>{}); },
+    onExit:()=>{} }); }); }
+  return {open, load};
+})();
+// 🏁 NEON RUSH (3D arkada jangovar poyga)
+const NRUSH=(()=>{ const load=game3d('neon_rush','__NR_VER__',['nr_core.js','nr_world.js','nr_race.js','nr_game.js'],'nr_style.css','NR3D');
+  function open(d){ return load().then(G=>{ G.launch({ playerName:(d.name||'Siz').slice(0,14),
+    onResult:r=>{ api('/app/api/vip/score',{game:'nrush',score:r.score,place:r.place,cars:r.cars,fans:r.fans,hits:r.hits,wrecks:r.wrecks,track:r.track}).then(vipSaved(d,'nr_best','vipNrBest')).catch(()=>{}); },
     onExit:()=>{} }); }); }
   return {open, load};
 })();
@@ -23971,7 +24016,7 @@ boot();
 </script>
 </body>
 </html>"""
-WEBAPP_HTML = WEBAPP_HTML.replace("__CS_VER__", cs_game_version())
+WEBAPP_HTML = WEBAPP_HTML.replace("__CS_VER__", cs_game_version()).replace("__NR_VER__", cs_game_version("neon_rush"))
 
 
 def main():

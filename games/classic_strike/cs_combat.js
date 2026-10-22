@@ -182,6 +182,11 @@
     MAT.CT = new THREE.MeshLambertMaterial({ color: 0x31476e }); MAT.CTl = new THREE.MeshLambertMaterial({ color: 0x1f2b40 }); MAT.CTa = new THREE.MeshLambertMaterial({ color: 0x2b2f36 });
     MAT.skin = new THREE.MeshLambertMaterial({ color: 0xc69872 }); MAT.gun = new THREE.MeshLambertMaterial({ color: 0x1d1f22 });
     MAT.ally = new THREE.MeshBasicMaterial({ color: 0x48ff7a }); MAT.hit = new THREE.MeshLambertMaterial({ color: 0xff5555, emissive: 0x661111 });
+    // Qo'shimcha detallar: jilet, etik, oyoq ostidagi soya
+    GEO.vest = new THREE.BoxGeometry(0.5, 0.4, 0.32); GEO.boot = new THREE.BoxGeometry(0.19, 0.14, 0.3); GEO.pack = new THREE.BoxGeometry(0.3, 0.34, 0.12);
+    GEO.shadow = new THREE.PlaneGeometry(1.0, 1.0); GEO.shadow.rotateX(-Math.PI / 2);
+    MAT.Tv = new THREE.MeshLambertMaterial({ color: 0x5a5236 }); MAT.CTv = new THREE.MeshLambertMaterial({ color: 0x1c232e }); MAT.boot = new THREE.MeshLambertMaterial({ color: 0x18181a });
+    MAT.shadow = new THREE.MeshBasicMaterial({ map: CS3D.Tex.gradTex([[0, 'rgba(0,0,0,.55)'], [1, 'rgba(0,0,0,0)']], 64, 64, true), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3 });
   }
   function botMesh(team, ally) {
     botAssets();
@@ -195,6 +200,10 @@
     const armL = new THREE.Mesh(GEO.arm, tm), armR = new THREE.Mesh(GEO.arm, tm);
     armL.position.set(-0.3, 1.2, -0.12); armR.position.set(0.3, 1.2, -0.12); armL.rotation.x = armR.rotation.x = -1.1; body.add(armL, armR);
     const gun = new THREE.Mesh(GEO.gun, MAT.gun); gun.position.set(0.12, 1.22, -0.42); body.add(gun);
+    const vest = new THREE.Mesh(GEO.vest, MAT[team + 'v']); vest.position.y = 1.24; body.add(vest);
+    const pack = new THREE.Mesh(GEO.pack, MAT[team + 'v']); pack.position.set(0, 1.22, 0.2); body.add(pack);
+    for (const lg of [legL, legR]) { const b = new THREE.Mesh(GEO.boot, MAT.boot); b.position.set(0, -0.36, -0.04); lg.add(b); }
+    const shadow = new THREE.Mesh(GEO.shadow, MAT.shadow); shadow.position.y = 0.02; g.add(shadow);
     let mark = null; if (ally) { mark = new THREE.Mesh(GEO.mark, MAT.ally); mark.position.y = 2.25; mark.rotation.x = Math.PI; g.add(mark); }
     g.userData = { body, legL, legR, torso, head, mark };
     for (const m of [torso, head, hat, legL, legR, armL, armR, gun]) m.castShadow = true;
@@ -414,7 +423,7 @@
 
   function disposeShared() {
     for (const k of Object.keys(GEO)) { GEO[k].dispose(); delete GEO[k]; }
-    for (const k of Object.keys(MAT)) { MAT[k].dispose(); delete MAT[k]; }
+    for (const k of Object.keys(MAT)) { if (MAT[k].map) MAT[k].map.dispose(); MAT[k].dispose(); delete MAT[k]; }
   }
 
   CS3D.WeaponSystem = { WEAPONS, fire, rayEntity, Effects, vmBuild, vmDispose, HEAD };

@@ -322,3 +322,18 @@
   (three r128 `KID3D.load` + CSS + 5 skript, `?v=` = `cs_game_version()` xeshi, `__CS_VER__`). VIP sahifada `#vipCS` karta (STRIKE 2D
   ham qoldi). Natija `vip/score` game=`cstrike` (`cstrike_check`: kills/heads/wave/rounds/win bo'yicha yuqori chegara), payload
   `vip.cs_best`/`cs_top`.
+- 🏁 NEON RUSH (3D arkada jangovar poyga, Blur uslubidagi ORIGINAL o'yin; VIP → owners-only test): `games/neon_rush/` — `nr_core.js`
+  (`NR3D.U`, `NR3D.Save` localStorage `neon_rush_v1`, `NR3D.Audio` sintez: dvigatel, power-up effektlari, synthwave), `nr_world.js`
+  (`NR3D.World.Track`: 3 trassa Neon Harbor / Sunset Canyon / Downtown Rush — yopiq CatmullRom spline, `at(d,lat)`, `locate(x,z,hint)`
+  (iterativ, xato < 5 sm), `curvAhead`, `pads` (power-up joylari); yo'l/to'siq/neon lenta, instanced binolar/qoyalar, Points chiroqlar),
+  `nr_race.js` (`CARS` viper/hornet/bulldog/phantom — `mergeBoxes` bilan ~3 draw call/mashina, arkada fizika + drift, ikki doirali
+  to'qnashuv, `aiInput` (poyga chizig'i, egrilik bo'yicha tezlik, rubber-band, `aiUse`), `PU` 8 ta: seeker/volt/blast/mine/shield/
+  nitro/repair/storm, teskari yo'nalish/tiqilishda `reset()`), `nr_game.js` (Engine avtomatik sifat, Input tugmalar/giroskop/klaviatura,
+  UI menyu/HUD/minikarta/natija, `NR3D.launch({playerName,onResult,onExit})`), `nr_style.css` (`.nr3d`). Server: umumiy `GAME_DIRS`
+  (`/app/games/<o'yin>/<fayl>`, `_game_file(game,name)`), `cs_game_version(game)`, `__NR_VER__`. Web: `game3d(...)` yuklovchi,
+  `NRUSH`, VIP'da `#vipNR` karta + TOP. Natija `vip/score` game=`nrush` (`nrush_check`: place/cars/fans/hits bo'yicha chegara), payload
+  `vip.nr_best`/`nr_top` (level = o'rin).
+- 🎯 CLASSIC STRIKE grafikasi yangilandi: 256px protsedura teksturalar (`canvasTex(base, kind)` brick/block/tile/concrete/crate/cont/metal),
+  `boxM` — UV metr bo'yicha (cho'zilmaydi), gradient osmon + quyosh, tuman = ufq rangi, devor tagida AO lentalari (instanced), devor
+  qirralari, arena tashqarisida siluetlar, ombor tomi/chiroqlari, mashina kabinasi/g'ildiraklari, botlarda jilet/ryukzak/etik + oyoq
+  soyasi. Engine: zaif qurilmada (`deviceMemory<=3` yoki `hardwareConcurrency<=4`) auto → low; medium/high'da antialias.

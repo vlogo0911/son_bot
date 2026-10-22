@@ -18186,6 +18186,11 @@ def init_webapp():
         # 👑 VIP foydalanuvchilar (ownerlar beradi) va VIP o'yin rekordlari
         c.execute("""CREATE TABLE IF NOT EXISTS vip_users (user_id INTEGER PRIMARY KEY, until INTEGER NOT NULL,
             granted_by INTEGER, created_at INTEGER NOT NULL)""")
+        # 🎰 Qimor statistikasi (web Crash / Hovuz / Kamikaze) — TOP "Qimorvozlar" uchun
+        c.execute("""CREATE TABLE IF NOT EXISTS gamble_stats (user_id INTEGER NOT NULL, game TEXT NOT NULL,
+            plays INTEGER NOT NULL DEFAULT 0, wagered INTEGER NOT NULL DEFAULT 0, won INTEGER NOT NULL DEFAULT 0,
+            best_win INTEGER NOT NULL DEFAULT 0, best_mult REAL NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+            PRIMARY KEY(user_id, game))""")
         # 🧪 Web testerlar (ownerlar qo'shadi) — test rejimidagi bo'limlar ularga ham ochiq
         c.execute("""CREATE TABLE IF NOT EXISTS web_testers (user_id INTEGER PRIMARY KEY, added_by INTEGER,
             created_at INTEGER NOT NULL)""")
@@ -19979,6 +19984,7 @@ async def webapp_payload(user_id):
         "vip": vip_payload(user_id),
         "vip_list": vip_list() if is_owner else None,
         "testers": tester_list() if is_owner else None,
+        "tops": tops_payload(user_id),
         "is_tester": is_tester(user_id),
         "news_unread": news_unread(user_id),
         "owner_flags": owner_flags_payload() if is_owner else None,
@@ -19999,6 +20005,100 @@ async def webapp_payload(user_id):
             "in_games": fmt_money(money_in_games()),
         }
     return data
+
+
+# ── 🏆 TOP reytinglari (web app → TOP): kategoriyalar bo'yicha ──
+TOP_LIMIT = 15
+TOP_CACHE_TTL = 60
+_TOP_CACHE = {"t": 0.0, "data": None}
+GAMBLE_GAMES = ("crash", "frog", "kami")
+
+
+def gamble_note(uid, game, bet=0, win=0, mult=0.0):
+    """Web qimor o'yinlari statistikasi: bet>0 — yangi tikish, bet<0 — qaytarilgan tikish, win — to'langan yutuq."""
+    plays = 1 if bet > 0 else -1 if bet < 0 else 0
+    try:
+        with db() as c:
+            c.execute(
+                "INSERT INTO gamble_stats(user_id, game, plays, wagered, won, best_win, best_mult, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id, game) DO UPDATE SET "
+                "plays=MAX(0, plays+?), wagered=MAX(0, wagered+?), won=won+excluded.won, "
+                "best_win=MAX(best_win, excluded.best_win), best_mult=MAX(best_mult, excluded.best_mult), "
+                "updated_at=excluded.updated_at",
+                (uid, game, max(0, plays), max(0, bet), int(win), int(win), float(mult), int(time.time()), plays, int(bet)))
+    except sqlite3.Error:
+        logger.exception("gamble_note xatosi")
+
+
+def _top_sources():
+    """(kalit, SQL) — har SQL (user_id, val, a, b) qaytaradi. Owner'lar boylik/kredit/qimor reytingiga kirmaydi."""
+    owners = tuple(CAREER_OWNER_IDS) or (0,)
+    no_own = f"NOT IN ({','.join(str(int(o)) for o in owners)})"
+    src = {
+        "rich": f"SELECT user_id, money, 0, 0 FROM user_wallet WHERE money > 0 AND user_id {no_own}",
+        "loan_max": f"SELECT user_id, MAX(amount), COUNT(*), SUM(amount) FROM bank_loans WHERE user_id {no_own} GROUP BY user_id",
+        "loan_sum": f"SELECT user_id, SUM(amount), COUNT(*), MAX(amount) FROM bank_loans WHERE user_id {no_own} GROUP BY user_id",
+        "gamble_all": f"SELECT user_id, SUM(wagered), SUM(plays), MAX(best_win) FROM gamble_stats WHERE user_id {no_own} "
+                      "GROUP BY user_id HAVING SUM(plays) > 0",
+        "divorced": "SELECT u, COUNT(*), 0, 0 FROM (SELECT user1_id AS u FROM pairs WHERE status='ended' "
+                    "UNION ALL SELECT user2_id FROM pairs WHERE status='ended') GROUP BY u",
+        "kids": "SELECT u, COUNT(*), SUM(working), 0 FROM (SELECT parent1_id AS u, id, working FROM family_children "
+                "UNION SELECT parent2_id, id, working FROM family_children) WHERE u > 0 GROUP BY u",
+        "gifts_sent": "SELECT sender_id, SUM(price), COUNT(*), 0 FROM gift_log GROUP BY sender_id",
+        "gifts_held": "SELECT recipient_id, SUM(price), COUNT(*), 0 FROM gift_log GROUP BY recipient_id",
+    }
+    for g in GAMBLE_GAMES:
+        src["gamble_" + g] = (f"SELECT user_id, wagered, plays, best_win FROM gamble_stats WHERE game='{g}' "
+                              f"AND plays > 0 AND user_id {no_own}")
+    return src
+
+
+def _top_lists():
+    now = time.time()
+    if _TOP_CACHE["data"] is not None and now - _TOP_CACHE["t"] < TOP_CACHE_TTL:
+        return _TOP_CACHE["data"]
+    c = db()
+    out = {}
+    for key, sql in _top_sources().items():
+        rows = c.execute(f"SELECT * FROM ({sql}) ORDER BY 2 DESC, 1 LIMIT ?", (TOP_LIMIT,)).fetchall()
+        out[key] = [{"uid": r[0], "n": _plain_person(r[0]), "v": int(r[1] or 0), "a": int(r[2] or 0), "b": int(r[3] or 0)}
+                    for r in rows if (r[1] or 0) > 0]
+    pairs = c.execute(
+        "SELECT p.id, p.user1_id, p.user2_id, CAST(julianday('now') - julianday(p.started_at) AS INTEGER), "
+        "(SELECT COUNT(*) FROM family_children k WHERE k.pair_id = p.id) FROM pairs p WHERE p.status='active' "
+        "ORDER BY 4 DESC, p.id LIMIT ?", (TOP_LIMIT,)).fetchall()
+    out["pairs"] = [{"uid": (a, b), "n": _plain_person(a) + " ❤ " + _plain_person(b), "v": max(0, int(d or 0)),
+                     "a": int(k or 0), "b": 0} for _, a, b, d, k in pairs]
+    _TOP_CACHE.update(t=now, data=out)
+    return out
+
+
+def tops_payload(uid):
+    """TOP bo'limi: har kategoriya — ro'yxat (ism, qiymat, qo'shimcha) + foydalanuvchining o'z o'rni."""
+    c = db()
+    lists = _top_lists()
+    res = {}
+    for key, sql in _top_sources().items():
+        rows = lists.get(key, [])
+        me = None
+        own = c.execute(f"WITH t(user_id, val, a, b) AS ({sql}) SELECT val, a, b FROM t WHERE user_id=?", (uid,)).fetchone()
+        if own and (own[0] or 0) > 0:
+            rank = c.execute(f"WITH t(user_id, val, a, b) AS ({sql}) SELECT COUNT(*) + 1 FROM t WHERE val > ?",
+                             (own[0],)).fetchone()[0]
+            me = {"rank": rank, "v": int(own[0]), "a": int(own[1] or 0), "b": int(own[2] or 0)}
+        res[key] = {"rows": [{"n": r["n"], "v": r["v"], "a": r["a"], "b": r["b"], "me": r["uid"] == uid} for r in rows],
+                    "me": me}
+    prow = c.execute("SELECT id, CAST(julianday('now') - julianday(started_at) AS INTEGER) FROM pairs "
+                     "WHERE status='active' AND (user1_id=? OR user2_id=?)", (uid, uid)).fetchone()
+    pme = None
+    if prow:
+        rank = c.execute("SELECT COUNT(*) + 1 FROM pairs WHERE status='active' AND "
+                         "CAST(julianday('now') - julianday(started_at) AS INTEGER) > ?", (prow[1] or 0,)).fetchone()[0]
+        pme = {"rank": rank, "v": max(0, int(prow[1] or 0)), "a": c.execute(
+            "SELECT COUNT(*) FROM family_children WHERE pair_id=?", (prow[0],)).fetchone()[0], "b": 0}
+    res["pairs"] = {"rows": [{"n": r["n"], "v": r["v"], "a": r["a"], "b": 0, "me": uid in r["uid"]} for r in lists["pairs"]],
+                    "me": pme}
+    return res
 
 
 async def webapp_fetch(user_id):
@@ -20084,6 +20184,7 @@ def web_crash_refund_open():
         for uid, b in list(bets.items()):
             if b["cash"] is None:
                 wallet_change(uid, b["bet"])
+                gamble_note(uid, "crash", bet=-b["bet"])
         bets.clear()
 
 
@@ -20135,6 +20236,7 @@ async def web_crash_bet(uid, bet):
         if not _wallet_take(c, uid, bet):
             return {"error": "funds", "balance": wallet_balance(uid)}
     target[uid] = {"name": _web_player_name(uid), "bet": bet, "cash": None, "win": 0}
+    gamble_note(uid, "crash", bet=bet)
     return {"result": "placed" if target is WEB_ROUND["bets"] else "queued", "bet": bet,
             "balance": wallet_balance(uid)}
 
@@ -20146,6 +20248,7 @@ async def web_crash_cancel(uid):
         if b and ok and b["cash"] is None:
             target.pop(uid)
             wallet_change(uid, b["bet"])
+            gamble_note(uid, "crash", bet=-b["bet"])
             return {"result": "cancelled", "balance": wallet_balance(uid)}
     return {"error": "no_game"}
 
@@ -20164,6 +20267,7 @@ async def web_crash_cashout(uid, _ignored=None):
     win = int(b["bet"] * mult)
     b.update(cash=mult, win=win)
     wallet_change(uid, win)
+    gamble_note(uid, "crash", win=win, mult=mult)
     return {"result": "win", "multiplier": mult, "win": win, "balance": wallet_balance(uid)}
 
 
@@ -20219,6 +20323,7 @@ async def web_frog_start(uid, bet, mode):
         if not _wallet_take(c, uid, bet):
             return {"error": "funds", "balance": wallet_balance(uid)}
     WEB_FROG[uid] = {"bet": bet, "mode": mode, "traps": _web_frog_traps(mode), "step": 0, "done": False}
+    gamble_note(uid, "frog", bet=bet)
     return {"started": True, "rows": FROG_ROWS, "cols": FROG_COLS, "mode": mode, "bet": bet,
             "next_mult": frog_mult(mode, 1), "balance": wallet_balance(uid)}
 
@@ -20246,6 +20351,7 @@ async def web_frog_step(uid, col):
         WEB_FROG.pop(uid, None)
         win = int(g["bet"] * mult)
         wallet_change(uid, win)
+        gamble_note(uid, "frog", win=win, mult=mult)
         return {"result": "win_full", "row": r, "col": col, "multiplier": mult,
                 "win": win, "balance": wallet_balance(uid)}
     return {"result": "safe", "row": r, "col": col, "step": g["step"], "multiplier": mult,
@@ -20263,6 +20369,7 @@ async def web_frog_cashout(uid):
     mult = frog_mult(g["mode"], g["step"])
     win = int(g["bet"] * mult)
     wallet_change(uid, win)
+    gamble_note(uid, "frog", win=win, mult=mult)
     return {"result": "cashed", "multiplier": mult, "win": win, "balance": wallet_balance(uid)}
 
 
@@ -20331,6 +20438,7 @@ async def web_kami_start(uid, bet):
             return {"error": "funds", "balance": wallet_balance(uid)}
     shots = [_KAMI_RNG.randrange(KAMI_ROWS) for _ in range(KAMI_COLS)]
     WEB_KAMI[uid] = {"bet": bet, "shots": shots, "step": 0, "picks": []}
+    gamble_note(uid, "kami", bet=bet)
     return {"started": True, "cols": KAMI_COLS, "rows": KAMI_ROWS, "bet": bet,
             "ladder": [kami_mult(i) for i in range(1, KAMI_COLS + 1)], "balance": wallet_balance(uid)}
 
@@ -20357,6 +20465,7 @@ async def web_kami_step(uid, row):
         WEB_KAMI.pop(uid, None)
         win = kami_win(g["bet"], g["step"])
         wallet_change(uid, win)
+        gamble_note(uid, "kami", win=win, mult=mult)
         return {"result": "win_full", "col": col, "row": row, "shot": shot, "multiplier": mult,
                 "win": win, "balance": wallet_balance(uid)}
     return {"result": "safe", "col": col, "row": row, "shot": shot, "step": g["step"], "multiplier": mult,
@@ -20373,13 +20482,20 @@ async def web_kami_cashout(uid):
     mult = kami_mult(g["step"])
     win = kami_win(g["bet"], g["step"])
     wallet_change(uid, win)
+    gamble_note(uid, "kami", win=win, mult=mult)
     return {"result": "cashed", "multiplier": mult, "win": win, "balance": wallet_balance(uid)}
 
 
 def web_kami_settle_open():
     """Restartda: o'rtadagi o'yinlar — o'tilgan qadamlar bo'yicha yutuq, qadam yo'q bo'lsa tikish qaytadi."""
     for uid, g in list(WEB_KAMI.items()):
-        wallet_change(uid, kami_win(g["bet"], g["step"]) if g["step"] else g["bet"])
+        if g["step"]:
+            win = kami_win(g["bet"], g["step"])
+            wallet_change(uid, win)
+            gamble_note(uid, "kami", win=win, mult=kami_mult(g["step"]))
+        else:
+            wallet_change(uid, g["bet"])
+            gamble_note(uid, "kami", bet=-g["bet"])
     WEB_KAMI.clear()
 
 
@@ -21554,6 +21670,49 @@ WEBAPP_HTML = r"""<!doctype html>
   .spark{position:fixed;width:6px;height:6px;border-radius:50%;pointer-events:none;z-index:200;
     background:radial-gradient(circle,#fff8d6,#ffd24a 50%,rgba(255,180,30,0) 70%);animation:spark .6s ease-out forwards}
   @keyframes spark{to{transform:translate(var(--dx),var(--dy)) scale(.2);opacity:0}}
+  /* ───── 🏆 TOP kategoriyalari ───── */
+  #s-reyting .tcat{display:flex;gap:8px;overflow-x:auto;margin:0 -2px 10px;padding:2px 2px 6px;scrollbar-width:none}
+  #s-reyting .tcat::-webkit-scrollbar{display:none}
+  #s-reyting .tcat span{flex:none;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:74px;padding:9px 10px 8px;border-radius:14px;
+    cursor:pointer;background:var(--card);box-shadow:inset 0 0 0 1px var(--line);font-size:11px;font-weight:800;color:var(--dim);letter-spacing:.2px}
+  #s-reyting .tcat span i{font-style:normal;font-size:22px;line-height:1.1}
+  #s-reyting .tcat span.on{color:#2b1b02;background:var(--g-metal);box-shadow:0 6px 16px rgba(0,0,0,.45),0 0 14px rgba(255,210,74,.35)}
+  #s-reyting .tsub{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 12px}
+  #s-reyting .tsub span{padding:6px 12px;border-radius:999px;font-size:12px;font-weight:800;cursor:pointer;color:var(--dim);box-shadow:inset 0 0 0 1px var(--line)}
+  #s-reyting .tsub span.on{color:var(--txt);background:rgba(255,210,74,.16);box-shadow:inset 0 0 0 1px var(--gold2)}
+  #s-reyting .thead{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;margin:2px 2px 12px}
+  #s-reyting .thead b{font:900 17px/1.15 "Cinzel",Georgia,serif;background:var(--g-text);-webkit-background-clip:text;background-clip:text;color:transparent}
+  #s-reyting .thead small{display:block;color:var(--dim);font-size:12px;margin-top:3px}
+  .tpod{display:grid;grid-template-columns:1fr 1.18fr 1fr;align-items:end;gap:8px;margin:6px 0 14px}
+  .tpod .pc{position:relative;display:flex;flex-direction:column;align-items:center;text-align:center;min-width:0;padding:12px 6px 10px;border-radius:16px 16px 12px 12px;
+    background:linear-gradient(180deg,rgba(255,210,74,.10),rgba(255,210,74,.02));box-shadow:inset 0 0 0 1px var(--line)}
+  .tpod .pc.p1{padding-top:18px;background:linear-gradient(180deg,rgba(255,210,74,.24),rgba(255,210,74,.04));box-shadow:inset 0 0 0 1px var(--gold2),0 10px 26px rgba(0,0,0,.45)}
+  .tpod .pc.me{box-shadow:inset 0 0 0 2px var(--cyan)}
+  .tpod .crown{position:absolute;top:-16px;font-size:22px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.6));animation:tcrown 2.4s ease-in-out infinite}
+  @keyframes tcrown{50%{transform:translateY(-3px) rotate(-6deg)}}
+  .tpod .av{width:48px;height:48px;border-radius:50%;display:grid;place-items:center;font:900 20px "Cinzel",Georgia,serif;color:#2b1b02;margin-bottom:6px}
+  .tpod .p1 .av{width:60px;height:60px;font-size:24px;background:var(--g-metal);box-shadow:0 0 18px rgba(255,210,74,.55)}
+  .tpod .p2 .av{background:linear-gradient(135deg,#8d969f,#f1f4f7,#9aa3ab)}
+  .tpod .p3 .av{background:linear-gradient(135deg,#8a4d1c,#f0b07a,#9a5a26)}
+  .tpod .nm{font-weight:800;font-size:13px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tpod .vl{font-weight:900;font-size:14px;margin-top:3px;background:var(--g-text);-webkit-background-clip:text;background-clip:text;color:transparent;white-space:nowrap}
+  .tpod .ex{font-size:11px;color:var(--dim);margin-top:2px}
+  .tpod .st{margin-top:8px;width:100%;border-radius:8px;font:900 15px "Cinzel",Georgia,serif;color:#2b1b02;padding:4px 0}
+  .tpod .p1 .st{background:var(--g-metal);padding:10px 0}
+  .tpod .p2 .st{background:linear-gradient(135deg,#8d969f,#f1f4f7,#9aa3ab);padding:6px 0}
+  .tpod .p3 .st{background:linear-gradient(135deg,#8a4d1c,#f0b07a,#9a5a26)}
+  .tlist .trw{display:grid;grid-template-columns:30px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid var(--line)}
+  .tlist .trw:last-child{border-bottom:0}
+  .tlist .trw.me{background:rgba(255,215,122,.08);border-radius:10px}
+  .tlist .trw .n{min-width:0}
+  .tlist .trw .n b{display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tlist .trw .n small{color:var(--dim);font-size:11px}
+  .tlist .trw .v{font-weight:900;font-size:14px;color:var(--gold);white-space:nowrap;font-variant-numeric:tabular-nums}
+  .tme{display:flex;align-items:center;gap:12px;margin-top:12px;padding:12px 14px;border-radius:14px;background:linear-gradient(90deg,rgba(255,210,74,.16),rgba(255,210,74,.04));
+    box-shadow:inset 0 0 0 1px var(--gold2)}
+  .tme .r{font:900 20px "Cinzel",Georgia,serif;background:var(--g-text);-webkit-background-clip:text;background-clip:text;color:transparent;min-width:44px}
+  .tme small{display:block;color:var(--dim);font-size:11px}
+  .tnote{color:var(--dim);font-size:12px;margin-top:10px;text-align:center}
 </style>
 </head>
 <body>
@@ -21634,19 +21793,10 @@ function render(res){
   }
   app.appendChild(p);
 
-  // REYTING
+  // REYTING — kategoriyalar bo'yicha TOP
   const r=$('<div class="sec" id="s-reyting"></div>');
-  r.appendChild($('<h2>💎 Eng boylar TOP</h2>'));
-  const list=$('<div class="card full"></div>');
-  (d.top||[]).forEach((t,i)=>{
-    const g=i===0?'g1':i===1?'g2':i===2?'g3':'';
-    list.appendChild($('<div class="row '+(t.me?'me':'')+'">'+
-      '<div style="display:flex;align-items:center;gap:10px"><span class="rk '+g+'">'+(i+1)+'</span>'+
-      '<span>'+esc(t.name)+(t.me?' <span style="color:var(--cyan)">(siz)</span>':'')+'</span></div>'+
-      '<b class="val neon" style="font-size:15px">'+esc(t.money_fmt)+'$</b></div>'));
-  });
-  if(!(d.top||[]).length) list.appendChild($('<div class="center">Hali ma’lumot yo‘q</div>'));
-  r.appendChild(list);
+  r.appendChild($('<h2>🏆 Rekordchilar</h2>'));
+  topsRender(r,d);
   app.appendChild(r);
 
   // BANK
@@ -23505,6 +23655,51 @@ function testerAdmin(d){
     app_q(box,'#tsA').onclick=()=>{ const q=app_q(box,'#tsQ').value.trim(); if(!q){ toast('🔎 ID yoki @username kiriting'); return; } send('add',q); };
     box.querySelectorAll('[data-rm]').forEach(x=>x.onclick=()=>send('remove',x.dataset.rm)); };
   draw(d.testers||[]); return box;
+}
+// ---- 🏆 TOP: kategoriyalar (boylar, kredit, qimor, juftliklar, ajrashganlar, farzandlar, sovg'alar) ----
+const TOPC=[
+  {k:'rich',i:'💎',t:'Boylar',h:'Eng boy o‘yinchilar',sub:[['rich','Hamyon']],val:v=>fmtMoney(v)+'$',ex:()=>''},
+  {k:'loan',i:'🏦',t:'Kreditchilar',h:'Eng katta kredit olganlar',sub:[['loan_max','Eng katta kredit'],['loan_sum','Jami kreditlar']],
+    val:v=>fmtMoney(v)+'$',ex:(x,s)=>x.a+' ta kredit'+(s==='loan_max'?' · jami '+fmtMoney(x.b)+'$':' · eng kattasi '+fmtMoney(x.b)+'$')},
+  {k:'gamble',i:'🎰',t:'Qimorvozlar',h:'Eng ko‘p tikkanlar',sub:[['gamble_all','Hammasi'],['gamble_crash','🚀 Crash'],['gamble_frog','🌊 Hovuz'],['gamble_kami','🛩 Kamikaze']],
+    val:v=>fmtMoney(v)+'$',ex:x=>x.a+' o‘yin · eng katta yutuq '+fmtMoney(x.b)+'$',note:'Qimor statistikasi web app o‘yinlaridan (Crash, Hovuz, Kamikaze) yig‘iladi.'},
+  {k:'pairs',i:'💞',t:'Juftliklar',h:'Eng uzoq birga yashayotganlar',sub:[['pairs','Birga']],val:v=>v+' kun',ex:x=>x.a?'👶 '+x.a+' farzand':'',pair:true},
+  {k:'divorced',i:'💔',t:'Ajrashganlar',h:'Eng ko‘p ajrashganlar',sub:[['divorced','Ajrashish']],val:v=>v+' marta',ex:()=>''},
+  {k:'kids',i:'👶',t:'Farzandlilar',h:'Eng ko‘p farzandli ota-onalar',sub:[['kids','Farzandlar']],val:v=>v+' ta',ex:x=>x.a?'💼 '+x.a+' tasi ishlaydi':''},
+  {k:'gifts',i:'🎁',t:'Sovg‘alar',h:'Sovg‘alar reytingi',sub:[['gifts_sent','Yuborganlar'],['gifts_held','Hisobida borlar']],
+    val:v=>fmtMoney(v)+'$',ex:x=>x.a+' ta sovg‘a'},
+];
+function topsRender(sec,d){
+  const T=d.tops||{}; let cat=window.TOPK||'rich', sub=window.TOPS||null;
+  const head=$('<div class="tcat">'+TOPC.map(c=>'<span data-k="'+c.k+'"><i>'+c.i+'</i>'+c.t+'</span>').join('')+'</div>');
+  const body=$('<div></div>'); sec.appendChild(head); sec.appendChild(body);
+  const ini=n=>esc((String(n||'?').trim()[0]||'?').toUpperCase());
+  const draw=()=>{
+    const C=TOPC.find(c=>c.k===cat)||TOPC[0]; if(!C.sub.some(x=>x[0]===sub)) sub=C.sub[0][0];
+    window.TOPK=cat; window.TOPS=sub;
+    head.querySelectorAll('span').forEach(x=>x.classList.toggle('on',x.dataset.k===cat));
+    const D=T[sub]||{rows:[],me:null}, rows=D.rows||[];
+    let h='<div class="thead"><div><b>'+C.i+' '+esc(C.h)+'</b><small>TOP '+(rows.length||15)+'</small></div></div>';
+    if(C.sub.length>1) h+='<div class="tsub">'+C.sub.map(([k,l])=>'<span data-s="'+k+'" class="'+(k===sub?'on':'')+'">'+esc(l)+'</span>').join('')+'</div>';
+    if(!rows.length) h+='<div class="card full"><div class="center">Hali rekordchi yo‘q — birinchi bo‘ling!</div></div>';
+    else{
+      const pod=[rows[1],rows[0],rows[2]];
+      h+='<div class="tpod">'+pod.map((x,j)=>{ if(!x) return '<div></div>'; const p=[2,1,3][j];
+        return '<div class="pc p'+p+(x.me?' me':'')+'">'+(p===1?'<span class="crown">👑</span>':'')+
+          '<div class="av">'+(C.pair?'❤':ini(x.n))+'</div><div class="nm">'+esc(x.n)+'</div><div class="vl">'+esc(C.val(x.v))+'</div>'+
+          (C.ex(x,sub)?'<div class="ex">'+esc(C.ex(x,sub))+'</div>':'')+'<div class="st">'+p+'</div></div>'; }).join('')+'</div>';
+      if(rows.length>3) h+='<div class="card full tlist">'+rows.slice(3).map((x,i)=>'<div class="trw'+(x.me?' me':'')+'"><span class="rk">'+(i+4)+'</span>'+
+        '<div class="n"><b>'+esc(x.n)+(x.me?' <span style="color:var(--cyan)">(siz)</span>':'')+'</b>'+(C.ex(x,sub)?'<small>'+esc(C.ex(x,sub))+'</small>':'')+'</div>'+
+        '<span class="v">'+esc(C.val(x.v))+'</span></div>').join('')+'</div>';
+    }
+    if(D.me) h+='<div class="tme"><span class="r">#'+D.me.rank+'</span><div style="flex:1;min-width:0"><b>Sizning o‘rningiz</b><small>'+esc(C.ex(D.me,sub)||'')+'</small></div>'+
+      '<b style="color:var(--gold);white-space:nowrap">'+esc(C.val(D.me.v))+'</b></div>';
+    if(C.note) h+='<div class="tnote">'+esc(C.note)+'</div>';
+    body.innerHTML=h;
+    body.querySelectorAll('.tsub span').forEach(x=>x.onclick=()=>{ sub=x.dataset.s; draw(); });
+  };
+  head.querySelectorAll('span').forEach(x=>x.onclick=()=>{ cat=x.dataset.k; sub=null; draw(); });
+  draw();
 }
 function vipAdmin(d){
   const box=$('<div class="card full"></div>');

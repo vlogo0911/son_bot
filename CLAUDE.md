@@ -362,3 +362,9 @@
   `VIP_GAME_MAX["bstorm"]`. Tekshiruvlar `VIP_CHECKS` lug'atida; payload `vip.md_*/ns_*/bs_*` (best/top).
 - 🤖 Loyiha agentlari `.claude/agents/`: architect, debugger (opus, effort max), game-dev, qa-tester, reviewer, asset-builder (opus, high),
   deploy-watcher (sonnet). Agentlar commit/push qilmaydi — bosh sessiya qiladi.
+- 🧪 Web testerlar (haqiqiy odamlar jamoasi): web Owner panel → 🧪 Testerlar (`testerAdmin`, `/app/api/testers/{add,remove}` →
+  `web_tester_admin`, faqat ownerlar, ID/@username `chat_resolve`, maks `WEB_TESTERS_MAX` 200, qo'shilganda bot xabari). Jadval
+  `web_testers` (`init_webapp`), kesh `_TESTERS` (`web_testers()`), `is_tester`, `can_test(uid)` = owner yoki tester. Test rejimidagi
+  gate'lar `can_test` bilan: `web_enabled_for`/`webapp_fetch` ("faqat ownerlar" rejimi), `vip_enabled_for`, `is_vip`, `kami_enabled_for`,
+  `avatar_enabled_for`, `emp_enabled_for`. Owner huquqlari (panel, flaglar, VIP berish) testerlarga berilmaydi. Payload `testers` (owner),
+  `is_tester`.

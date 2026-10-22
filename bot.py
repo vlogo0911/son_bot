@@ -19827,7 +19827,7 @@ async def web_news_admin(uid, act, body):
 
 
 # ⚙️ Owner panel (web): xususiyatlarni hamma uchun ochish/yopish — bot panelidagi bilan bir xil flaglar
-OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip", "tops")
+OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip")
 
 
 def owner_flags_payload():
@@ -19992,8 +19992,7 @@ async def webapp_payload(user_id):
         "vip": vip_payload(user_id),
         "vip_list": vip_list() if is_owner else None,
         "testers": tester_list() if is_owner else None,
-        "tops": tops_payload(user_id) if tops_enabled_for(user_id) else None,
-        "tops_test": not webapp_flags().get("tops", 0),
+        "tops": tops_payload(user_id),
         "is_tester": is_tester(user_id),
         "news_unread": news_unread(user_id),
         "owner_flags": owner_flags_payload() if is_owner else None,
@@ -20049,6 +20048,8 @@ def _top_sources():
         "loan_max": f"SELECT user_id, MAX(amount), COUNT(*), SUM(amount) FROM bank_loans WHERE user_id {no_own} GROUP BY user_id",
         "loan_sum": f"SELECT user_id, SUM(amount), COUNT(*), MAX(amount) FROM bank_loans WHERE user_id {no_own} GROUP BY user_id",
         "gamble_all": f"SELECT user_id, SUM(wagered), SUM(plays), MAX(best_win) FROM gamble_stats WHERE user_id {no_own} "
+                      + ("" if webapp_flags().get("kami", 0) else "AND game != 'kami' ")
+                      + 
                       "GROUP BY user_id HAVING SUM(plays) > 0",
         "divorced": "SELECT u, COUNT(*), 0, 0 FROM (SELECT user1_id AS u FROM pairs WHERE status='ended' "
                     "UNION ALL SELECT user2_id FROM pairs WHERE status='ended') GROUP BY u",
@@ -20085,17 +20086,31 @@ def _top_lists():
     return out
 
 
-def tops_enabled_for(uid):
-    """🏆 Kategoriyali TOP (test): standart ownerlar va testerlar; Owner → ⚙️ Sozlamalar'dan hamma uchun ochiladi."""
-    return bool(webapp_flags().get("tops", 0)) or can_test(uid)
+def _top_access(uid):
+    """Har kategoriya o'z bo'limi bilan birga ochiladi: test rejimidagi o'yinlar (Kamikaze, VIP o'yinlar) reytingi faqat
+    ownerlar/testerlarga; ochiq bo'limlar (boylik, kredit, juftlik, ajrim, farzand, sovg'a, Crash/Hovuz, bot o'yinlari) — hammaga.
+    Qaytaradi: (ko'rinadigan kalitlar, test belgili kalitlar)."""
+    flags = webapp_flags()
+    tests = {"gamble_kami": (bool(flags.get("kami", 0)), kami_enabled_for(uid)),
+             **{k: (bool(flags.get("vip", 0)), vip_enabled_for(uid)) for k in TOP_VIP}}
+    hide, test = set(), set()
+    for k, (public, allowed) in tests.items():
+        if not allowed:
+            hide.add(k)
+        elif not public:
+            test.add(k)
+    return hide, test
 
 
 def tops_payload(uid):
     """TOP bo'limi: har kategoriya — ro'yxat (ism, qiymat, qo'shimcha) + foydalanuvchining o'z o'rni."""
     c = db()
     lists = _top_lists()
-    res = {}
+    hide, test = _top_access(uid)
+    res = {"_test": sorted(test)}
     for key, sql in _top_sources().items():
+        if key in hide:
+            continue
         rows = lists.get(key, [])
         me = None
         own = c.execute(f"WITH t(user_id, val, a, b) AS ({sql}) SELECT val, a, b FROM t WHERE user_id=?", (uid,)).fetchone()
@@ -21694,6 +21709,8 @@ WEBAPP_HTML = r"""<!doctype html>
     cursor:pointer;background:var(--card);box-shadow:inset 0 0 0 1px var(--line);font-size:11px;font-weight:800;color:var(--dim);letter-spacing:.2px}
   #s-reyting .tcat span i{font-style:normal;font-size:22px;line-height:1.1}
   #s-reyting .tcat span.on{color:#2b1b02;background:var(--g-metal);box-shadow:0 6px 16px rgba(0,0,0,.45),0 0 14px rgba(255,210,74,.35)}
+  #s-reyting .ttest{font-style:normal;font-size:8px;font-weight:900;letter-spacing:.06em;padding:1px 5px;border-radius:6px;background:#ff4d6d;color:#fff;margin-top:1px}
+  #s-reyting .tsub .ttest{vertical-align:middle}
   #s-reyting .tsub{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 12px}
   #s-reyting .tsub span{padding:6px 12px;border-radius:999px;font-size:12px;font-weight:800;cursor:pointer;color:var(--dim);box-shadow:inset 0 0 0 1px var(--line)}
   #s-reyting .tsub span.on{color:var(--txt);background:rgba(255,210,74,.16);box-shadow:inset 0 0 0 1px var(--gold2)}
@@ -21812,7 +21829,7 @@ function render(res){
 
   // REYTING — kategoriyalar bo'yicha TOP
   const r=$('<div class="sec" id="s-reyting"></div>');
-  if(d.tops){ r.appendChild($('<h2>🏆 Rekordchilar'+(d.tops_test?' <span class="avtest">TEST</span>':'')+'</h2>')); topsRender(r,d); }
+  if(d.tops){ r.appendChild($('<h2>🏆 Rekordchilar</h2>')); topsRender(r,d); }
   else{   // test rejimida oddiy foydalanuvchilarga eski "Eng boylar" ro'yxati
     r.appendChild($('<h2>💎 Eng boylar TOP</h2>'));
     const list=$('<div class="card full"></div>');
@@ -23705,17 +23722,20 @@ const TOPC=[
     val:v=>fmtMoney(v)+'$',ex:x=>x.a+' ta sovg‘a'},
 ];
 function topsRender(sec,d){
-  const T=d.tops||{}; let cat=window.TOPK||'rich', sub=window.TOPS||null;
-  const head=$('<div class="tcat">'+TOPC.map(c=>'<span data-k="'+c.k+'"><i>'+c.i+'</i>'+c.t+'</span>').join('')+'</div>');
+  const T=d.tops||{}, TT=T._test||[]; let cat=window.TOPK||'rich', sub=window.TOPS||null;
+  // faqat ochiq (yoki shu foydalanuvchiga test uchun ochiq) bo'limlar; test bo'limlari TEST belgisi bilan
+  const CATS=TOPC.map(c=>Object.assign({},c,{sub:c.sub.filter(x=>T[x[0]])})).filter(c=>c.sub.length);
+  const isT=(k)=>TT.indexOf(k)>=0;
+  const head=$('<div class="tcat">'+CATS.map(c=>'<span data-k="'+c.k+'"><i>'+c.i+'</i>'+c.t+(c.sub.every(x=>isT(x[0]))?'<em class="ttest">TEST</em>':'')+'</span>').join('')+'</div>');
   const body=$('<div></div>'); sec.appendChild(head); sec.appendChild(body);
   const ini=n=>esc((String(n||'?').trim()[0]||'?').toUpperCase());
   const draw=()=>{
-    const C=TOPC.find(c=>c.k===cat)||TOPC[0]; if(!C.sub.some(x=>x[0]===sub)) sub=C.sub[0][0];
+    const C=CATS.find(c=>c.k===cat)||CATS[0]; cat=C.k; if(!C.sub.some(x=>x[0]===sub)) sub=C.sub[0][0];
     window.TOPK=cat; window.TOPS=sub;
     head.querySelectorAll('span').forEach(x=>x.classList.toggle('on',x.dataset.k===cat));
     const D=T[sub]||{rows:[],me:null}, rows=D.rows||[];
     let h='<div class="thead"><div><b>'+C.i+' '+esc(C.h)+'</b><small>TOP '+(rows.length||15)+'</small></div></div>';
-    if(C.sub.length>1) h+='<div class="tsub">'+C.sub.map(([k,l])=>'<span data-s="'+k+'" class="'+(k===sub?'on':'')+'">'+esc(l)+'</span>').join('')+'</div>';
+    if(C.sub.length>1) h+='<div class="tsub">'+C.sub.map(([k,l])=>'<span data-s="'+k+'" class="'+(k===sub?'on':'')+'">'+esc(l)+(isT(k)?' <em class="ttest">TEST</em>':'')+'</span>').join('')+'</div>';
     if(!rows.length) h+='<div class="card full"><div class="center">Hali rekordchi yo‘q — birinchi bo‘ling!</div></div>';
     else{
       const pod=[rows[1],rows[0],rows[2]];
@@ -23943,7 +23963,7 @@ function newsAdmin(d){
   draw(d.news||[]); return box;
 }
 function ownerFlags(d){
-  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun'],['tops','🏆','TOP kategoriyalari — hamma uchun']];
+  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun']];
   const box=$('<div class="card full"></div>');
   const draw=f=>{ box.innerHTML='<div class="lbl">⚙️ Xususiyatlar</div>'+F.map(([k,i,l])=>'<div class="oflag" data-k="'+k+'"><span>'+i+' '+l+'</span>'+
       '<span class="otg'+(f[k]?' on':'')+'"><i></i></span></div>').join('')+

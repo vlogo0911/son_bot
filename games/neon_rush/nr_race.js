@@ -69,6 +69,88 @@
     for (const k of Object.keys(SH)) { const v = SH[k]; if (v && v.dispose) { if (v.map) v.map.dispose(); v.dispose(); } }
     for (const k of Object.keys(SH)) delete SH[k];
   }
+  // ── Realistik 3D model: "Car Concept" (Eric Chadwick / Khronos Group, CC BY 4.0; asli Unity Fan — CC0).
+  //    tools/cars/build.mjs: logotiplar va salon olib tashlangan, soddalashtirilgan → car_hi.glb (yaqin) / car_lo.glb (uzoq, LOD).
+  const MODELS = (NR.Models = {
+    hi: null, lo: null, loading: null, failed: false,
+    load(base, ver, lib) {
+      if (this.hi) return Promise.resolve(true); if (this.loading) return this.loading;
+      const sc = (u) => new Promise((ok, bad) => { const e = document.createElement('script'); e.src = u; e.onload = ok; e.onerror = bad; document.head.appendChild(e); });
+      const EX = lib || 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/';
+      this.loading = Promise.all([THREE.GLTFLoader ? 0 : sc(EX + 'loaders/GLTFLoader.js'), window.MeshoptDecoder ? 0 : sc(EX + 'libs/meshopt_decoder.js')])
+        .then(() => {
+          const L = new THREE.GLTFLoader(); L.setMeshoptDecoder(window.MeshoptDecoder);
+          const get = (f) => new Promise((ok, bad) => L.load(base + f + (ver ? '?v=' + ver : ''), (g) => ok(g.scene), undefined, bad));
+          return Promise.all([get('car_hi.glb'), get('car_lo.glb')]);
+        })
+        .then(([hi, lo]) => { this.hi = prepModel(hi); this.lo = prepModel(lo); this.loLambert = lambertize(this.lo); return true; })
+        .catch((e) => { console.warn('NEON RUSH: 3D model yuklanmadi, oddiy mashinalar ishlatiladi', e); this.failed = true; this.loading = null; return false; });
+      return this.loading;
+    },
+    dispose() {
+      for (const r of [this.hi, this.lo, this.loLambert]) if (r) r.traverse((o) => { if (o.isMesh) { o.geometry.dispose(); for (const k of ['map', 'normalMap', 'aoMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'clearcoatNormalMap']) if (o.material[k]) o.material[k].dispose(); o.material.dispose(); } });
+      this.hi = this.lo = this.loLambert = null; this.loading = null;
+    },
+  });
+  function prepModel(root) {
+    root.traverse((o) => {
+      if (!o.isMesh) return;
+      o.frustumCulled = false;      // kvantlangan geometriya chegaralari r128 da noto'g'ri hisoblanadi
+      const m = o.material, n = m.name || '';
+      for (const k of ['map', 'emissiveMap']) if (m[k]) { m[k].encoding = THREE.LinearEncoding; m[k].needsUpdate = true; }   // o'yin chiqishi chiziqli
+      m.userData.paint = /^Paint 1/.test(n) ? 1 : /^Paint 2/.test(n) ? 2 : 0;
+      if (/Rim1/.test(n)) { m.color.setHex(0xa4aab4); m.metalness = 0.9; m.roughness = 0.25; }
+      if (/Rim2/.test(n)) { m.color.setHex(0x2a2c30); m.metalness = 0.7; m.roughness = 0.4; }
+      if (/Tire/.test(n)) { m.color.setHex(0x161616); m.metalness = 0; m.roughness = 0.92; }
+      if (/Disc|Mechanical|Trim/.test(n)) { m.color.multiplyScalar(0.45); }
+      if (/Headlight/.test(n)) { m.emissive.setHex(0xf2f6ff); m.emissiveIntensity = 1.4; }
+      if (/Brakelight|Signallight/.test(n)) { m.emissive.setHex(0xff2030); m.emissiveIntensity = 1.2; }
+      if (/Glass/.test(n)) { m.color.setHex(0x0a0d14); m.opacity = 0.78; m.transparent = true; m.depthWrite = false; }
+    });
+    const wrap = new THREE.Group(); wrap.add(root); root.position.z = -0.24;   // uzunligi bo'yicha markazlash (oldi +z)
+    return wrap;
+  }
+  function lambertize(src) {    // past sifat: arzon Lambert materiallar
+    const o = src.clone(true), cache = new Map();
+    o.traverse((m) => {
+      if (!m.isMesh) return; const s = m.material;
+      if (!cache.has(s)) { const l = new THREE.MeshLambertMaterial({ color: s.color, map: s.map, transparent: s.transparent, opacity: s.opacity, depthWrite: s.depthWrite, emissive: s.emissive, emissiveIntensity: s.emissiveIntensity }); l.name = s.name; l.userData.paint = s.userData.paint; cache.set(s, l); }
+      m.material = cache.get(s);
+    });
+    return o;
+  }
+  const ACCENT = { viper: 0x101014, hornet: 0x151515, bulldog: 0xf2f2f2, phantom: 0x0d0d12 };
+  const SHAPE = { viper: [1, 1, 1], hornet: [0.95, 0.97, 0.94], bulldog: [1.06, 1.07, 1.04], phantom: [1.02, 0.94, 1.05] };
+  function modelFor(car, quality) {
+    const mats = {};
+    const paint = (m) => {
+      const k = m.userData.paint; if (!mats[k]) { const c = (mats[k] = m.clone()); c.color.setHex(k === 1 ? car.color : (ACCENT[car.kind] != null ? ACCENT[car.kind] : 0x111111)); if (k === 1 && c.isMeshPhysicalMaterial) c.clearcoat = 1; }
+      return mats[k];
+    };
+    const make = (src) => { const o = src.clone(true); o.traverse((m) => { if (m.isMesh && m.material.userData.paint) m.material = paint(m.material); }); return o; };
+    let obj;
+    if (quality === 'low') obj = make(MODELS.loLambert);
+    else if (!car.bot) obj = make(MODELS.hi);
+    else { obj = new THREE.LOD(); obj.addLevel(make(MODELS.hi), 0); obj.addLevel(make(MODELS.lo), 14); }
+    const sh = SHAPE[car.kind] || SHAPE.viper; obj.scale.set(sh[0], sh[1], sh[2]);
+    car.paintMats = Object.values(mats);
+    return obj;
+  }
+  // Trassa ranglaridan yengil aks muhiti (PBR bo'yoq uchun neon ko'zgu aksi)
+  function envFor(renderer, track) {
+    const T = track.def, sc = new THREE.Scene(), cols = [], c0 = new THREE.Color(T.sky[0]), c2 = new THREE.Color(T.sky[2]), tmp = new THREE.Color();
+    const sg = new THREE.SphereGeometry(10, 16, 8), pos = sg.attributes.position;
+    for (let i = 0; i < pos.count; i++) { const h = pos.getY(i) / 10; tmp.copy(c2).lerp(c0, U.clamp(h * 0.5 + 0.5, 0, 1)); cols.push(tmp.r, tmp.g, tmp.b); }
+    sg.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+    sc.add(new THREE.Mesh(sg, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })));
+    const pg = new THREE.PlaneGeometry(6, 1.2);
+    [[T.neon[0], -8, 1, 0, Math.PI / 2], [T.neon[1], 8, 1, 0, -Math.PI / 2], [0xffffff, 0, 6, 0, 0], [T.neon[1], 0, 1.5, -8, 0], [T.neon[0], 0, 1.5, 8, Math.PI]].forEach(([c, x, y, z, r]) => {
+      const m = new THREE.Mesh(pg, new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(c === 0xffffff ? 1.6 : 2.4), side: THREE.DoubleSide })); m.position.set(x, y, z); m.rotation.y = r; if (y > 5) m.rotation.x = Math.PI / 2; sc.add(m);
+    });
+    const pm = new THREE.PMREMGenerator(renderer), rt = pm.fromScene(sc, 0.03); pm.dispose();
+    sc.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    return rt;        // WebGLRenderTarget — poyga tugaganda to'liq tozalanadi
+  }
   function bodyGeo(kind, color) {
     const c = color, dk = new THREE.Color(color).multiplyScalar(0.45).getHex(), gl = 0x0d1220, tr = 0x18181c;
     const L = {
@@ -148,9 +230,14 @@
     this.lap = -1; this.lapT = 0; this.bestLap = 0; this.lastD = 0; this.total = 0; this.finished = false; this.finishT = 0; this.place = 0;
     this.fans = 0; this.hits = 0; this.wrecks = 0; this.drift = 0; this.loc = {}; this.prevPlace = 0;
     const g = (this.g = new THREE.Group());
-    this.bodyGeo = bodyGeo(this.kind, this.color); this.bodyMat = new THREE.MeshLambertMaterial({ vertexColors: true, emissive: 0x000000 });
-    this.body = new THREE.Mesh(this.bodyGeo, this.bodyMat); g.add(this.body);
-    this.body.add(new THREE.Mesh(S.wheels, S.wheelMat)); this.body.add(new THREE.Mesh(S.lights, S.lightMat));
+    if (MODELS.hi) {       // realistik model (LOD)
+      this.body = new THREE.Group(); g.add(this.body); this.body.add(modelFor(this, race.quality));
+    } else {               // zaxira: protsedura model
+      this.bodyGeo = bodyGeo(this.kind, this.color); this.bodyMat = new THREE.MeshLambertMaterial({ vertexColors: true, emissive: 0x000000 });
+      this.body = new THREE.Mesh(this.bodyGeo, this.bodyMat); g.add(this.body);
+      this.body.add(new THREE.Mesh(S.wheels, S.wheelMat)); this.body.add(new THREE.Mesh(S.lights, S.lightMat));
+      this.paintMats = [this.bodyMat];
+    }
     this.underMat = new THREE.MeshBasicMaterial({ map: S.glow, color: this.color, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending });
     const under = new THREE.Mesh(S.under, this.underMat); under.position.y = 0.06; g.add(under);
     const sh = new THREE.Mesh(S.shadow, S.shadowMat); sh.position.y = 0.04; g.add(sh);
@@ -197,7 +284,7 @@
     const acc = d.acc * (this.nitro > 0 ? 1.7 : 1);
     if (thr > 0) fv += thr * acc * Math.max(0, 1 - fv / top) * dt * (fv < top ? 1 : 0);
     if (fv > top) fv = U.lerp(fv, top, Math.min(1, dt * 1.5));
-    if (brk) fv -= 38 * dt;
+    if (brk) fv = fv > 0 ? Math.max(0, fv - 38 * dt) : Math.min(0, fv + 38 * dt);   // tormoz to'xtatadi, orqaga yurgizmaydi
     fv -= (fv * 0.012 + (thr > 0 ? 0 : 3)) * dt;
     if (fv < 0) fv = Math.max(fv, -6);
     const spd = Math.abs(fv), drifting = brk && Math.abs(this.steer) > 0.4 && spd > 22;
@@ -258,13 +345,14 @@
     this.body.rotation.set(this.pitch + (this.wreck > 0 ? this.spin * 0.6 : 0), 0, this.roll + (this.wreck > 0 ? this.spin : 0));
     this.shieldMesh.visible = this.shield > 0; if (this.shield > 0) this.shieldMesh.rotation.y += dt * 2;
     this.flame.visible = this.nitro > 0; if (this.nitro > 0) { const s = 1.6 + Math.random() * 0.8; this.flame.scale.set(s, s, 1); }
-    this.bodyMat.emissive.setHex(this.ghost > 0 && Math.floor(this.ghost * 10) % 2 ? 0x333333 : this.stun > 0 ? 0x220000 : 0x000000);
+    const em = this.ghost > 0 && Math.floor(this.ghost * 10) % 2 ? 0x333333 : this.stun > 0 ? 0x220000 : 0x000000;
+    if (em !== this.emNow) { this.emNow = em; for (const m of this.paintMats) m.emissive.setHex(em); }
     if (this.trM) {
-      const n = this.trN, p = this.trP, bx = this.x - Math.sin(this.h) * 2.2, bz = this.z - Math.cos(this.h) * 2.2, rx = Math.cos(this.h) * 0.75, rz = -Math.sin(this.h) * 0.75, y = this.y + 0.75 + this.air;
+      const n = this.trN, p = this.trP, bx = this.x - Math.sin(this.h) * 2.2, bz = this.z - Math.cos(this.h) * 2.2, rx = Math.cos(this.h) * 0.16, rz = -Math.sin(this.h) * 0.16, y = this.y + 0.62 + this.air;   // ingichka iz
       if (!this.trInit) { for (let i = 0; i < n; i++) p.set([bx - rx, y, bz - rz, bx + rx, y, bz + rz], i * 6); this.trInit = true; }
       p.copyWithin(6, 0, (n - 1) * 6); p.set([bx - rx, y, bz - rz, bx + rx, y, bz + rz], 0);
       this.trG.attributes.position.needsUpdate = true;
-      this.trMat.opacity = U.clamp(Math.abs(this.v) / 50, 0, 0.85);
+      this.trMat.opacity = U.clamp(Math.abs(this.v) / 60, 0, 0.6);
     }
   };
   CP.damage = function (dmg, by, kind) {
@@ -287,7 +375,8 @@
   };
   CP.give = function (k) { if (this.items.length >= 3) return false; this.items.push(k); if (this.items.length === 1) this.sel = 0; return true; };
   CP.dispose = function () {
-    const sc = this.race.scene; sc.remove(this.g); this.bodyGeo.dispose(); this.bodyMat.dispose(); this.underMat.dispose(); this.shieldMat.dispose(); this.flameMat.dispose();
+    const sc = this.race.scene; sc.remove(this.g); if (this.bodyGeo) { this.bodyGeo.dispose(); this.bodyMat.dispose(); } else for (const m of this.paintMats) m.dispose();
+    this.underMat.dispose(); this.shieldMat.dispose(); this.flameMat.dispose();
     if (this.trM) { sc.remove(this.trM); this.trG.dispose(); this.trMat.dispose(); }
   };
 
@@ -346,6 +435,7 @@
     this.track = opt.track; this.laps = opt.laps || this.track.laps; this.onEvent = opt.onEvent || (() => {}); this.shake = opt.shake || (() => {});
     this.fx = new FX(this.scene, this.quality); this.cars = []; this.projs = []; this.mines = []; this.domes = []; this.time = 0; this.state = 'count'; this.count = 3.6; this.finishers = [];
     const S = shared(), n = opt.cars || 8;
+    if (MODELS.hi && opt.renderer && this.quality !== 'low') { this.env = envFor(opt.renderer, this.track); this.scene.environment = this.env.texture; }
     // Power-up belgilari
     this.icons = {};
     for (const k of PU_KEYS) {
@@ -523,9 +613,10 @@
     for (const p of this.projs) this.scene.remove(p.s); for (const m of this.mines.concat(this.domes)) this.scene.remove(m.m);
     for (const p of this.track.pads) { this.scene.remove(p.spr); this.scene.remove(p.glow); }
     for (const k of PU_KEYS) { this.icons[k].map.dispose(); this.icons[k].dispose(); }
+    if (this.env) { this.scene.environment = null; this.env.dispose(); }
     this.padGlow.dispose(); this.projMat.seeker.dispose(); this.projMat.volt.dispose(); this.mineGeo.dispose(); this.mineMat.dispose(); this.mineGlow.dispose(); this.domeGeo.dispose(); this.domeMat.dispose();
     this.fx.dispose();
   };
 
-  NR.Race = { CARS, PU, PU_KEYS, DIFF, Race, Car, disposeShared, aiInput };
+  NR.Race = { CARS, PU, PU_KEYS, DIFF, Race, Car, disposeShared, aiInput, MODELS };
 })();

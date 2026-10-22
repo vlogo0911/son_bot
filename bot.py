@@ -20624,7 +20624,8 @@ CS_GAME_FILES = {"cs_core.js": "application/javascript; charset=utf-8", "cs_worl
 NR_GAME_DIR = os.path.join(BASE_DIR, "games", "neon_rush")
 NR_GAME_FILES = {"nr_core.js": "application/javascript; charset=utf-8", "nr_world.js": "application/javascript; charset=utf-8",
                  "nr_race.js": "application/javascript; charset=utf-8", "nr_game.js": "application/javascript; charset=utf-8",
-                 "nr_style.css": "text/css; charset=utf-8"}
+                 "nr_style.css": "text/css; charset=utf-8",
+                 "car_hi.glb": "model/gltf-binary", "car_lo.glb": "model/gltf-binary"}   # CC BY 4.0 model, tools/cars/
 GAME_DIRS = {"classic_strike": (CS_GAME_DIR, CS_GAME_FILES), "neon_rush": (NR_GAME_DIR, NR_GAME_FILES)}
 
 
@@ -23301,7 +23302,7 @@ const CSTRIKE=(()=>{ const load=game3d('classic_strike','__CS_VER__',['cs_core.j
 })();
 // 🏁 NEON RUSH (3D arkada jangovar poyga)
 const NRUSH=(()=>{ const load=game3d('neon_rush','__NR_VER__',['nr_core.js','nr_world.js','nr_race.js','nr_game.js'],'nr_style.css','NR3D');
-  function open(d){ return load().then(G=>{ G.launch({ playerName:(d.name||'Siz').slice(0,14),
+  function open(d){ return load().then(G=>{ G.launch({ playerName:(d.name||'Siz').slice(0,14), assets:'/app/games/neon_rush/', ver:'__NR_VER__',
     onResult:r=>{ api('/app/api/vip/score',{game:'nrush',score:r.score,place:r.place,cars:r.cars,fans:r.fans,hits:r.hits,wrecks:r.wrecks,track:r.track}).then(vipSaved(d,'nr_best','vipNrBest')).catch(()=>{}); },
     onExit:()=>{} }); }); }
   return {open, load};

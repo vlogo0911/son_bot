@@ -1,0 +1,61 @@
+/* METRO DASH — faqat .mdash ichida (asosiy sayt dizayniga ta'sir qilmaydi) */
+.mdash{position:fixed;inset:0;z-index:10050;background:#7fc4f5;font-family:"Arial Black","Segoe UI",system-ui,sans-serif;color:#fff;user-select:none;-webkit-user-select:none;touch-action:none;overflow:hidden;-webkit-tap-highlight-color:transparent}
+.mdash canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.mdash button{font-family:inherit;cursor:pointer;border:0;-webkit-tap-highlight-color:transparent}
+.mdash .md-load{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:18px;background:linear-gradient(#2a7fd4,#7fc4f5);text-shadow:0 2px 0 #0006}
+/* HUD */
+.mdash .md-hud{position:absolute;inset:0;pointer-events:none}
+.mdash .md-top{position:absolute;top:calc(10px + env(safe-area-inset-top));left:10px;right:10px;display:flex;align-items:flex-start;gap:8px}
+.mdash .md-score{flex:1;display:flex;align-items:center;gap:8px}
+.mdash .md-score b{font-size:28px;letter-spacing:1px;text-shadow:0 3px 0 #0007,0 0 12px #0004}
+.mdash .md-mult{font-size:15px;padding:3px 8px;border-radius:10px;background:#0006;border:2px solid #fff6}
+.mdash .md-mult.hot{background:#18b8ff;border-color:#fff;box-shadow:0 0 14px #2fd4ff;animation:md-pulse .6s infinite alternate}
+.mdash .md-coins{font-size:20px;padding:4px 12px;border-radius:14px;background:#0005;border:2px solid #ffd84a99;text-shadow:0 2px 0 #0007}
+.mdash .md-pbtn{pointer-events:auto;width:42px;height:42px;border-radius:12px;background:#0006;color:#fff;font-size:16px;border:2px solid #fff6}
+.mdash .md-pus{position:absolute;top:calc(62px + env(safe-area-inset-top));left:10px;display:flex;flex-direction:column;gap:6px}
+.mdash .md-pu{display:flex;align-items:center;gap:6px}
+.mdash .md-pu i{font-style:normal;width:30px;height:30px;border-radius:50%;background:var(--c);display:flex;align-items:center;justify-content:center;font-size:14px;border:2px solid #fff;box-shadow:0 0 10px var(--c)}
+.mdash .md-pu span{width:80px;height:8px;border-radius:5px;background:#0006;overflow:hidden}
+.mdash .md-pu em{display:block;height:100%;background:var(--c)}
+.mdash .md-bbtn{pointer-events:auto;position:absolute;left:12px;bottom:calc(16px + env(safe-area-inset-bottom));padding:10px 14px;border-radius:16px;background:linear-gradient(#ff4fc8,#b0127a);color:#fff;font-size:18px;border:3px solid #fff;box-shadow:0 4px 0 #6a0a4a}
+.mdash .md-chase{position:absolute;top:calc(60px + env(safe-area-inset-top));right:14px;font-size:30px;opacity:0;transition:opacity .2s;animation:md-pulse .35s infinite alternate}
+.mdash .md-fps{position:absolute;right:10px;bottom:10px;font:12px monospace;color:#fff;text-shadow:0 1px 0 #000}
+.mdash .md-toast{position:absolute;left:50%;top:32%;transform:translate(-50%,-50%) scale(.8);padding:10px 18px;border-radius:16px;background:#000a;font-size:17px;opacity:0;pointer-events:none;transition:.2s;white-space:nowrap;max-width:92vw;overflow:hidden;text-overflow:ellipsis}
+.mdash .md-toast.on{opacity:1;transform:translate(-50%,-50%) scale(1)}
+/* Ekranlar */
+.mdash .md-scr{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:flex-end;gap:10px;padding:18px 16px calc(22px + env(safe-area-inset-bottom));overflow-y:auto}
+.mdash .md-scr.on{display:flex}
+.mdash .md-scr.md-s-pause,.mdash .md-scr.md-s-over,.mdash .md-scr.md-s-set,.mdash .md-scr.md-s-help,.mdash .md-scr.md-s-shop{justify-content:center;background:#0b2a4ccc}
+.mdash .md-scr.md-s-chars{justify-content:flex-end;background:linear-gradient(transparent 30%,#0b2a4cdd 55%)}
+.mdash .md-scr.md-s-menu{background:linear-gradient(transparent 45%,#0b2a4caa)}
+.mdash .md-logo{position:absolute;top:calc(22px + env(safe-area-inset-top));left:0;right:0;text-align:center;line-height:.9;transform:rotate(-4deg)}
+.mdash .md-logo span,.mdash .md-logo b{display:block;font-size:48px;letter-spacing:2px;-webkit-text-stroke:2px #102a4a;text-shadow:0 5px 0 #102a4a,0 8px 18px #0006}
+.mdash .md-logo span{color:#ffd400}
+.mdash .md-logo b{color:#ff3b6b;font-size:58px}
+.mdash .md-stat{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.mdash .md-stat span{padding:5px 12px;border-radius:12px;background:#0007;border:2px solid #fff4;font-size:15px}
+.mdash .md-menu{display:flex;flex-direction:column;gap:9px;width:min(320px,100%)}
+.mdash .md-btn{padding:12px 14px;border-radius:16px;font-size:16px;color:#fff;background:linear-gradient(#2fa8ff,#1366c9);border:3px solid #fff;box-shadow:0 5px 0 #0b3f80;letter-spacing:.5px;transition:transform .08s}
+.mdash .md-btn:active{transform:translateY(3px);box-shadow:0 2px 0 #0b3f80}
+.mdash .md-btn.big{font-size:22px;padding:15px;background:linear-gradient(#ffe14a,#ff9d00);color:#5a2a00;box-shadow:0 6px 0 #a35a00}
+.mdash .md-btn.ghost{background:#0006;box-shadow:0 4px 0 #0008;border-color:#fff6}
+.mdash .md-h{font-size:24px;text-align:center;text-shadow:0 3px 0 #0008}
+.mdash .md-card{width:min(360px,100%);padding:14px;border-radius:18px;background:#0b2a4ce6;border:2px solid #fff3;font-family:"Segoe UI",system-ui,sans-serif;font-size:14px;line-height:1.45}
+.mdash .md-card b{font-family:"Arial Black",sans-serif;font-size:17px}
+.mdash .md-card .md-btn{width:100%;margin-top:10px}
+.mdash .md-form label{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;font-weight:700}
+.mdash .md-form input[type=range]{width:50%}
+.mdash .md-form select{background:#123;color:#fff;border:1px solid #fff5;border-radius:8px;padding:5px}
+.mdash .md-note,.mdash .md-cred{opacity:.7;font-size:12px}
+.mdash .md-help p{margin:6px 0}
+.mdash .md-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;width:min(380px,100%)}
+.mdash .md-skin{padding:8px 4px;border-radius:12px;background:#ffffff1a;border:2px solid #fff4;color:#fff;display:flex;flex-direction:column;gap:2px;font-size:13px}
+.mdash .md-skin span{font-family:"Segoe UI",sans-serif;font-size:11px;opacity:.85}
+.mdash .md-skin.sel{background:#2fa8ff66;border-color:#fff;box-shadow:0 0 12px #2fd4ff}
+.mdash .md-skin.lock{background:#0005}
+.mdash .md-best{font-size:20px;color:#ffd400;animation:md-pulse .5s infinite alternate}
+.mdash .md-res{display:flex;gap:8px;width:min(360px,100%)}
+.mdash .md-res div{flex:1;padding:10px 4px;border-radius:14px;background:#0007;border:2px solid #fff3;text-align:center}
+.mdash .md-res span{display:block;font-size:11px;opacity:.75}
+.mdash .md-res b{font-size:18px}
+@keyframes md-pulse{from{transform:scale(1)}to{transform:scale(1.08)}}

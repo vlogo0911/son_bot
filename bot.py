@@ -17079,6 +17079,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_edu_enroll(uid, body.get("kid"), body.get("inst"))
         elif path in ("/app/api/edu/add", "/app/api/edu/update", "/app/api/edu/toggle"):
             coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
+        elif path in ("/app/api/testers/add", "/app/api/testers/remove"):
+            coro = web_tester_admin(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/vip/grant":
             coro = web_vip_grant(uid, body)
         elif path == "/app/api/vip/score":
@@ -18184,6 +18186,9 @@ def init_webapp():
         # 👑 VIP foydalanuvchilar (ownerlar beradi) va VIP o'yin rekordlari
         c.execute("""CREATE TABLE IF NOT EXISTS vip_users (user_id INTEGER PRIMARY KEY, until INTEGER NOT NULL,
             granted_by INTEGER, created_at INTEGER NOT NULL)""")
+        # 🧪 Web testerlar (ownerlar qo'shadi) — test rejimidagi bo'limlar ularga ham ochiq
+        c.execute("""CREATE TABLE IF NOT EXISTS web_testers (user_id INTEGER PRIMARY KEY, added_by INTEGER,
+            created_at INTEGER NOT NULL)""")
         c.execute("""CREATE TABLE IF NOT EXISTS vip_scores (game TEXT NOT NULL, user_id INTEGER NOT NULL, best INTEGER NOT NULL,
             level INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL, PRIMARY KEY(game, user_id))""")
         # 🪙 EMP Coin test rejimdan chiqdi: bir marta hamma uchun yoqiladi (keyin owner panelda o'chirsa, o'sha qoladi)
@@ -18199,7 +18204,7 @@ AVATAR_SLOTS = ("g", "outfit", "shoes", "hat", "hair", "hcol", "skin", "bg")
 def avatar_enabled_for(uid):
     if not web_enabled_for(uid):
         return False
-    return bool(webapp_flags().get("avatar", 0)) or uid in CAREER_OWNER_IDS
+    return bool(webapp_flags().get("avatar", 0)) or can_test(uid)
 
 
 def avatar_get(uid):
@@ -18603,7 +18608,7 @@ EMP_MAX_AMOUNT = 10_000_000
 def emp_enabled_for(uid):
     if not web_enabled_for(uid):
         return False
-    return bool(webapp_flags().get("emp", 1)) or uid in CAREER_OWNER_IDS
+    return bool(webapp_flags().get("emp", 1)) or can_test(uid)
 
 
 def emp_balance(uid):
@@ -19463,18 +19468,82 @@ VIP_SCORE_GAP = 8
 _VIP_SCORE_AT = {}
 
 
+# ── 🧪 Web testerlar: haqiqiy odamlar jamoasi. Ownerlarga ochiq test bo'limlari (VIP o'yinlar, Kamikaze, 3D avatar,
+# test rejimidagi EMP, web app "faqat ownerlar") ularga ham ko'rinadi. Owner huquqlari (panel, sozlamalar) berilmaydi.
+WEB_TESTERS_MAX = 200
+_TESTERS = None
+
+
+def web_testers():
+    global _TESTERS
+    if _TESTERS is None:
+        try:
+            _TESTERS = {r[0] for r in db().execute("SELECT user_id FROM web_testers")}
+        except sqlite3.OperationalError:
+            return set()
+    return _TESTERS
+
+
+def is_tester(uid):
+    return uid in web_testers()
+
+
+def can_test(uid):
+    return uid in CAREER_OWNER_IDS or is_tester(uid)
+
+
+def tester_list():
+    return [{"id": u, "name": _plain_person(u), "added": tashkent_dt(t)} for u, t in db().execute(
+        "SELECT user_id, created_at FROM web_testers ORDER BY created_at DESC")]
+
+
+async def web_tester_admin(uid, act, body):
+    """Ownerlar: ID/@username ni testerlarga qo'shish / olib tashlash."""
+    global _TESTERS
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner_only"}
+    target = chat_resolve(body.get("q"))
+    if not target:
+        return {"error": "not_found"}
+    if act == "add":
+        if target in CAREER_OWNER_IDS:
+            return {"error": "owner"}
+        if len(web_testers()) >= WEB_TESTERS_MAX:
+            return {"error": "max"}
+        with db() as c:
+            fresh = c.execute("INSERT OR IGNORE INTO web_testers(user_id, added_by, created_at) VALUES (?,?,?)",
+                              (target, uid, int(time.time()))).rowcount
+    elif act == "remove":
+        with db() as c:
+            fresh = c.execute("DELETE FROM web_testers WHERE user_id=?", (target,)).rowcount
+    else:
+        return {"error": "act"}
+    _TESTERS = None
+    if act == "add" and fresh and _EXCHANGE_LOOP_BOT is not None:
+        try:
+            await _EXCHANGE_LOOP_BOT.send_message(
+                target, "🧪 <b>Siz web app testerlari jamoasiga qo‘shildingiz!</b>\n"
+                        "Test rejimidagi yangi bo‘limlar (👑 VIP o‘yinlar va boshqalar) endi sizga ham ochiq. "
+                        "Xato yoki taklif topsangiz — bot egalariga yozing.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Web app'ni ochish", web_app=WebAppInfo(WEBAPP_URL + "/app"))]])
+                if WEBAPP_URL and WEBAPP_URL.startswith("https://") else None)
+        except TelegramError:
+            pass
+    return {"result": act, "name": _plain_person(target), "testers": tester_list()}
+
+
 def vip_until(uid):
     row = db().execute("SELECT until FROM vip_users WHERE user_id=?", (uid,)).fetchone()
     return row[0] if row else 0
 
 
 def is_vip(uid):
-    return uid in CAREER_OWNER_IDS or vip_until(uid) > time.time()
+    return can_test(uid) or vip_until(uid) > time.time()
 
 
 def vip_enabled_for(uid):
     """👑 VIP bo'limi (test): standart faqat ownerlar; owner panel → ⚙️ Sozlamalar'dan hamma uchun ochiladi."""
-    return web_enabled_for(uid) and (bool(webapp_flags().get("vip", 0)) or uid in CAREER_OWNER_IDS)
+    return web_enabled_for(uid) and (bool(webapp_flags().get("vip", 0)) or can_test(uid))
 
 
 def vip_top(game, limit=10):
@@ -19909,6 +19978,8 @@ async def webapp_payload(user_id):
         "news": news_list(include_hidden=is_owner),
         "vip": vip_payload(user_id),
         "vip_list": vip_list() if is_owner else None,
+        "testers": tester_list() if is_owner else None,
+        "is_tester": is_tester(user_id),
         "news_unread": news_unread(user_id),
         "owner_flags": owner_flags_payload() if is_owner else None,
         "is_owner": is_owner,
@@ -19934,7 +20005,7 @@ async def webapp_fetch(user_id):
     """Yoqilgan/o'chirilganlikni tekshirib, ma'lumotni qaytaradi (bot sikli ipida)."""
     flags = webapp_flags()
     is_owner = user_id in CAREER_OWNER_IDS
-    if not (flags["all"] or (is_owner and flags["owner"])):
+    if not (flags["all"] or (can_test(user_id) and flags["owner"])):
         return {"enabled": False, "owner": is_owner}
     return {"enabled": True, "owner": is_owner, "data": await webapp_payload(user_id)}
 
@@ -19949,7 +20020,7 @@ WEB_BET_MAX = 10_000_000
 
 def web_enabled_for(uid):
     flags = webapp_flags()
-    return flags["all"] or (uid in CAREER_OWNER_IDS and flags["owner"])
+    return flags["all"] or (can_test(uid) and flags["owner"])
 
 
 # ── 🚀 UMUMIY Crash (Aviator): hamma uchun bitta raund, bir xil koeffitsiyent ──
@@ -20221,7 +20292,7 @@ def kami_enabled_for(uid):
     """Test bosqichi: standart — faqat ownerlar; owner panel → Web App dan hamma uchun ochiladi."""
     if not web_enabled_for(uid):
         return False
-    return bool(webapp_flags().get("kami", 0)) or uid in CAREER_OWNER_IDS
+    return bool(webapp_flags().get("kami", 0)) or can_test(uid)
 
 
 def web_kami_view(uid):
@@ -21928,7 +21999,7 @@ function render(res){
   if(d.is_owner && d.owner){
     const o=$('<div class="sec" id="s-owner"></div>');
     o.appendChild($('<h2>👑 Owner panel</h2>'));
-    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['vip','👑','VIP'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
+    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['vip','👑','VIP'],['test','🧪','Testerlar'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
     const oseg=$('<div class="oseg">'+OG.map(([k,i,l])=>'<span data-g="'+k+'"><i>'+i+'</i>'+l+'</span>').join('')+'</div>');
     o.appendChild(oseg);
     const G={}; OG.forEach(([k])=>{ G[k]=$('<div class="ogrp" data-g="'+k+'"></div>'); o.appendChild(G[k]); });
@@ -21969,6 +22040,7 @@ function render(res){
     G.edu.appendChild(ed);
     G.news.appendChild(newsAdmin(d));
     G.vip.appendChild(vipAdmin(d));
+    G.test.appendChild(testerAdmin(d));
     G.set.appendChild(ownerFlags(d));
     if(d.emp&&d.emp.admin){ // 🪙 EMP paketlari — narxlarni ownerlar boshqaradi
       const ea=$('<div class="card full oemp"></div>');
@@ -23416,6 +23488,24 @@ const BSTORMG=(()=>{ const load=game3d('block_storm','__BS_VER__',['bs_core.js',
     onExit:()=>{} }); }); }
   return {open, load};
 })();
+// 🧪 Web testerlar — haqiqiy odamlar jamoasi test rejimidagi bo'limlarni ko'radi
+function testerAdmin(d){
+  const box=$('<div class="card full"></div>');
+  const ERR={owner_only:'👑 Faqat ownerlar',not_found:'🔎 Foydalanuvchi topilmadi (botni ishlatgan bo‘lishi kerak)',owner:'👑 Ownerlar allaqachon hamma narsani ko‘radi',max:'⚠️ Testerlar soni chegarada (200)'};
+  const draw=list=>{ d.testers=list;
+    box.innerHTML='<div class="lbl">🧪 Web tester qo‘shish</div>'+
+      '<div class="hsub" style="margin-bottom:8px">Testerlarga hozir faqat ownerlarga ochiq bo‘lgan test bo‘limlari ham ko‘rinadi: 👑 VIP o‘yinlar, 🛩 Kamikaze, 🧍 3D avatar va boshqalar. Owner paneli va sozlamalar ularga berilmaydi.</div>'+
+      '<div class="frow"><input class="bet" id="tsQ" placeholder="ID yoki @username" style="text-align:left" autocomplete="off"></div>'+
+      '<button class="btn go full" id="tsA">🧪 Testerga qo‘shish</button>'+
+      '<div class="lbl" style="margin-top:16px">Testerlar ('+list.length+')</div>'+
+      (list.length?list.map(x=>'<div class="npost"><span class="npi e">🧪</span><div class="npm"><b>'+esc(x.name)+'</b><div class="hsub">ID '+x.id+' · '+esc(x.added)+' dan</div></div>'+
+        '<span class="na" data-rm="'+x.id+'" title="Olib tashlash">🗑</span></div>').join(''):'<div class="hsub">Hali tester yo‘q</div>');
+    const send=(act,q)=>api('/app/api/testers/'+act,{q:q}).then(r=>{ if(r.result){ toast(act==='add'?'✅ '+r.name+' — testerlarga qo‘shildi':'✅ '+r.name+' — testerlardan olindi'); draw(r.testers); }
+      else toast(ERR[r.error]||'⚠️ Xatolik'); });
+    app_q(box,'#tsA').onclick=()=>{ const q=app_q(box,'#tsQ').value.trim(); if(!q){ toast('🔎 ID yoki @username kiriting'); return; } send('add',q); };
+    box.querySelectorAll('[data-rm]').forEach(x=>x.onclick=()=>send('remove',x.dataset.rm)); };
+  draw(d.testers||[]); return box;
+}
 function vipAdmin(d){
   const box=$('<div class="card full"></div>');
   const ERR={owner_only:'👑 Faqat ownerlar',not_found:'🔎 Foydalanuvchi topilmadi (botni ishlatgan bo‘lishi kerak)',days:'📅 Kun 0–3650 bo‘lsin'};

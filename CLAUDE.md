@@ -377,3 +377,8 @@
   ro'yxatlar `_top_lists` 60 s kesh (`TOP_CACHE_TTL`), manbalar `_top_sources` (boylik/kredit/qimor reytingiga ownerlar kirmaydi).
   Qimor statistikasi `gamble_stats` (user_id, game, plays, wagered, won, best_win, best_mult) — `gamble_note` web Crash/Hovuz/Kamikaze
   tikish, yutuq, bekor qilish/qaytarishda (deploy'dan keyin yig'ila boshlagan).
+  Botdagi Crash (`crash_charge`/`crash_refund`/cashout → `bot_crash`) va Qurbaqa ("go" tikish, `frog_settle` → `bot_frog`) ham
+  `GAMBLE_GAMES` da. VIP o'yin reytinglari (`TOP_VIP`, manba `vip_scores`): 🏁 Poygachilar (nrush, a=o'rin), 🎯 Merganlar (cstrike frag /
+  strike 2D raund), 🧱 Blokchilar (bstorm), 🚇 Yuguruvchilar (mdash, a=masofa), 🐍 Ilonchilar (nsnake).
+- 🐍 NEON SNAKE: ekrandagi D-pad standart yoniq (`defaults().dpad=true`, saqlash `v: 2`; eski v1 saqlanganlar ham yoqiladi),
+  sozlamalardan o'chirsa saqlanadi.

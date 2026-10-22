@@ -5552,6 +5552,10 @@ def frog_settle(game):
     game["settled"] = True
     amount = frog_payout(game) if game["path"] else game["bet"]
     wallet_change(game["player"], amount)
+    if game["path"]:
+        gamble_note(game["player"], "bot_frog", win=amount, mult=frog_mult(game["mode"], len(game["path"])))
+    else:
+        gamble_note(game["player"], "bot_frog", bet=-game["bet"])
     return amount
 
 
@@ -5701,6 +5705,7 @@ async def _frog_action(q, context, key, game, parts):
             await q.answer(frog_t(chat, "no_funds", min=game["bet"]), show_alert=True)
             return
         bad = FROG_MODES[game["mode"]]
+        gamble_note(user.id, "bot_frog", bet=game["bet"])
         game.update(
             paid=True, state="play",
             traps=[set(_CRASH_RNG.sample(range(FROG_COLS), bad)) for _ in range(FROG_ROWS)],
@@ -7384,6 +7389,7 @@ def crash_charge(game):
             paid = False
         if paid:
             p["paid"] = True
+            gamble_note(uid, "bot_crash", bet=p["bet"])
         else:
             game["dropped"].append(crash_mention(uid, p))
             del game["players"][uid]
@@ -7405,6 +7411,7 @@ def crash_refund(game):
         try:
             wallet_change(uid, p["bet"])
             p["refunded"] = True
+            gamble_note(uid, "bot_crash", bet=-p["bet"])
         except Exception:
             failed = True
             logger.exception(
@@ -7786,6 +7793,7 @@ async def crash_action(q, context, action):
         p["cash"] = mult
         try:
             wallet_change(user.id, payout)
+            gamble_note(user.id, "bot_crash", win=payout, mult=mult)
         except sqlite3.Error:
             logger.exception("Crash: yutuqni yozib bo'lmadi (user %s)", user.id)
             p["cash"] = None
@@ -20011,8 +20019,9 @@ async def webapp_payload(user_id):
 # ── 🏆 TOP reytinglari (web app → TOP): kategoriyalar bo'yicha ──
 TOP_LIMIT = 15
 TOP_CACHE_TTL = 60
+TOP_VIP = {"race": "nrush", "aim_cs": "cstrike", "aim_2d": "strike", "block": "bstorm", "run": "mdash", "snake": "nsnake"}
 _TOP_CACHE = {"t": 0.0, "data": None}
-GAMBLE_GAMES = ("crash", "frog", "kami")
+GAMBLE_GAMES = ("crash", "frog", "kami", "bot_crash", "bot_frog")
 
 
 def gamble_note(uid, game, bet=0, win=0, mult=0.0):
@@ -20048,6 +20057,8 @@ def _top_sources():
         "gifts_sent": "SELECT sender_id, SUM(price), COUNT(*), 0 FROM gift_log GROUP BY sender_id",
         "gifts_held": "SELECT recipient_id, SUM(price), COUNT(*), 0 FROM gift_log GROUP BY recipient_id",
     }
+    for key, game in TOP_VIP.items():      # VIP o'yinlar rekordlari (vip_scores: best, level)
+        src[key] = f"SELECT user_id, best, level, 0 FROM vip_scores WHERE game='{game}' AND best > 0"
     for g in GAMBLE_GAMES:
         src["gamble_" + g] = (f"SELECT user_id, wagered, plays, best_win FROM gamble_stats WHERE game='{g}' "
                               f"AND plays > 0 AND user_id {no_own}")
@@ -23679,11 +23690,17 @@ const TOPC=[
   {k:'rich',i:'💎',t:'Boylar',h:'Eng boy o‘yinchilar',sub:[['rich','Hamyon']],val:v=>fmtMoney(v)+'$',ex:()=>''},
   {k:'loan',i:'🏦',t:'Kreditchilar',h:'Eng katta kredit olganlar',sub:[['loan_max','Eng katta kredit'],['loan_sum','Jami kreditlar']],
     val:v=>fmtMoney(v)+'$',ex:(x,s)=>x.a+' ta kredit'+(s==='loan_max'?' · jami '+fmtMoney(x.b)+'$':' · eng kattasi '+fmtMoney(x.b)+'$')},
-  {k:'gamble',i:'🎰',t:'Qimorvozlar',h:'Eng ko‘p tikkanlar',sub:[['gamble_all','Hammasi'],['gamble_crash','🚀 Crash'],['gamble_frog','🌊 Hovuz'],['gamble_kami','🛩 Kamikaze']],
-    val:v=>fmtMoney(v)+'$',ex:x=>x.a+' o‘yin · eng katta yutuq '+fmtMoney(x.b)+'$',note:'Qimor statistikasi web app o‘yinlaridan (Crash, Hovuz, Kamikaze) yig‘iladi.'},
+  {k:'gamble',i:'🎰',t:'Qimorvozlar',h:'Eng ko‘p tikkanlar',sub:[['gamble_all','Hammasi'],['gamble_crash','🚀 Crash'],['gamble_frog','🌊 Hovuz'],['gamble_kami','🛩 Kamikaze'],['gamble_bot_crash','🤖 Bot Crash'],['gamble_bot_frog','🐸 Bot Qurbaqa']],
+    val:v=>fmtMoney(v)+'$',ex:x=>x.a+' o‘yin · eng katta yutuq '+fmtMoney(x.b)+'$',note:'Qimor statistikasi web app (Crash, Hovuz, Kamikaze) va botdagi Crash/Qurbaqa o‘yinlaridan yig‘iladi.'},
   {k:'pairs',i:'💞',t:'Juftliklar',h:'Eng uzoq birga yashayotganlar',sub:[['pairs','Birga']],val:v=>v+' kun',ex:x=>x.a?'👶 '+x.a+' farzand':'',pair:true},
   {k:'divorced',i:'💔',t:'Ajrashganlar',h:'Eng ko‘p ajrashganlar',sub:[['divorced','Ajrashish']],val:v=>v+' marta',ex:()=>''},
   {k:'kids',i:'👶',t:'Farzandlilar',h:'Eng ko‘p farzandli ota-onalar',sub:[['kids','Farzandlar']],val:v=>v+' ta',ex:x=>x.a?'💼 '+x.a+' tasi ishlaydi':''},
+  {k:'race',i:'🏁',t:'Poygachilar',h:'NEON RUSH rekordchilari',sub:[['race','Poyga']],val:v=>fmtMoney(v)+' ochko',ex:x=>'eng yaxshi o‘rin: '+x.a},
+  {k:'aim',i:'🎯',t:'Merganlar',h:'Eng aniq merganlar',sub:[['aim_cs','CLASSIC STRIKE'],['aim_2d','STRIKE 2D']],val:v=>fmtMoney(v)+' ochko',
+    ex:(x,s)=>s==='aim_cs'?x.a+' frag':x.a+'-raund'},
+  {k:'block',i:'🧱',t:'Blokchilar',h:'BLOCK STORM ustalari',sub:[['block','Bloklar']],val:v=>fmtMoney(v)+' ochko',ex:x=>x.a+'-daraja'},
+  {k:'run',i:'🚇',t:'Yuguruvchilar',h:'METRO DASH yuguruvchilari',sub:[['run','Yugurish']],val:v=>fmtMoney(v)+' ochko',ex:x=>fmtMoney(x.a)+' m masofa'},
+  {k:'snake',i:'🐍',t:'Ilonchilar',h:'NEON SNAKE ustalari',sub:[['snake','Ilon']],val:v=>fmtMoney(v)+' ochko',ex:x=>'L'+x.a},
   {k:'gifts',i:'🎁',t:'Sovg‘alar',h:'Sovg‘alar reytingi',sub:[['gifts_sent','Yuborganlar'],['gifts_held','Hisobida borlar']],
     val:v=>fmtMoney(v)+'$',ex:x=>x.a+' ta sovg‘a'},
 ];

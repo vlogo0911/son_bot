@@ -25,7 +25,7 @@
 
   // ---------- storage ----------
   function defaults() {
-    return { v: 1, mode: 'classic', music: 50, sfx: 80, dpad: false, haptics: true, shake: true,
+    return { v: 2, mode: 'classic', music: 50, sfx: 80, dpad: true, haptics: true, shake: true,
       best: { classic: 0, portal: 0, maze: 0 }, stats: { games: 0, foods: 0, golds: 0, time: 0 }, mazeMax: 1 };
   }
   function loadStore() {
@@ -38,7 +38,7 @@
           if (MODES.indexOf(o.mode) >= 0) d.mode = o.mode;
           if (typeof o.music === 'number') d.music = clamp(Math.round(o.music), 0, 100);
           if (typeof o.sfx === 'number') d.sfx = clamp(Math.round(o.sfx), 0, 100);
-          d.dpad = !!o.dpad; d.haptics = o.haptics !== false; d.shake = o.shake !== false;
+          d.dpad = (+o.v || 1) >= 2 ? o.dpad !== false : true;   // v2: tugmalar standart yoniq (eski saqlanganlar ham) d.haptics = o.haptics !== false; d.shake = o.shake !== false;
           if (o.best) for (var i = 0; i < MODES.length; i++) d.best[MODES[i]] = Math.max(0, +o.best[MODES[i]] || 0);
           if (o.stats) { d.stats.games = +o.stats.games || 0; d.stats.foods = +o.stats.foods || 0; d.stats.golds = +o.stats.golds || 0; d.stats.time = +o.stats.time || 0; }
           d.mazeMax = Math.max(1, +o.mazeMax || 1);

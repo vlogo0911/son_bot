@@ -3600,8 +3600,12 @@ async def notify_pair_owners(application, request_id, title):
             )
         )
 
+    kind = c.execute("SELECT request_type FROM pair_requests WHERE id=?", (request_id,)).fetchone()
+    recipients = list(CAREER_OWNER_IDS)
+    if kind and kind[0] in JUDGE_KINDS:      # ⚖️ juftlik/ajrim arizalari ajrimchilarga ham
+        recipients += [j for j in sorted(judges()) if j not in recipients]
     sent = 0
-    for owner_id in CAREER_OWNER_IDS:
+    for owner_id in recipients:
         try:
             await application.bot.send_message(
                 chat_id=owner_id,
@@ -4277,9 +4281,6 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("rel:owner:"):
-        if uid not in CAREER_OWNER_IDS:
-            await q.answer("Bu amal faqat bot egalari uchun.", show_alert=True)
-            return
         parts = data.split(":")
         answer, rid = parts[2], int(parts[3])
         row = c.execute(
@@ -4287,6 +4288,9 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                FROM pair_requests WHERE id=?""",
             (rid,),
         ).fetchone()
+        if uid not in CAREER_OWNER_IDS and not (is_judge(uid) and row and row[0] in JUDGE_KINDS):
+            await q.answer("Bu amal faqat bot egalari (va ajrimchilar) uchun.", show_alert=True)
+            return
         if not row or row[4] != "pending":
             await q.answer("Ariza ko‘rib chiqilgan yoki topilmadi.", show_alert=True)
             return
@@ -11938,10 +11942,11 @@ async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #           muddat tugaganda pul foizi bilan hamyonga avtomatik tushadi.
 # Callback: "bk:<uid>:<amal>:..." — menyuni faqat profil egasi boshqaradi.
 
-LOAN_RATE = 0.13
+LOAN_RATE = 0.13            # kredit foizi — OYLIK (30 kunga), banklar `loan_rate` ham oylik
 LOAN_FIRST = 1000
 LOAN_AMOUNTS = [1000, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 25000, 30000, 40000, 50000]
-LOAN_DAYS = range(1, 8)
+LOAN_TERM_DAYS = 30         # kredit muddati; har kuni (asosiy + foiz) / 30 hamyondan avtomatik yechiladi
+LOAN_DAYS = (LOAN_TERM_DAYS,)
 DEPOSIT_RATE = 0.05
 DEPOSIT_AMOUNTS = [5000, 10000, 15000, 20000, 25000, 30000]
 DEPOSIT_DAYS = range(3, 11)
@@ -12141,6 +12146,59 @@ BANK_TEXT = {
 }
 
 
+# 📅 Kredit endi oylik foiz bilan, 30 kunda kunlik to'lovlar orqali — matnlar shunga mos
+BANK_TEXT["uz"].update({
+    "home": ("🏦 <b>{bank}</b>\n\n💵 Hamyon: <b>{wallet}$</b>\n\n💸 Kredit: {loan}\n🏦 Omonat: {deposit}\n\n"
+             "📈 Kredit — oyiga {loan_rate}% · 30 kun, har kuni avtomatik to‘lov\n📈 Omonat — kuniga {dep_rate}% · 3–10 kun"),
+    "loan_line": "qolgan qarz <b>{due}$</b> · {when} gacha · 🏦 {bank}",
+    "loan_first": ("💸 <b>KREDIT</b>\n\nBu sizning birinchi kreditingiz — <b>{amount}$</b>.\n"
+                   "Keyingi safar 1 000$ dan 50 000$ gacha olishingiz mumkin bo‘ladi.\n\n"
+                   "📈 Foiz: oyiga <b>{rate}%</b> · muddat 30 kun\n📅 Har kuni (asosiy summa + foiz) / 30 hamyondan avtomatik yechiladi 👇\n\n{warn}"),
+    "loan_amount": "💸 <b>KREDIT</b>\n\n📈 Foiz: oyiga <b>{rate}%</b> · 30 kun\nSummani tanlang — yonida kunlik to‘lov 👇",
+    "loan_term": ("💸 <b>KREDIT · {amount}$</b>\n\n📈 Foiz: oyiga <b>{rate}%</b> · muddat 30 kun\n"
+                  "📅 Har kuni (asosiy summa + foiz) / 30 avtomatik yechiladi 👇\n\n{warn}"),
+    "warn": "⚠️ Kunlik to‘lov hamyondan avtomatik yechiladi — pul yetmasa balans minusga tushishi mumkin. Istalgan payt qolgan qarzni to‘lab yopasiz.",
+    "loan_ok": "✅ Kredit berildi: <b>+{amount}$</b>\n📅 {days} kun · jami qaytariladi: <b>{due}$</b> (har kuni avtomatik)\n⏰ Oxirgi to‘lov: {when}",
+    "n_inst": "🏦 <b>{bank}</b>: kredit to‘lovi ({day}/{days}-kun) — hamyondan <b>{pay}$</b> yechildi.\n💳 Qolgan qarz: {left}$ · 💰 Balans: {bal}$",
+})
+BANK_TEXT["eng"].update({
+    "home": ("🏦 <b>{bank}</b>\n\n💵 Wallet: <b>{wallet}$</b>\n\n💸 Loan: {loan}\n🏦 Deposit: {deposit}\n\n"
+             "📈 Loan — {loan_rate}% per month · 30 days, paid daily automatically\n📈 Deposit — {dep_rate}% per day · 3–10 days"),
+    "loan_line": "<b>{due}$</b> left · until {when} · 🏦 {bank}",
+    "loan_first": ("💸 <b>LOAN</b>\n\nThis is your first loan — <b>{amount}$</b>.\nNext time you can borrow from 1 000$ to 50 000$.\n\n"
+                   "📈 Interest: <b>{rate}%</b> per month · 30 days\n📅 Every day (principal + interest) / 30 is taken automatically 👇\n\n{warn}"),
+    "loan_amount": "💸 <b>LOAN</b>\n\n📈 Interest: <b>{rate}%</b> per month · 30 days\nChoose the amount — daily payment shown next to it 👇",
+    "loan_term": "💸 <b>LOAN · {amount}$</b>\n\n📈 Interest: <b>{rate}%</b> per month · 30 days\n📅 Every day (principal + interest) / 30 is taken automatically 👇\n\n{warn}",
+    "warn": "⚠️ The daily payment is taken from your wallet automatically — the balance may go negative. You can pay off the rest any time.",
+    "loan_ok": "✅ Loan granted: <b>+{amount}$</b>\n📅 {days} days · total to repay: <b>{due}$</b> (daily, automatic)\n⏰ Last payment: {when}",
+    "n_inst": "🏦 <b>{bank}</b>: loan payment (day {day}/{days}) — <b>{pay}$</b> taken.\n💳 Left: {left}$ · 💰 Balance: {bal}$",
+})
+BANK_TEXT["ru"].update({
+    "home": ("🏦 <b>{bank}</b>\n\n💵 Кошелёк: <b>{wallet}$</b>\n\n💸 Кредит: {loan}\n🏦 Вклад: {deposit}\n\n"
+             "📈 Кредит — {loan_rate}% в месяц · 30 дней, ежедневное автосписание\n📈 Вклад — {dep_rate}% в день · 3–10 дней"),
+    "loan_line": "остаток долга <b>{due}$</b> · до {when} · 🏦 {bank}",
+    "loan_first": ("💸 <b>КРЕДИТ</b>\n\nЭто ваш первый кредит — <b>{amount}$</b>.\nВ следующий раз можно взять от 1 000$ до 50 000$.\n\n"
+                   "📈 Ставка: <b>{rate}%</b> в месяц · 30 дней\n📅 Каждый день (сумма + проценты) / 30 списывается автоматически 👇\n\n{warn}"),
+    "loan_amount": "💸 <b>КРЕДИТ</b>\n\n📈 Ставка: <b>{rate}%</b> в месяц · 30 дней\nВыберите сумму — рядом ежедневный платёж 👇",
+    "loan_term": "💸 <b>КРЕДИТ · {amount}$</b>\n\n📈 Ставка: <b>{rate}%</b> в месяц · 30 дней\n📅 Каждый день (сумма + проценты) / 30 списывается автоматически 👇\n\n{warn}",
+    "warn": "⚠️ Ежедневный платёж списывается автоматически — баланс может уйти в минус. Остаток можно погасить в любой момент.",
+    "loan_ok": "✅ Кредит выдан: <b>+{amount}$</b>\n📅 {days} дн. · всего к возврату: <b>{due}$</b> (ежедневно, автоматически)\n⏰ Последний платёж: {when}",
+    "n_inst": "🏦 <b>{bank}</b>: платёж по кредиту ({day}/{days} день) — списано <b>{pay}$</b>.\n💳 Остаток: {left}$ · 💰 Баланс: {bal}$",
+})
+BANK_TEXT["kz"].update({
+    "home": ("🏦 <b>{bank}</b>\n\n💵 Әмиян: <b>{wallet}$</b>\n\n💸 Несие: {loan}\n🏦 Салым: {deposit}\n\n"
+             "📈 Несие — айына {loan_rate}% · 30 күн, күнделікті автотөлем\n📈 Салым — күніне {dep_rate}% · 3–10 күн"),
+    "loan_line": "қалған қарыз <b>{due}$</b> · {when} дейін · 🏦 {bank}",
+    "loan_first": ("💸 <b>НЕСИЕ</b>\n\nБұл сіздің алғашқы несиеңіз — <b>{amount}$</b>.\nКелесі жолы 1 000$-дан 50 000$-ға дейін алуға болады.\n\n"
+                   "📈 Пайыз: айына <b>{rate}%</b> · 30 күн\n📅 Күн сайын (сома + пайыз) / 30 автоматты түрде алынады 👇\n\n{warn}"),
+    "loan_amount": "💸 <b>НЕСИЕ</b>\n\n📈 Пайыз: айына <b>{rate}%</b> · 30 күн\nСоманы таңдаңыз — қасында күндік төлем 👇",
+    "loan_term": "💸 <b>НЕСИЕ · {amount}$</b>\n\n📈 Пайыз: айына <b>{rate}%</b> · 30 күн\n📅 Күн сайын (сома + пайыз) / 30 автоматты түрде алынады 👇\n\n{warn}",
+    "warn": "⚠️ Күндік төлем әмияннан автоматты түрде алынады — баланс минусқа түсуі мүмкін. Қалған қарызды кез келген уақытта жабуға болады.",
+    "loan_ok": "✅ Несие берілді: <b>+{amount}$</b>\n📅 {days} күн · барлығы қайтарылады: <b>{due}$</b> (күнделікті, автоматты)\n⏰ Соңғы төлем: {when}",
+    "n_inst": "🏦 <b>{bank}</b>: несие төлемі ({day}/{days}-күн) — <b>{pay}$</b> алынды.\n💳 Қалғаны: {left}$ · 💰 Баланс: {bal}$",
+})
+
+
 def bank_t(chat_id, key, **kwargs):
     lang = LANG_CACHE.get(chat_id, DEFAULT_LANG)
     text = BANK_TEXT.get(lang, BANK_TEXT["uz"]).get(key) or BANK_TEXT["uz"][key]
@@ -12153,7 +12211,13 @@ def fmt_when(ts):
 
 
 def loan_due(amount, days, rate=LOAN_RATE):
-    return amount + round(amount * rate * days)
+    """Qaytariladigan jami summa: foiz oylik (30 kun) — muddatga mutanosib."""
+    return amount + round(amount * rate * days / LOAN_TERM_DAYS)
+
+
+def loan_daily(due, days=LOAN_TERM_DAYS):
+    """Kunlik avtomatik to'lov (asosiy + foiz) / muddat."""
+    return round(due / max(1, days))
 
 
 def deposit_payout(amount, days, rate=DEPOSIT_RATE):
@@ -12222,6 +12286,12 @@ def init_bank():
         for table in ("bank_loans", "bank_deposits"):
             if "bank_id" not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN bank_id INTEGER NOT NULL DEFAULT 1")
+        # 📅 Oylik kredit: kunlik bo'lib to'lash (plan='monthly'); eski kreditlar — bir martalik (plan='once')
+        lcols = {r[1] for r in c.execute("PRAGMA table_info(bank_loans)")}
+        for col, ddl in (("paid", "INTEGER NOT NULL DEFAULT 0"), ("plan", "TEXT NOT NULL DEFAULT 'once'"),
+                         ("next_at", "INTEGER")):
+            if col not in lcols:
+                c.execute(f"ALTER TABLE bank_loans ADD COLUMN {col} {ddl}")
         c.execute("UPDATE banks SET active=1 WHERE id=1")
         if not c.execute("SELECT 1 FROM banks LIMIT 1").fetchone():
             # Avvalgi yagona bank — Gold Invest — o'sha sozlamalar bilan 1-bank bo'ladi.
@@ -12251,8 +12321,9 @@ def pct(rate):
 
 
 def active_loan(user_id):
+    """(id, amount, days, QOLGAN qarz, due_at, bank_id) — oylik kreditda to'langan qismi ayirilgan."""
     return db().execute(
-        "SELECT id, amount, days, due, due_at, bank_id FROM bank_loans WHERE user_id=? AND status='active'",
+        "SELECT id, amount, days, due - paid, due_at, bank_id FROM bank_loans WHERE user_id=? AND status='active'",
         (user_id,),
     ).fetchone()
 
@@ -12345,7 +12416,8 @@ def bank_back_row(chat_id, uid, bank):
 def bank_loan_term_view(chat_id, uid, bank, amount, first):
     rate = bank["loan_rate"]
     buttons = [
-        bank_btn(uid, f"{d} {bank_t(chat_id, 'days')} → {fmt_money(loan_due(amount, d, rate))}$", "lt", bank["id"], amount, d)
+        bank_btn(uid, f"✅ {d} {bank_t(chat_id, 'days')} → {fmt_money(loan_due(amount, d, rate))}$ "
+                      f"({fmt_money(loan_daily(loan_due(amount, d, rate), d))}${bank_t(chat_id, 'per_day')})", "lt", bank["id"], amount, d)
         for d in LOAN_DAYS
     ]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
@@ -12362,7 +12434,7 @@ def bank_loan_amount_view(chat_id, uid, bank):
     per_day = bank_t(chat_id, "per_day")
     rate = bank["loan_rate"]
     buttons = [
-        bank_btn(uid, f"{fmt_money(a)}$ · +{fmt_money(round(a * rate))}${per_day}", "la", bank["id"], a)
+        bank_btn(uid, f"{fmt_money(a)}$ · {fmt_money(loan_daily(loan_due(a, LOAN_TERM_DAYS, rate)))}${per_day}", "la", bank["id"], a)
         for a in LOAN_AMOUNTS
     ]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
@@ -12397,9 +12469,12 @@ def bank_dep_term_view(chat_id, uid, bank, amount):
 def issue_loan(c, uid, bank_id, amount, days, due, now):
     """Kreditni beradi (tranzaksiya ichida). Qaytaradi: due_at."""
     due_at = now + days * DAY_SECONDS
+    monthly = days == LOAN_TERM_DAYS
     c.execute(
-        "INSERT INTO bank_loans(user_id, amount, days, due, taken_at, due_at, bank_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (uid, amount, days, due, now, due_at, bank_id),
+        "INSERT INTO bank_loans(user_id, amount, days, due, taken_at, due_at, bank_id, plan, next_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (uid, amount, days, due, now, due_at, bank_id, "monthly" if monthly else "once",
+         now + DAY_SECONDS if monthly else None),
     )
     _wallet_add(c, uid, amount)
     return due_at
@@ -12640,7 +12715,7 @@ async def submit_loan_app(bot, uid, first_name, bank, amount, days, due, purpose
         f"{user_mention(uid, first_name)} (<code>{uid}</code>) sizning <b>{escape(bank['name'])}</b> "
         f"bankingizdan kredit olmoqchi.\n\n"
         f"💵 Summa: <b>{fmt_money(amount)}$</b> · 📅 {days} kun · "
-        f"💳 qaytaradi: <b>{fmt_money(due)}$</b> ({pct(bank['loan_rate'])}% / kun)\n"
+        f"💳 qaytaradi: <b>{fmt_money(due)}$</b> ({pct(bank['loan_rate'])}% / oy, kuniga {fmt_money(loan_daily(due, days))}$)\n"
         f"🎯 Maqsad: <i>{escape(purpose)}</i>\n\n"
         f"<b>Ma’lumotlar:</b>\n{applicant_info(uid)}"
     )
@@ -12766,7 +12841,7 @@ def panel_banks_view():
     text = (
         "🏦 <b>BANKLAR BOSHQARUVI</b>\n\n"
         "Bankni tanlang yoki yangisini qo‘shing.\n"
-        "💸 kredit % / 🏦 omonat % (kunlik) · 📝 — kredit ariza orqali · ⛔ — yopiq"
+        "💸 kredit % (oylik) / 🏦 omonat % (kunlik) · 📝 — kredit ariza orqali · ⛔ — yopiq"
     )
     return text, InlineKeyboardMarkup(rows)
 
@@ -12777,7 +12852,7 @@ def panel_bank_view(bank_id):
         return panel_banks_view()
     c = db()
     loans = c.execute(
-        "SELECT COUNT(*), COALESCE(SUM(due), 0) FROM bank_loans WHERE bank_id=? AND status='active'", (bank_id,)
+        "SELECT COUNT(*), COALESCE(SUM(due - paid), 0) FROM bank_loans WHERE bank_id=? AND status='active'", (bank_id,)
     ).fetchone()
     deps = c.execute(
         "SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM bank_deposits WHERE bank_id=? AND status='active'", (bank_id,)
@@ -12788,7 +12863,7 @@ def panel_bank_view(bank_id):
     text = (
         f"🏦 <b>{escape(b['name'])}</b>{'' if b['active'] else ' ⛔ yopiq'}\n\n"
         f"👤 Egasi: {person_name(b['owner_id'])} (<code>{b['owner_id']}</code>)\n"
-        f"💸 Kredit foizi: <b>{pct(b['loan_rate'])}%</b> / kun\n"
+        f"💸 Kredit foizi: <b>{pct(b['loan_rate'])}%</b> / oy (30 kun, kunlik to‘lov)\n"
         f"🏦 Omonat foizi: <b>{pct(b['deposit_rate'])}%</b> / kun\n"
         f"📝 Kredit berish: <b>{'ariza orqali (egasi tasdiqlaydi)' if b['apply_mode'] else 'avtomatik'}</b>\n\n"
         f"📊 Faol kreditlar: {loans[0]} ta · {fmt_money(loans[1])}$\n"
@@ -12897,8 +12972,30 @@ async def bank_settle_due(bot):
     """Muddati kelgan kreditlarni yechadi va omonatlarni to'laydi."""
     now = int(time.time())
     c = db()
+    # 📅 Oylik kreditlar: har kuni (asosiy + foiz)/30 yechiladi (balans minusga tushishi mumkin)
+    for loan_id, uid, due, paid, taken, bank_id, days in c.execute(
+            "SELECT id, user_id, due, paid, taken_at, bank_id, days FROM bank_loans "
+            "WHERE status='active' AND plan='monthly' AND next_at<=?", (now,)).fetchall():
+        n = min(days, (now - taken) // DAY_SECONDS)
+        target = due if n >= days else round(due * n / days)
+        delta = max(0, target - paid)
+        done = target >= due
+        with c:
+            cur = c.execute(
+                "UPDATE bank_loans SET paid=?, next_at=?, status=?, closed_at=? WHERE id=? AND status='active' AND paid=?",
+                (target, taken + (n + 1) * DAY_SECONDS, "paid" if done else "active", now if done else None, loan_id, paid))
+            if cur.rowcount != 1:
+                continue
+            if delta:
+                _wallet_add(c, uid, -delta)
+        if delta:
+            bal = wallet_balance(uid)
+            await bank_notify(bot, uid, "n_inst", pay=fmt_money(delta), left=fmt_money(due - target), day=n, days=days,
+                              bal=fmt_money(bal), bank=bank_name(bank_id))
+            if done:
+                await log_money_event(bot, f"🏅 <b>KREDIT TO‘LIQ YOPILDI (oylik)</b>\n{person_name(uid)}: jami {due}$")
     loans = c.execute(
-        "SELECT id, user_id, due, bank_id FROM bank_loans WHERE status='active' AND due_at<=?", (now,)
+        "SELECT id, user_id, due - paid, bank_id FROM bank_loans WHERE status='active' AND plan='once' AND due_at<=?", (now,)
     ).fetchall()
     for loan_id, uid, due, bank_id in loans:
         with c:
@@ -17087,6 +17184,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_edu_enroll(uid, body.get("kid"), body.get("inst"))
         elif path in ("/app/api/edu/add", "/app/api/edu/update", "/app/api/edu/toggle"):
             coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
+        elif path == "/app/api/owner/amnesty":
+            coro = web_amnesty(uid, body)
+        elif path in ("/app/api/judges/add", "/app/api/judges/remove"):
+            coro = web_judge_admin(uid, path.rsplit("/", 1)[1], body)
         elif path in ("/app/api/testers/add", "/app/api/testers/remove"):
             coro = web_tester_admin(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/vip/grant":
@@ -18199,6 +18300,9 @@ def init_webapp():
             plays INTEGER NOT NULL DEFAULT 0, wagered INTEGER NOT NULL DEFAULT 0, won INTEGER NOT NULL DEFAULT 0,
             best_win INTEGER NOT NULL DEFAULT 0, best_mult REAL NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
             PRIMARY KEY(user_id, game))""")
+        # ⚖️ Ajrimchilar (juftlik/ajrim arizalarini ko'rib chiqadi)
+        c.execute("""CREATE TABLE IF NOT EXISTS judges (user_id INTEGER PRIMARY KEY, added_by INTEGER,
+            created_at INTEGER NOT NULL)""")
         # 🧪 Web testerlar (ownerlar qo'shadi) — test rejimidagi bo'limlar ularga ham ochiq
         c.execute("""CREATE TABLE IF NOT EXISTS web_testers (user_id INTEGER PRIMARY KEY, added_by INTEGER,
             created_at INTEGER NOT NULL)""")
@@ -19505,6 +19609,64 @@ def can_test(uid):
     return uid in CAREER_OWNER_IDS or is_tester(uid)
 
 
+# ── ⚖️ Ajrimchilar: ownerlar tayinlaydi; juftlashish va ajrashish arizalari ownerlar bilan birga ularga ham keladi,
+# tasdiqlash/rad etish huquqi bor (boshqa owner huquqlari yo'q).
+JUDGE_KINDS = ("pair", "divorce")
+_JUDGES = None
+
+
+def judges():
+    global _JUDGES
+    if _JUDGES is None:
+        try:
+            _JUDGES = {r[0] for r in db().execute("SELECT user_id FROM judges")}
+        except sqlite3.OperationalError:
+            return set()
+    return _JUDGES
+
+
+def is_judge(uid):
+    return uid in judges()
+
+
+def judge_list():
+    return [{"id": u, "name": _plain_person(u), "added": tashkent_dt(t)} for u, t in db().execute(
+        "SELECT user_id, created_at FROM judges ORDER BY created_at DESC")]
+
+
+async def web_judge_admin(uid, act, body):
+    """Ownerlar: ID/@username ni ajrimchilarga qo'shish / olib tashlash."""
+    global _JUDGES
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner_only"}
+    target = chat_resolve(body.get("q"))
+    if not target:
+        return {"error": "not_found"}
+    if act == "add":
+        if target in CAREER_OWNER_IDS:
+            return {"error": "owner"}
+        if len(judges()) >= 50:
+            return {"error": "max"}
+        with db() as c:
+            fresh = c.execute("INSERT OR IGNORE INTO judges(user_id, added_by, created_at) VALUES (?,?,?)",
+                              (target, uid, int(time.time()))).rowcount
+    elif act == "remove":
+        with db() as c:
+            fresh = c.execute("DELETE FROM judges WHERE user_id=?", (target,)).rowcount
+    else:
+        return {"error": "act"}
+    _JUDGES = None
+    if act == "add" and fresh and _EXCHANGE_LOOP_BOT is not None:
+        try:
+            await _EXCHANGE_LOOP_BOT.send_message(
+                target, "⚖️ <b>Siz ajrimchi etib tayinlandingiz!</b>\n"
+                        "Endi 💞 juftlashish va 💔 ajrashish arizalari sizga ham keladi — ✅ tasdiqlash yoki ❌ rad etish "
+                        "tugmalari bilan qaror qilasiz.")
+        except TelegramError:
+            pass
+    return {"result": act, "name": _plain_person(target), "judges": judge_list()}
+
+
 def tester_list():
     return [{"id": u, "name": _plain_person(u), "added": tashkent_dt(t)} for u, t in db().execute(
         "SELECT user_id, created_at FROM web_testers ORDER BY created_at DESC")]
@@ -19835,6 +19997,50 @@ def owner_flags_payload():
     return {k: bool(f.get(k, 0)) for k in OWNER_FLAG_KEYS}
 
 
+# 🧹 Kredit amnistiyasi (ownerlar, bitta tugma): faol kreditlarning qolgan qarzi hamyondan yechilib kredit yopiladi,
+# so'ng minusdagi barcha balanslar 0 ga tenglashtiriladi (hech kim minusda qolmaydi).
+def amnesty_preview():
+    c = db()
+    loans = c.execute("SELECT COUNT(*), COALESCE(SUM(due - paid), 0) FROM bank_loans WHERE status='active'").fetchone()
+    neg = c.execute("SELECT COUNT(*), COALESCE(SUM(money), 0) FROM user_wallet WHERE money < 0").fetchone()
+    return {"loans": loans[0], "loan_debt": int(loans[1]), "neg": neg[0], "neg_sum": int(-neg[1])}
+
+
+async def web_amnesty(uid, body):
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner_only"}
+    if not body.get("confirm"):
+        return {"error": "confirm", "preview": amnesty_preview()}
+    now = int(time.time())
+    c = db()
+    touched = {}
+    with c:
+        for loan_id, user, left in c.execute(
+                "SELECT id, user_id, due - paid FROM bank_loans WHERE status='active'").fetchall():
+            _wallet_add(c, user, -max(0, left))
+            c.execute("UPDATE bank_loans SET status='forgiven', closed_at=? WHERE id=?", (now, loan_id))
+            touched[user] = touched.get(user, 0) + max(0, left)
+        negs = c.execute("SELECT user_id, money FROM user_wallet WHERE money < 0").fetchall()
+        c.execute("UPDATE user_wallet SET money=0 WHERE money < 0")
+    for user, _ in negs:
+        touched.setdefault(user, 0)
+    res = {"result": "done", "loans": sum(1 for v in touched.values() if v), "users": len(touched),
+           "neg": len(negs), "neg_sum": int(-sum(m for _, m in negs)), "preview": amnesty_preview()}
+    if _EXCHANGE_LOOP_BOT is not None:
+        await log_money_event(_EXCHANGE_LOOP_BOT, f"🧹 <b>KREDIT AMNISTIYASI</b> ({person_name(uid)})\n"
+                                                 f"Yopilgan kreditlar: {res['loans']} · minusdan 0 ga: {res['neg']} ta")
+        for user, left in touched.items():
+            try:
+                await _EXCHANGE_LOOP_BOT.send_message(
+                    user, "🧹 <b>Kredit amnistiyasi</b>\n" + (f"Kreditingiz yopildi (qolgan {fmt_money(left)}$ hamyondan yechildi). "
+                                                              if left else "") +
+                    f"Qarzingiz kechirildi — balansingiz endi <b>{fmt_money(wallet_balance(user))}$</b>.")
+            except TelegramError:
+                pass
+            await asyncio.sleep(0.05)
+    return res
+
+
 async def web_owner_flag(uid, key):
     if uid not in CAREER_OWNER_IDS:
         return {"error": "owner_only"}
@@ -19879,8 +20085,11 @@ async def webapp_payload(user_id):
     bank = {"loan": None, "deposit": None}
     lo = active_loan(user_id)
     if lo:
+        plan = c.execute("SELECT plan, due, paid FROM bank_loans WHERE id=?", (lo[0],)).fetchone()
         bank["loan"] = {"amount": fmt_money(lo[1]), "days": lo[2], "due": fmt_money(lo[3]),
-                        "due_at": tashkent_dt(lo[4]) if lo[4] else "—", "bank": _bank_name(lo[5])}
+                        "due_at": tashkent_dt(lo[4]) if lo[4] else "—", "bank": _bank_name(lo[5]),
+                        "monthly": plan[0] == "monthly", "daily": fmt_money(loan_daily(plan[1], lo[2])),
+                        "paid": fmt_money(plan[2]), "total": fmt_money(plan[1])}
     dep = active_deposit(user_id)
     if dep:
         bank["deposit"] = {"amount": fmt_money(dep[1]), "days": dep[2], "payout": fmt_money(dep[3]),
@@ -19992,10 +20201,12 @@ async def webapp_payload(user_id):
         "vip": vip_payload(user_id),
         "vip_list": vip_list() if is_owner else None,
         "testers": tester_list() if is_owner else None,
+        "judges": judge_list() if is_owner else None,
         "tops": tops_payload(user_id),
         "is_tester": is_tester(user_id),
         "news_unread": news_unread(user_id),
         "owner_flags": owner_flags_payload() if is_owner else None,
+        "amnesty": amnesty_preview() if is_owner else None,
         "is_owner": is_owner,
         "top": [{
             "name": (t[2] or str(t[0])), "username": t[3],
@@ -21852,8 +22063,9 @@ function render(res){
   if(d.bank && d.bank.loan){
     const l=d.bank.loan;
     bk.appendChild($('<div class="card full"><div class="lbl">💳 Faol kredit · '+esc(l.bank)+'</div>'+
-      '<div class="val mag">'+esc(l.due)+'$</div>'+
-      '<div class="hsub">Olingan: '+esc(l.amount)+'$ · '+esc(l.days)+' kun · muddat: '+esc(l.due_at)+'</div></div>'));
+      '<div class="val mag">'+esc(l.due)+'$</div><div class="hsub">qolgan qarz</div>'+
+      (l.monthly?'<div class="hsub">📅 Har kuni avtomatik: <b>'+esc(l.daily)+'$</b> · to‘langan '+esc(l.paid)+'$ / '+esc(l.total)+'$</div>':'')+
+      '<div class="hsub">Olingan: '+esc(l.amount)+'$ · '+esc(l.days)+' kun · oxirgi to‘lov: '+esc(l.due_at)+'</div></div>'));
   }
   if(d.bank && d.bank.deposit){
     const s=d.bank.deposit;
@@ -21862,7 +22074,7 @@ function render(res){
       '<div class="hsub">Qo‘yilgan: '+esc(s.amount)+'$ · '+esc(s.days)+' kun · yechish: '+esc(s.matures_at)+'</div></div>'));
   }
   const bo=d.bank_opts||{};
-  const bankSel=(bo.banks||[]).map(b=>'<option value="'+b.id+'" data-apply="'+(b.apply?1:0)+'">'+esc(b.name)+' · '+b.loan_rate+'%'+(b.apply?' · 📝 ariza':'')+'</option>').join('');
+  const bankSel=(bo.banks||[]).map(b=>'<option value="'+b.id+'" data-apply="'+(b.apply?1:0)+'" data-rate="'+b.loan_rate+'">'+esc(b.name)+' · '+b.loan_rate+'% / oy'+(b.apply?' · 📝 ariza':'')+'</option>').join('');
   if(bo.pending_app) bk.appendChild($('<div class="card full" style="margin-top:12px"><div class="center">📝 Kredit arizangiz bank egasida ko‘rib chiqilmoqda.</div></div>'));
   // Kredit to'lash
   if(d.bank && d.bank.loan){
@@ -21877,11 +22089,15 @@ function render(res){
     const f=$('<div class="card full" style="margin-top:12px"><div class="lbl">💸 Kredit olish</div>'+
       '<div class="frow"><select class="sel" id="lbank">'+bankSel+'</select></div>'+
       '<div class="frow"><select class="sel" id="lamt">'+amtO+'</select><select class="sel" id="ldays">'+dayO+'</select></div>'+
+      '<div class="hsub" id="lcalc" style="margin:2px 0 8px"></div>'+
       '<div class="frow" id="lpw" style="display:none"><input class="bet" id="lpurpose" placeholder="🎯 Kredit maqsadi (bank egasi ko‘radi)" style="text-align:left"></div>'+
       '<button class="btn go full" id="loanbtn">💸 Kredit olish</button></div>');
-    const lb=app_q(f,'#lbank'), syncApply=()=>{ const ap=lb.selectedOptions[0]&&lb.selectedOptions[0].dataset.apply==='1';
-      app_q(f,'#lpw').style.display=ap?'':'none'; app_q(f,'#loanbtn').textContent=ap?'📝 Ariza yuborish':'💸 Kredit olish'; };
-    lb.onchange=syncApply; syncApply();
+    const lb=app_q(f,'#lbank'), syncApply=()=>{ const o=lb.selectedOptions[0], ap=o&&o.dataset.apply==='1';
+      app_q(f,'#lpw').style.display=ap?'':'none'; app_q(f,'#loanbtn').textContent=ap?'📝 Ariza yuborish':'💸 Kredit olish';
+      // oylik foiz: jami = summa + summa·foiz·kun/30; har kuni jami/kun avtomatik yechiladi
+      const a=+app_q(f,'#lamt').value, dd=+app_q(f,'#ldays').value||30, rt=(o?+o.dataset.rate:13)/100, tot=a+Math.round(a*rt*dd/30);
+      app_q(f,'#lcalc').innerHTML='📅 Jami qaytariladi <b>'+fmtMoney(tot)+'$</b> · har kuni avtomatik <b>'+fmtMoney(Math.round(tot/dd))+'$</b> ('+dd+' kun)'; };
+    lb.onchange=syncApply; app_q(f,'#lamt').onchange=syncApply; app_q(f,'#ldays').onchange=syncApply; syncApply();
     app_q(f,'#loanbtn').onclick=()=>{ const b=app_q(f,'#loanbtn'); b.disabled=true;
       api('/app/api/bank/loan',{bank:lb.value,amount:app_q(f,'#lamt').value,days:app_q(f,'#ldays').value,purpose:app_q(f,'#lpurpose').value}).then(r=>{
         if(r.result==='loan'){ setBal(r.balance); toast('✅ Kredit olindi: +'+fmtMoney(r.amount)+'$'); refresh(); }
@@ -22195,7 +22411,7 @@ function render(res){
   if(d.is_owner && d.owner){
     const o=$('<div class="sec" id="s-owner"></div>');
     o.appendChild($('<h2>👑 Owner panel</h2>'));
-    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['vip','👑','VIP'],['test','🧪','Testerlar'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
+    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['vip','👑','VIP'],['test','🧪','Testerlar'],['judge','⚖️','Ajrimchilar'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
     const oseg=$('<div class="oseg">'+OG.map(([k,i,l])=>'<span data-g="'+k+'"><i>'+i+'</i>'+l+'</span>').join('')+'</div>');
     o.appendChild(oseg);
     const G={}; OG.forEach(([k])=>{ G[k]=$('<div class="ogrp" data-g="'+k+'"></div>'); o.appendChild(G[k]); });
@@ -22237,7 +22453,9 @@ function render(res){
     G.news.appendChild(newsAdmin(d));
     G.vip.appendChild(vipAdmin(d));
     G.test.appendChild(testerAdmin(d));
+    G.judge.appendChild(judgeAdmin(d));
     G.set.appendChild(ownerFlags(d));
+    G.set.appendChild(amnestyCard(d));
     if(d.emp&&d.emp.admin){ // 🪙 EMP paketlari — narxlarni ownerlar boshqaradi
       const ea=$('<div class="card full oemp"></div>');
       const drawEA=e=>{ const A=e.admin;
@@ -23685,6 +23903,24 @@ const BSTORMG=(()=>{ const load=game3d('block_storm','__BS_VER__',['bs_core.js',
   return {open, load};
 })();
 // 🧪 Web testerlar — haqiqiy odamlar jamoasi test rejimidagi bo'limlarni ko'radi
+// ⚖️ Ajrimchilar — juftlashish va ajrashish arizalari ularga ham keladi
+function judgeAdmin(d){
+  const box=$('<div class="card full"></div>');
+  const ERR={owner_only:'👑 Faqat ownerlar',not_found:'🔎 Foydalanuvchi topilmadi (botni ishlatgan bo‘lishi kerak)',owner:'👑 Ownerlarga arizalar baribir keladi',max:'⚠️ Ajrimchilar soni chegarada (50)'};
+  const draw=list=>{ d.judges=list;
+    box.innerHTML='<div class="lbl">⚖️ Ajrimchi tayinlash</div>'+
+      '<div class="hsub" style="margin-bottom:8px">💞 Juftlashish va 💔 ajrashish arizalari ownerlar bilan birga ajrimchilarga ham keladi — ular ✅ tasdiqlaydi yoki ❌ rad etadi. Boshqa owner huquqlari berilmaydi.</div>'+
+      '<div class="frow"><input class="bet" id="jgQ" placeholder="ID yoki @username" style="text-align:left" autocomplete="off"></div>'+
+      '<button class="btn go full" id="jgA">⚖️ Ajrimchi qilish</button>'+
+      '<div class="lbl" style="margin-top:16px">Ajrimchilar ('+list.length+')</div>'+
+      (list.length?list.map(x=>'<div class="npost"><span class="npi e">⚖️</span><div class="npm"><b>'+esc(x.name)+'</b><div class="hsub">ID '+x.id+' · '+esc(x.added)+' dan</div></div>'+
+        '<span class="na" data-rm="'+x.id+'" title="Olib tashlash">🗑</span></div>').join(''):'<div class="hsub">Hali ajrimchi yo‘q — arizalar faqat ownerlarga keladi</div>');
+    const send=(act,q)=>api('/app/api/judges/'+act,{q:q}).then(r=>{ if(r.result){ toast(act==='add'?'✅ '+r.name+' — ajrimchi':'✅ '+r.name+' — ajrimchilikdan olindi'); draw(r.judges); }
+      else toast(ERR[r.error]||'⚠️ Xatolik'); });
+    app_q(box,'#jgA').onclick=()=>{ const q=app_q(box,'#jgQ').value.trim(); if(!q){ toast('🔎 ID yoki @username kiriting'); return; } send('add',q); };
+    box.querySelectorAll('[data-rm]').forEach(x=>x.onclick=()=>send('remove',x.dataset.rm)); };
+  draw(d.judges||[]); return box;
+}
 function testerAdmin(d){
   const box=$('<div class="card full"></div>');
   const ERR={owner_only:'👑 Faqat ownerlar',not_found:'🔎 Foydalanuvchi topilmadi (botni ishlatgan bo‘lishi kerak)',owner:'👑 Ownerlar allaqachon hamma narsani ko‘radi',max:'⚠️ Testerlar soni chegarada (200)'};
@@ -23961,6 +24197,22 @@ function newsAdmin(d){
           else toast(ERR[res.error]||'⚠️ Xatolik'); }); }); });
   };
   draw(d.news||[]); return box;
+}
+// 🧹 Kredit amnistiyasi — bitta tugma (ikki bosqichli tasdiq)
+function amnestyCard(d){
+  const box=$('<div class="card full" style="margin-top:12px"></div>');
+  const draw=p=>{ p=p||{loans:0,loan_debt:0,neg:0,neg_sum:0}; d.amnesty=p;
+    box.innerHTML='<div class="lbl">🧹 Kredit amnistiyasi</div>'+
+      '<div class="hsub">Faol kreditlarning qolgan qarzi hamyondan yechilib kredit yopiladi, so‘ng minusdagi balanslar <b>0</b> ga tenglanadi.</div>'+
+      '<div class="grid" style="margin-top:10px">'+card('💳 Faol kreditlar',p.loans+' ta · '+fmtMoney(p.loan_debt)+'$','mag')+card('🔻 Minus balanslar',p.neg+' ta · '+(p.neg_sum?'−':'')+fmtMoney(p.neg_sum)+'$','neon')+'</div>'+
+      '<button class="btn full" id="amB" style="margin-top:10px">🧹 Kreditlarni yo‘qotish</button>';
+    const b=app_q(box,'#amB'); let armed=0;
+    b.onclick=()=>{ if(!armed){ armed=1; b.textContent='⚠️ Ishonchingiz komilmi? Yana bosing'; b.classList.add('go'); setTimeout(()=>{ if(armed===1){ armed=0; b.textContent='🧹 Kreditlarni yo‘qotish'; b.classList.remove('go'); } },5000); return; }
+      armed=2; b.disabled=true; b.textContent='⏳ Bajarilmoqda…';
+      api('/app/api/owner/amnesty',{confirm:true}).then(r=>{ if(r.result==='done'){ toast('✅ '+r.loans+' kredit yopildi · '+r.neg+' ta balans 0 ga'); draw(r.preview); refresh&&refresh(); }
+        else { toast('⚠️ Xatolik'); draw(d.amnesty); } }); };
+  };
+  draw(d.amnesty); return box;
 }
 function ownerFlags(d){
   const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun']];

@@ -395,7 +395,7 @@
 - ⚖️ Ajrimchilar: web Owner → ⚖️ Ajrimchilar (`judgeAdmin`, `/app/api/judges/{add,remove}` → `web_judge_admin`, jadval `judges`,
   `is_judge`/`judges()` kesh). `notify_pair_owners` — `JUDGE_KINDS` (pair, divorce) arizalari ownerlar + ajrimchilarga; `rel:owner`
   callback ajrimchiga faqat shu turlarda ruxsat (ishdan bo'shash va boshqa owner amallari — yo'q).
-- 🍱 Farzandlar uchun premium to'yimli ovqatlar (🪙 EMP Coin'ga): `KID_PREMIUM` — 12 taom/shirinlik (yosh oralig'i, EMP narxi 5–15,
+- 🍱 Farzandlar uchun premium to'yimli ovqatlar (🪙 EMP Coin'ga): `KID_PREMIUM` — 12 taom/shirinlik (yosh oralig'i, EMP narxi — har biri 1 EMP,
   kayfiyat bonusi, nomi, tavsif). Web: farzand kartasida "🍱 Premium" (`premiumSheet` — 3 ustunli kartalar, yoshga mos bo'lmasa 🔒),
   `/app/api/kid` act=`premium` → `web_kid_action`: faqat ota-ona, `emp_enabled_for`, EMP atomik yechiladi (`emp_wallet`), to'qlik = 100,
   kayfiyat +bonus; 12 soatlik qoida saqlanadi — vaqti kelgan bo'lsa `kid_eat` (o'sish ovqati), aks holda faqat to'yg'izadi; to'q va

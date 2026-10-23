@@ -13729,20 +13729,20 @@ KID_ITEMS = {
 KID_MEAL_GAP = 12 * 3600    # farzand 12 soatda 1 marta ovqatlanadi
 # 🍱 Premium to'yimli ovqatlar (🪙 EMP Coin'ga): har biri to'qlikni darhol 100% qiladi (+ kayfiyat bonusi).
 # 12 soatlik ovqat qoidasi saqlanadi: vaqti kelgan bo'lsa — o'sish uchun ovqat hisoblanadi, aks holda faqat to'yg'izadi.
-# kalit: (yoshdan, yoshgacha, EMP narxi, kayfiyat +, nomi, qisqa tavsif)
+# kalit: (yoshdan, yoshgacha, EMP narxi — hammasi 1 EMP, kayfiyat +, nomi, qisqa tavsif)
 KID_PREMIUM = {
-    "p_formula": (0, 2, 5, 10, "🍼 Premium sut aralashmasi", "vitaminli, chaqaloqlar uchun"),
-    "p_porridge": (0, 8, 6, 10, "🥣 Asal-mevali bo‘tqa", "issiq, yumshoq, to‘yimli"),
-    "p_yogurt": (1, 22, 6, 15, "🍓 Qulupnayli yogurt", "kaltsiy va mevalar"),
-    "p_icecream": (2, 22, 7, 25, "🍦 Muzqaymoq", "vanil va shokolad"),
-    "p_cake": (2, 22, 10, 30, "🍰 Qulupnayli tort", "bayramona shirinlik"),
-    "p_pasta": (3, 22, 8, 15, "🍝 Pishloqli makaron", "bolalarning sevimlisi"),
-    "p_cupcake": (3, 22, 8, 25, "🧁 Kapkeyk va kakao", "kremli, iliq kakao bilan"),
-    "p_choco": (3, 22, 8, 25, "🍫 Shokoladli keks", "yong‘oqli, mayin"),
-    "p_honey": (4, 22, 8, 15, "🍯 Asal va yong‘oqlar", "kuch-quvvat beradi"),
-    "p_burger": (6, 22, 10, 20, "🍔 Burger va sharbat", "katta porsiya"),
-    "p_sushi": (10, 22, 12, 20, "🍣 Sushi to‘plami", "baliq va guruch"),
-    "p_steak": (12, 22, 15, 20, "🥩 Steyk va sabzavotlar", "eng to‘yimli taom"),
+    "p_formula": (0, 2, 1, 10, "🍼 Premium sut aralashmasi", "vitaminli, chaqaloqlar uchun"),
+    "p_porridge": (0, 8, 1, 10, "🥣 Asal-mevali bo‘tqa", "issiq, yumshoq, to‘yimli"),
+    "p_yogurt": (1, 22, 1, 15, "🍓 Qulupnayli yogurt", "kaltsiy va mevalar"),
+    "p_icecream": (2, 22, 1, 25, "🍦 Muzqaymoq", "vanil va shokolad"),
+    "p_cake": (2, 22, 1, 30, "🍰 Qulupnayli tort", "bayramona shirinlik"),
+    "p_pasta": (3, 22, 1, 15, "🍝 Pishloqli makaron", "bolalarning sevimlisi"),
+    "p_cupcake": (3, 22, 1, 25, "🧁 Kapkeyk va kakao", "kremli, iliq kakao bilan"),
+    "p_choco": (3, 22, 1, 25, "🍫 Shokoladli keks", "yong‘oqli, mayin"),
+    "p_honey": (4, 22, 1, 15, "🍯 Asal va yong‘oqlar", "kuch-quvvat beradi"),
+    "p_burger": (6, 22, 1, 20, "🍔 Burger va sharbat", "katta porsiya"),
+    "p_sushi": (10, 22, 1, 20, "🍣 Sushi to‘plami", "baliq va guruch"),
+    "p_steak": (12, 22, 1, 20, "🥩 Steyk va sabzavotlar", "eng to‘yimli taom"),
 }
 KID_PREMIUM_HAPPY_MAX = 100.0
 

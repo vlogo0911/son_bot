@@ -402,3 +402,11 @@
   +1 ota-onaning zaxirasiga (`kid_food_stock` jadvali, user_id+item). Berish: farzand kartasida "🍱 Premium" (`premiumSheet`: to'plam
   tugmasi, kartalarda ×zaxira, yoshga mos bo'lmasa 🔒), `/app/api/kid` act=`premium` → zaxiradan 1 ta (`no_stock`), to'qlik = 100,
   kayfiyat +bonus; 12 soatlik qoida saqlanadi (vaqti kelgan bo'lsa `kid_eat`); to'q va xursand bo'lsa `full`. Payload `kid_pack`, `kid_premium`.
+- 🎙 Ovozli xona (web app → Chat tepasida `#vcCard`, test — `voice_enabled_for`: webapp_config "voice" yoki `can_test`; Owner →
+  ⚙️ Sozlamalar → "Ovozli xona — hamma uchun", `OWNER_FLAG_KEYS`): bitta umumiy xona, maks `VOICE_MAX` 10. WebRTC mesh — ovoz
+  to'g'ridan-to'g'ri foydalanuvchilar orasida; server faqat signalizatsiya: `/app/api/voice/{join,leave,poll,signal,state}` → `web_voice`
+  (xotirada `VOICE_ROOM`/`VOICE_INBOX`, `VOICE_STALE` 15 s poll bo'lmasa chiqariladi, signal ≤ `VOICE_SIGNAL_MAX`, faqat xonadagilarga;
+  restartda xona bo'shaydi). ICE: Google STUN + ixtiyoriy TURN env `VOICE_TURN_URL`/`VOICE_TURN_USER`/`VOICE_TURN_PASS`
+  (`voice_ice_servers`) — TURN'siz ba'zi mobil tarmoqlarda (symmetric NAT) ulanmasligi mumkin. Klient `VOICE` (`#vcv`): getUserMedia
+  (echo/noise/AGC), yangi kirgan (seq katta) avvalgilarga offer yuboradi, ~700 ms polling, gapirayotganni AnalyserNode bilan aniqlaydi
+  (yashil halqa), 🎙 mute, ⌄ yig'ish (xonada qoladi), 📴 chiqish. Payload `voice` (count/max), `voice_test`.

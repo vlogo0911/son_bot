@@ -17251,8 +17251,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
         elif path in ("/app/api/voice/join", "/app/api/voice/leave", "/app/api/voice/poll", "/app/api/voice/signal",
                       "/app/api/voice/state", "/app/api/voice/rooms", "/app/api/voice/create", "/app/api/voice/kick",
-                      "/app/api/voice/mute", "/app/api/voice/close"):
+                      "/app/api/voice/mute", "/app/api/voice/close", "/app/api/voice/media"):
             coro = web_voice(uid, path.rsplit("/", 1)[1], body)
+        elif path.startswith("/app/api/media/") and path.rsplit("/", 1)[1] in MEDIA_ACTS:
+            coro = web_media(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/kid/pack":
             coro = web_kid_pack_buy(uid)
         elif path == "/app/api/owner/kidpack":
@@ -18388,6 +18390,10 @@ def init_webapp():
         if c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('emp_launch', 1)").rowcount:
             c.execute("INSERT INTO webapp_config(key, value) VALUES ('emp', 1) "
                       "ON CONFLICT(key) DO UPDATE SET value=1")
+        # 🎬 Media (YouTube): sevimlilar va ko'rilganlar tarixi
+        for t in ("media_favs", "media_history"):
+            c.execute(f"""CREATE TABLE IF NOT EXISTS {t} (user_id INTEGER NOT NULL, vid TEXT NOT NULL, title TEXT NOT NULL,
+                channel TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL, PRIMARY KEY(user_id, vid))""")
 
 
 # ── 🧍 Realistik 3D avatar (web app) — test: standart faqat ownerlar ──
@@ -20065,7 +20071,7 @@ async def web_news_admin(uid, act, body):
 
 
 # ⚙️ Owner panel (web): xususiyatlarni hamma uchun ochish/yopish — bot panelidagi bilan bir xil flaglar
-OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip", "voice")
+OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip", "voice", "media")
 
 
 def owner_flags_payload():
@@ -20263,6 +20269,8 @@ async def webapp_payload(user_id):
         "kid_pack": kid_pack_payload(user_id),
         "voice": voice_summary() if voice_enabled_for(user_id) else None,
         "voice_test": not webapp_flags().get("voice", 0),
+        "media": media_enabled_for(user_id),
+        "media_test": not webapp_flags().get("media", 0),
         "kid_premium": [{"key": k, "min": v[0], "max": v[1], "price": v[2], "happy": v[3], "name": v[4], "desc": v[5]}
                         for k, v in KID_PREMIUM.items()],
         "edu_all": edu_list(False) if is_owner else [],
@@ -20457,7 +20465,7 @@ def voice_ice_servers():
 
 def _voice_room_new(rid, title, owner):
     VOICE_ROOMS[rid] = {"id": rid, "title": title, "owner": owner, "created": time.time(), "members": {}, "inbox": {},
-                        "kicked": {}, "empty": time.time()}
+                        "kicked": {}, "empty": time.time(), "media": None}
     return VOICE_ROOMS[rid]
 
 
@@ -20542,7 +20550,8 @@ async def web_voice(uid, act, body):
         me = room["members"][uid]
         room["inbox"][uid] = []        # qayta kirish — eski signallar o'chadi, ulanishlar yangidan
         me["seen"] = now
-        return {"result": "joined", "me": uid, "seq": me["seq"], "room": {"id": rid, "title": room["title"],
+        return {"result": "joined", "me": uid, "seq": me["seq"], "media": voice_media_view(room, uid),
+                "room": {"id": rid, "title": room["title"],
                 "admin": _voice_admin(room, uid), "main": rid == VOICE_MAIN},
                 "peers": voice_peers(room), "ice": voice_ice_servers()}
     room = VOICE_ROOMS.get(VOICE_WHERE.get(uid))
@@ -20596,14 +20605,318 @@ async def web_voice(uid, act, body):
             del box[: len(box) - VOICE_INBOX_MAX + 1]
         box.append({"from": uid, "type": kind, "data": data})
         return {"result": "sent"}
+    if act == "media":        # 🎬 birga ko'rish: video qo'yish / pauza / o'tkazish / to'xtatish
+        return voice_media_act(room, uid, body)
     if act == "poll":
         if "muted" in body:
             me["muted"] = bool(body.get("muted"))
             me["speaking"] = bool(body.get("speaking")) and not (me["muted"] or me["forced"])
         msgs, room["inbox"][uid] = room["inbox"].get(uid, []), []
         return {"result": "ok", "peers": voice_peers(room), "msgs": msgs, "forced": me["forced"],
+                "media": voice_media_view(room, uid),
                 "room": {"id": room["id"], "title": room["title"], "admin": _voice_admin(room, uid), "main": room["id"] == VOICE_MAIN}}
     return {"error": "act"}
+
+
+def voice_media_view(room, uid):
+    """🎬 Xonadagi umumiy video holati: joriy pozitsiya SERVER soati bo'yicha hisoblanadi."""
+    m = room.get("media")
+    if not m:
+        return {"vid": None, "can": True}
+    pos = m["pos"] + ((time.time() - m["at"]) if m["playing"] else 0.0)
+    return {"vid": m["vid"], "title": m["title"], "channel": m["channel"], "playing": m["playing"], "pos": round(pos, 2),
+            "v": m["v"], "by": m["name"], "can": _voice_media_can(room, uid)}
+
+
+def _voice_media_can(room, uid):
+    """Boshqarish: xona egasi / bot egasi, videoni qo'ygan odam yoki hech narsa qo'yilmagan bo'lsa — har kim."""
+    m = room.get("media")
+    return _voice_admin(room, uid) or not m or m["by"] == uid or m["by"] not in room["members"]
+
+
+def voice_media_act(room, uid, body):
+    if not _voice_media_can(room, uid):
+        return {"error": "not_admin"}
+    op = body.get("op")
+    m = room.get("media")
+    now = time.time()
+    try:
+        pos = max(0.0, min(float(body.get("pos") or 0), 86400.0))
+    except (TypeError, ValueError):
+        pos = 0.0
+    if op == "set":
+        vid = str(body.get("vid") or "")
+        if not MEDIA_VID_RE.fullmatch(vid):
+            return {"error": "vid"}
+        _VOICE_SEQ[0] += 1
+        room["media"] = {"vid": vid, "title": _media_clean(body.get("title"), 200) or "YouTube",
+                         "channel": _media_clean(body.get("channel"), 100), "playing": True, "pos": pos, "at": now,
+                         "by": uid, "name": _web_player_name(uid), "v": _VOICE_SEQ[0]}
+    elif op == "stop":
+        room["media"] = None
+    elif m and op in ("play", "pause", "seek"):
+        m["pos"] = pos
+        m["at"] = now
+        if op != "seek":
+            m["playing"] = op == "play"
+        _VOICE_SEQ[0] += 1
+        m["v"] = _VOICE_SEQ[0]
+    else:
+        return {"error": "op"}
+    return {"result": "ok", "media": voice_media_view(room, uid)}
+
+
+# ── 🎬 Media (YouTube) — test: standart ownerlar va testerlar; Owner → ⚙️ "Media — hamma uchun" (`media` flag) ──
+# Video YouTube'ning rasmiy IFrame pleyerida ko'rsatiladi (yuklab olinmaydi, serverda saqlanmaydi).
+# Qidiruv / kategoriyalar — YouTube Data API v3 (env YOUTUBE_API_KEY, faqat serverda; klientga berilmaydi).
+# Havola orqali ochish — oEmbed (kalitsiz). Kvota tejaladi: natijalar keshda, kunlik qidiruvlar chegarasi.
+MEDIA_ACTS = ("home", "search", "cat", "resolve", "fav", "watched", "history")
+MEDIA_VID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
+MEDIA_URL_RE = re.compile(r"(?:youtu\.be/|youtube(?:-nocookie)?\.com/(?:watch\?(?:.*&)?v=|shorts/|embed/|live/|v/))([A-Za-z0-9_-]{11})")
+MEDIA_API = "https://www.googleapis.com/youtube/v3"
+MEDIA_REGION = "UZ"
+MEDIA_CACHE_TTL = 6 * 3600         # qidiruv natijasi
+MEDIA_CAT_TTL = 3 * 3600           # kategoriya natijasi
+MEDIA_CACHE_MAX = 400
+MEDIA_DAILY_SEARCH = 90            # bepul kvota 10 000 birlik/kun, qidiruv = 100 birlik → ~95 ta; zaxira qoldiriladi
+MEDIA_USER_RATE = (12, 600)        # bitta foydalanuvchi: 10 daqiqada 12 ta yangi (keshsiz) qidiruv
+MEDIA_FAV_MAX = 200
+MEDIA_HISTORY_MAX = 60
+# kalit: (nomi, mostPopular videoCategoryId yoki None, zaxira/asosiy qidiruv so'rovi)
+MEDIA_CATS = {
+    "trend": ("🔥 Trend", "", None),
+    "music": ("🎵 Musiqa", "10", "yangi klip 2026"),
+    "movie": ("🎬 Kino", None, "o'zbek kino to'liq"),
+    "cartoon": ("🧸 Multfilm", None, "multfilm o'zbek tilida"),
+    "funny": ("😂 Kulgi", "23", "prikol"),
+    "sport": ("⚽ Sport", "17", "futbol obzor"),
+}
+_MEDIA_CACHE: dict[str, tuple] = {}        # key -> (ts, items)
+_MEDIA_DAY = {"day": "", "n": 0}
+_MEDIA_USER_HITS: dict[int, list] = {}
+
+
+def media_enabled_for(uid):
+    return web_enabled_for(uid) and (bool(webapp_flags().get("media", 0)) or can_test(uid))
+
+
+def media_key():
+    return (os.environ.get("YOUTUBE_API_KEY") or "").strip()
+
+
+def _media_clean(v, n):
+    return re.sub(r"\s+", " ", str(v or "")).strip()[:n]
+
+
+def _media_dur(iso):
+    m = re.fullmatch(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso or "")
+    if not m:
+        return 0
+    d, h, mi, se = (int(x or 0) for x in m.groups())
+    return d * 86400 + h * 3600 + mi * 60 + se
+
+
+def _media_item(vid, sn, cd=None, stt=None):
+    return {"vid": vid, "title": html.unescape(sn.get("title") or "")[:200],
+            "channel": html.unescape(sn.get("channelTitle") or "")[:100],
+            "dur": _media_dur((cd or {}).get("duration")), "views": int((stt or {}).get("viewCount") or 0),
+            "live": (sn.get("liveBroadcastContent") or "none") == "live"}
+
+
+def _media_get(path, params):
+    q = urllib.parse.urlencode(dict(params, key=media_key()))
+    try:
+        return _http_json(f"{MEDIA_API}/{path}?{q}")
+    except urllib.error.HTTPError as e:
+        try:
+            reason = json.loads(e.read().decode("utf-8"))["error"]["errors"][0]["reason"]
+        except Exception:  # noqa: BLE001
+            reason = str(e.code)
+        raise RuntimeError(reason) from None
+
+
+def _media_details(ids):
+    """videos.list (1 birlik): davomiylik, ko'rishlar, embed ruxsati."""
+    if not ids:
+        return []
+    data = _media_get("videos", {"part": "snippet,contentDetails,statistics,status", "id": ",".join(ids), "maxResults": 50})
+    out = []
+    for v in data.get("items", []):
+        if (v.get("status") or {}).get("embeddable") is False:
+            continue
+        out.append(_media_item(v["id"], v.get("snippet") or {}, v.get("contentDetails"), v.get("statistics")))
+    return out
+
+
+def _media_search_sync(q, extra=None):
+    params = {"part": "snippet", "type": "video", "maxResults": 24, "q": q, "videoEmbeddable": "true",
+              "safeSearch": "moderate", "regionCode": MEDIA_REGION, "relevanceLanguage": "uz"}
+    params.update(extra or {})
+    data = _media_get("search", params)
+    ids = [it["id"]["videoId"] for it in data.get("items", []) if (it.get("id") or {}).get("videoId")]
+    return _media_details(ids)
+
+
+def _media_popular_sync(cat_id):
+    params = {"part": "snippet,contentDetails,statistics,status", "chart": "mostPopular", "regionCode": MEDIA_REGION,
+              "maxResults": 24}
+    if cat_id:
+        params["videoCategoryId"] = cat_id
+    data = _media_get("videos", params)
+    return [_media_item(v["id"], v.get("snippet") or {}, v.get("contentDetails"), v.get("statistics"))
+            for v in data.get("items", []) if (v.get("status") or {}).get("embeddable") is not False]
+
+
+def _media_cache_get(key, ttl):
+    hit = _MEDIA_CACHE.get(key)
+    return hit[1] if hit and time.time() - hit[0] < ttl else None
+
+
+def _media_cache_put(key, items):
+    if len(_MEDIA_CACHE) >= MEDIA_CACHE_MAX:
+        for k, _ in sorted(_MEDIA_CACHE.items(), key=lambda x: x[1][0])[: MEDIA_CACHE_MAX // 4]:
+            _MEDIA_CACHE.pop(k, None)
+    _MEDIA_CACHE[key] = (time.time(), items)
+
+
+def _media_budget(uid, cost=1):
+    """Kunlik umumiy (kvota) va foydalanuvchi chegarasi. True — ruxsat."""
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    if _MEDIA_DAY["day"] != day:
+        _MEDIA_DAY.update(day=day, n=0)
+    if _MEDIA_DAY["n"] + cost > MEDIA_DAILY_SEARCH:
+        return "quota"
+    now = time.time()
+    hits = [t for t in _MEDIA_USER_HITS.get(uid, []) if now - t < MEDIA_USER_RATE[1]]
+    if len(hits) >= MEDIA_USER_RATE[0] and uid not in CAREER_OWNER_IDS:
+        _MEDIA_USER_HITS[uid] = hits
+        return "rate"
+    hits.append(now)
+    _MEDIA_USER_HITS[uid] = hits
+    _MEDIA_DAY["n"] += cost
+    return None
+
+
+def _media_oembed_sync(vid):
+    url = "https://www.youtube.com/oembed?format=json&url=" + urllib.parse.quote(f"https://www.youtube.com/watch?v={vid}")
+    try:
+        d = _http_json(url)
+    except urllib.error.HTTPError as e:
+        return {"error": "embed" if e.code in (401, 403) else "not_found"}
+    return {"vid": vid, "title": html.unescape(d.get("title") or "")[:200] or "YouTube",
+            "channel": html.unescape(d.get("author_name") or "")[:100], "dur": 0, "views": 0, "live": False}
+
+
+def media_saved(uid, table, limit):
+    rows = db().execute(f"SELECT vid, title, channel FROM {table} WHERE user_id=? ORDER BY at DESC LIMIT ?", (uid, limit))
+    return [{"vid": v, "title": t, "channel": ch, "dur": 0, "views": 0, "live": False} for v, t, ch in rows]
+
+
+def _media_save(uid, table, vid, title, channel, keep):
+    with db() as c:
+        c.execute(f"INSERT INTO {table}(user_id, vid, title, channel, at) VALUES (?,?,?,?,?) "
+                  "ON CONFLICT(user_id, vid) DO UPDATE SET title=excluded.title, channel=excluded.channel, at=excluded.at",
+                  (uid, vid, title, channel, int(time.time() * 1000)))
+        c.execute(f"DELETE FROM {table} WHERE user_id=? AND vid NOT IN "
+                  f"(SELECT vid FROM {table} WHERE user_id=? ORDER BY at DESC LIMIT ?)", (uid, uid, keep))
+
+
+def media_home(uid):
+    return {"result": "ok", "search": bool(media_key()),
+            "cats": [{"key": k, "name": v[0]} for k, v in MEDIA_CATS.items()],
+            "favs": media_saved(uid, "media_favs", MEDIA_FAV_MAX), "history": media_saved(uid, "media_history", 30)}
+
+
+async def web_media(uid, act, body):
+    if not media_enabled_for(uid):
+        return {"error": "disabled"}
+    if act == "home":
+        return media_home(uid)
+    if act == "history":
+        return {"result": "ok", "items": media_saved(uid, "media_history", MEDIA_HISTORY_MAX)}
+    if act in ("fav", "watched"):
+        vid = str(body.get("vid") or "")
+        if not MEDIA_VID_RE.fullmatch(vid):
+            return {"error": "vid"}
+        title, channel = _media_clean(body.get("title"), 200) or "YouTube", _media_clean(body.get("channel"), 100)
+        if act == "watched":
+            _media_save(uid, "media_history", vid, title, channel, MEDIA_HISTORY_MAX)
+            return {"result": "ok"}
+        if body.get("on"):
+            if db().execute("SELECT COUNT(*) FROM media_favs WHERE user_id=?", (uid,)).fetchone()[0] >= MEDIA_FAV_MAX:
+                return {"error": "fav_full", "max": MEDIA_FAV_MAX}
+            _media_save(uid, "media_favs", vid, title, channel, MEDIA_FAV_MAX)
+        else:
+            with db() as c:
+                c.execute("DELETE FROM media_favs WHERE user_id=? AND vid=?", (uid, vid))
+        return {"result": "ok", "on": bool(body.get("on")), "favs": media_saved(uid, "media_favs", MEDIA_FAV_MAX)}
+    if act == "resolve":
+        raw = str(body.get("url") or "").strip()[:500]
+        m = MEDIA_URL_RE.search(raw)
+        vid = m.group(1) if m else (raw if MEDIA_VID_RE.fullmatch(raw) else None)
+        if not vid:
+            return {"error": "url"}
+        key = "o:" + vid
+        item = _media_cache_get(key, MEDIA_CACHE_TTL)
+        if item is None:
+            try:
+                item = await asyncio.to_thread(_media_oembed_sync, vid)
+            except Exception:  # noqa: BLE001
+                logger.warning("Media oEmbed xatosi", exc_info=True)
+                return {"error": "net"}
+            if item.get("error"):
+                return item
+            _media_cache_put(key, item)
+        return {"result": "ok", "item": item}
+    if act not in ("search", "cat"):
+        return {"error": "act"}
+    if not media_key():
+        return {"error": "no_key"}
+    if act == "cat":
+        ck = str(body.get("cat") or "")
+        if ck not in MEDIA_CATS:
+            return {"error": "cat"}
+        key, ttl = "c:" + ck, MEDIA_CAT_TTL
+        _, pop_id, query = MEDIA_CATS[ck]
+    else:
+        q = _media_clean(body.get("q"), 100)
+        if len(q) < 2:
+            return {"error": "q"}
+        key, ttl, pop_id, query = "s:" + q.lower(), MEDIA_CACHE_TTL, None, q
+    items = _media_cache_get(key, ttl)
+    if items is not None:
+        return {"result": "ok", "items": items, "cached": True}
+    # mostPopular (1 birlik) kvotaga deyarli ta'sir qilmaydi; qidiruv (100 birlik) — kunlik chegara bilan
+    err = None if pop_id is not None else _media_budget(uid)
+    if err:
+        return {"error": err}
+    try:
+        if pop_id is not None:
+            try:
+                items = await asyncio.to_thread(_media_popular_sync, pop_id)
+            except RuntimeError:
+                if not query:          # trend: zaxira yo'q — xato (kalit/kvota) foydalanuvchiga chiqadi
+                    raise
+                items = []
+            if not items and query:        # mintaqada bu kategoriya bo'yicha trend yo'q — qidiruvga o'tamiz
+                err = _media_budget(uid)
+                if err:
+                    return {"error": err}
+                items = await asyncio.to_thread(_media_search_sync, query)
+        else:
+            items = await asyncio.to_thread(_media_search_sync, query, {"videoDuration": "long"} if act == "cat" and body.get("cat") == "movie" else None)
+    except RuntimeError as e:
+        reason = str(e)
+        logger.warning("YouTube API: %s", reason)
+        if reason in ("quotaExceeded", "dailyLimitExceeded", "rateLimitExceeded"):
+            _MEDIA_DAY["n"] = MEDIA_DAILY_SEARCH
+            return {"error": "quota"}
+        return {"error": "bad_key" if reason in ("keyInvalid", "badRequest", "forbidden", "accessNotConfigured", "400", "403") else "net"}
+    except Exception:  # noqa: BLE001
+        logger.warning("YouTube API xatosi", exc_info=True)
+        return {"error": "net"}
+    _media_cache_put(key, items)
+    return {"result": "ok", "items": items}
 
 
 async def webapp_fetch(user_id):
@@ -21602,7 +21915,7 @@ WEBAPP_HTML = r"""<!doctype html>
   .mini.buy{background:linear-gradient(135deg,var(--lime),var(--cyan))}
   .mini.sell{background:linear-gradient(135deg,var(--gold),#ff6b6b)}
   /* modal */
-  .ov{position:fixed;inset:0;background:rgba(5,5,12,.72);backdrop-filter:blur(4px);z-index:50;
+  .ov{position:fixed;inset:0;background:rgba(5,5,12,.72);backdrop-filter:blur(4px);z-index:96;
     display:flex;align-items:flex-end;justify-content:center;opacity:0;pointer-events:none;transition:.2s}
   .ov.show{opacity:1;pointer-events:auto}
   .sheet{width:100%;max-width:520px;background:linear-gradient(180deg,#15121f,#0c0b14);
@@ -22209,7 +22522,7 @@ WEBAPP_HTML = r"""<!doctype html>
   .vcroom .vcgo{font-size:12px;font-weight:900;color:#2b1b02;background:var(--g-metal);padding:6px 10px;border-radius:999px;white-space:nowrap}
   .vchint{text-align:center;margin-top:8px}
   .vcclose{margin-top:8px;background:#2a1414;color:#ffb4b4}
-  #vcv{position:fixed;inset:0;z-index:9500;display:none;flex-direction:column;background:radial-gradient(120% 80% at 50% 0%,#2a1d07,#0a0705 70%);
+  #vcv{position:fixed;inset:0;z-index:92;display:none;flex-direction:column;background:radial-gradient(120% 80% at 50% 0%,#2a1d07,#0a0705 70%);
     padding:calc(14px + env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left))}
   #vcv.show{display:flex}
   #vcv audio{display:none}
@@ -22228,6 +22541,53 @@ WEBAPP_HTML = r"""<!doctype html>
   .vcbar .btn{flex:1}
   .vcbar #vcMic.off{background:#3a1f1f;color:#ffb4b4}
   .vcbar .vcleave{background:linear-gradient(180deg,#e0484d,#a11c22);color:#fff}
+  /* ───── 🎬 Media (YouTube) ───── */
+  .gcc.media{background:linear-gradient(135deg,rgba(255,60,60,.2),rgba(0,0,0,.35));box-shadow:inset 0 0 0 1.5px rgba(255,120,120,.5),0 10px 24px rgba(0,0,0,.45)}
+  .mdq{display:flex;gap:8px;margin-bottom:10px}
+  .mdq input{flex:1;min-width:0;padding:11px 14px;border-radius:14px;border:0;outline:0;background:var(--card);color:var(--txt);font-size:14px;box-shadow:inset 0 0 0 1px var(--line)}
+  .mdq .btn{padding:10px 16px}
+  .mdcats{display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;margin-bottom:6px;scrollbar-width:none}
+  .mdcats::-webkit-scrollbar{display:none}
+  .mdc{flex:none;padding:7px 13px;border-radius:999px;font-size:13px;font-weight:800;background:var(--card);box-shadow:inset 0 0 0 1px var(--line);cursor:pointer;white-space:nowrap}
+  .mdc.on{background:var(--g-metal);color:#2b1b02;box-shadow:none}
+  .mdnote{margin:2px 0 8px}
+  .mdgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+  .mdgrid.mdsheet{max-height:55vh;overflow-y:auto;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .mdi{cursor:pointer;min-width:0}
+  .mdi:active{transform:scale(.97)}
+  .mdth{position:relative;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:#000;box-shadow:0 6px 16px rgba(0,0,0,.4)}
+  .mdth img{width:100%;height:100%;object-fit:cover;display:block}
+  .mdd{position:absolute;right:6px;bottom:6px;font-size:11px;font-weight:800;padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.8);color:#fff}
+  .mdd.live{background:#e0262b}
+  .mdi b{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:13px;line-height:1.3;margin-top:6px}
+  .mdi .hsub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}
+  .mdload{grid-column:1/-1;display:flex;justify-content:center;gap:8px;padding:30px}
+  .mdload i{width:10px;height:10px;border-radius:50%;background:var(--gold);animation:mdb .9s infinite alternate}
+  .mdload i:nth-child(2){animation-delay:.2s}.mdload i:nth-child(3){animation-delay:.4s}
+  @keyframes mdb{from{opacity:.25;transform:translateY(4px)}to{opacity:1;transform:translateY(-4px)}}
+  #mpv{position:fixed;inset:0;z-index:91;display:none;flex-direction:column;background:#07060a;overflow-y:auto}
+  #mpv.show{display:flex}
+  .mph{display:flex;align-items:center;gap:10px;padding:calc(10px + env(safe-area-inset-top)) 14px 10px}
+  .mph b{font:900 17px Cinzel,Georgia,serif;color:#ffe08a}
+  .mpf{position:relative;width:100%;aspect-ratio:16/9;background:#000;flex:none}
+  .mpf iframe,.vcmf iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+  .mperr{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:16px;text-align:center;background:rgba(0,0,0,.88);font-weight:700}
+  .mperr.on{display:flex}
+  .mpbody{padding:12px 14px calc(18px + env(safe-area-inset-bottom))}
+  .mpt{font-size:16px;font-weight:800;line-height:1.3}
+  .mpbtns{display:flex;gap:8px;margin-top:12px}
+  .mpbtns .btn{flex:1;padding:10px 6px;font-size:13px}
+  .vcmd{display:none;margin-bottom:12px;border-radius:16px;overflow:hidden;background:#000;box-shadow:inset 0 0 0 1px var(--line)}
+  .vcmd.on{display:block}
+  .vcmf{position:relative;aspect-ratio:16/9}
+  .vcmtap{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.6);font-weight:900;font-size:16px;cursor:pointer}
+  .vcmtap.on{display:flex}
+  .vcmi{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--card)}
+  .vcmi>div{flex:1;min-width:0}
+  .vcmi b{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vcmi .hsub{font-size:11px}
+  .vcms{font-size:20px;cursor:pointer;padding:0 4px}
+  .vcbar .vcvid{flex:0 0 56px}
   /* ───── 🍱 Premium ovqatlar ───── */
   .kbtn.kprem{background:var(--g-metal);color:#2b1b02;font-weight:900}
   .pfs .pfh{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:16px}
@@ -22666,6 +23026,7 @@ function render(res){
   // 🎮 GAMES — kategoriyalar (Kazino / VIP)
   app.appendChild(gamesPage(d));
   if((d.vip||{}).open) app.appendChild(vipPage(d));
+  if(d.media) app.appendChild(mediaPage(d));
 
   // KAZINO — o'yinlar lobbisi
   const cz=$('<div class="sec" id="s-casino"></div>');
@@ -24160,6 +24521,8 @@ function gamesPage(d){
     '<div class="gcc" data-go="casino" data-tap="1"><div class="gci">'+CASINO_ICON.replace('width="27" height="27"','width="40" height="40"')+'</div><div><b>KAZINO</b><div class="hsub">Royal Crash · Hovuz'+(d.kami?' · Kamikaze':'')+' — hamyon puli bilan</div></div></div>'+
     (v.open?'<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">CLASSIC STRIKE · NEON RUSH · METRO DASH · NEON SNAKE · BLOCK STORM · STRIKE 2D</div></div>'+
       '<span class="glk">'+(v.test?'🧪 TEST':v.vip?'✅ VIP':'🔒 VIP')+'</span></div>':'')+
+    (d.media?'<div class="gcc media" data-go="media" data-tap="1"><div class="gci">🎬</div><div><b>MEDIA</b><div class="hsub">YouTube: musiqa · kino · multfilm · trend — ovozli xonada birga ko‘rish</div></div>'+
+      (d.media_test?'<span class="glk">🧪 TEST</span>':'')+'</div>':'')+
   '</div><div class="gnote">🎮 Kategoriya tanlang</div>';
   sec.querySelectorAll('.gcc').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
   return sec;
@@ -24565,7 +24928,7 @@ function amnestyCard(d){
   draw(d.amnesty); return box;
 }
 function ownerFlags(d){
-  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun'],['voice','🎙','Ovozli xona — hamma uchun']];
+  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun'],['voice','🎙','Ovozli xona — hamma uchun'],['media','🎬','Media (YouTube) — hamma uchun']];
   const box=$('<div class="card full"></div>');
   const draw=f=>{ box.innerHTML='<div class="lbl">⚙️ Xususiyatlar</div>'+F.map(([k,i,l])=>'<div class="oflag" data-k="'+k+'"><span>'+i+' '+l+'</span>'+
       '<span class="otg'+(f[k]?' on':'')+'"><i></i></span></div>').join('')+
@@ -24612,6 +24975,94 @@ function peerInfo(u){
     '<span class="chip">⭐ '+esc(u.level)+'</span>'+(u.profession?'<span class="chip">💼 '+esc(u.profession)+'</span>':'')+
     '<span class="chip">'+(u.has_pair?'💞 Jufti bor':'💍 Jufti yo‘q')+'</span>'+(u.divorces?'<span class="chip">💔 Ajrashgan: '+esc(u.divorces)+'</span>':'')+'</div>';
 }
+// ---- 🎬 Media (YouTube): rasmiy IFrame pleyer (yuklab olinmaydi); qidiruv server orqali — API kaliti klientga berilmaydi ----
+let YT_P=null;
+function ytApi(){ if(window.YT&&YT.Player) return Promise.resolve(); if(YT_P) return YT_P;
+  YT_P=new Promise((ok,bad)=>{ const prev=window.onYouTubeIframeAPIReady; window.onYouTubeIframeAPIReady=()=>{ try{ prev&&prev(); }catch(e){} ok(); };
+    const sc=document.createElement('script'); sc.src='https://www.youtube.com/iframe_api'; sc.onerror=()=>{ YT_P=null; bad(); }; document.head.appendChild(sc);
+    setTimeout(()=>{ if(!(window.YT&&YT.Player)){ YT_P=null; bad(); } },15000); }); return YT_P; }
+function ytMake(el,vid,start,ev){ return new YT.Player(el,{host:'https://www.youtube-nocookie.com',videoId:vid,width:'100%',height:'100%',
+  playerVars:{playsinline:1,rel:0,modestbranding:1,autoplay:1,start:Math.floor(start||0),origin:location.origin},events:ev||{}}); }
+const MEDIA=(()=>{
+  let H=null, cur='', list=[], loading=false, pl=null, now=null;
+  const ERR={no_key:'🔑 Qidiruv hali sozlanmagan — YouTube havolasini qo‘ying',quota:'📊 Bugungi qidiruv limiti tugadi — ertaga urinib ko‘ring yoki havola qo‘ying',
+    rate:'⏳ Juda ko‘p qidiruv — birozdan keyin urinib ko‘ring',url:'🔗 YouTube havolasi noto‘g‘ri',embed:'🚫 Muallif bu videoni boshqa saytlarda ko‘rsatishni taqiqlagan',
+    not_found:'🔎 Video topilmadi yoki o‘chirilgan',net:'⚠️ YouTube bilan aloqa xatosi',bad_key:'🔑 API kaliti noto‘g‘ri yoki YouTube Data API yoqilmagan',
+    q:'✍️ Kamida 2 belgi yozing',disabled:'🎬 Media hozircha yopiq',fav_full:'⭐ Sevimlilar ro‘yxati to‘la',cat:'⚠️ Kategoriya topilmadi'};
+  const isLink=v=>/youtu\.?be|^[A-Za-z0-9_-]{11}$/.test(v);
+  const fdur=s=>{ if(!s) return ''; const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60; return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(x).padStart(2,'0'); };
+  const fviews=n=>!n?'':n>=1e9?(n/1e9).toFixed(1)+' mlrd':n>=1e6?(n/1e6).toFixed(1)+' mln':n>=1e3?Math.round(n/1e3)+' ming':String(n);
+  const thumb=v=>'https://i.ytimg.com/vi/'+encodeURIComponent(v)+'/mqdefault.jpg';
+  const isFav=v=>!!(H&&H.favs.some(f=>f.vid===v));
+  function cardHtml(it,i){ return '<div class="mdi" data-i="'+i+'" data-tap="1"><div class="mdth"><img loading="lazy" alt="" onerror="this.style.opacity=0" src="'+thumb(it.vid)+'">'+
+      (it.live?'<span class="mdd live">🔴 LIVE</span>':it.dur?'<span class="mdd">'+fdur(it.dur)+'</span>':'')+'</div>'+
+      '<b>'+esc(it.title)+'</b><div class="hsub">'+esc(it.channel)+(it.views?' · 👁 '+fviews(it.views):'')+'</div></div>'; }
+  function render(items,empty){ list=items||[]; const g=document.getElementById('mdGrid'); if(!g) return;
+    g.innerHTML=list.length?list.map(cardHtml).join(''):'<div class="card full"><div class="center hsub">'+(empty||'Hech narsa topilmadi')+'</div></div>';
+    g.querySelectorAll('.mdi').forEach(el=>el.onclick=()=>play(list[+el.dataset.i],list)); }
+  function note(t){ const n=document.getElementById('mdNote'); if(n) n.textContent=t||''; }
+  function drawCats(){ const box=document.getElementById('mdCats'); if(!box||!H) return;
+    const cs=(H.search?H.cats:[]).concat([{key:'favs',name:'⭐ Sevimlilar'},{key:'history',name:'🕘 Tarix'}]);
+    box.innerHTML=cs.map(c=>'<span class="mdc'+(c.key===cur?' on':'')+'" data-k="'+esc(c.key)+'">'+esc(c.name)+'</span>').join('');
+    box.querySelectorAll('.mdc').forEach(el=>el.onclick=()=>pick(el.dataset.k)); }
+  function busy(){ const g=document.getElementById('mdGrid'); if(g) g.innerHTML='<div class="mdload"><i></i><i></i><i></i></div>'; }
+  function pick(k){ cur=k; drawCats(); note('');
+    if(k==='favs'){ render(H.favs,'⭐ Hali sevimli video yo‘q — pleyerda ⭐ ni bosing'); return; }
+    if(k==='history'){ busy(); api('/app/api/media/history',{}).then(r=>render(r.items||[],'🕘 Hali hech narsa ko‘rilmagan')).catch(()=>render([],ERR.net)); return; }
+    busy(); api('/app/api/media/cat',{cat:k}).then(r=>{ if(cur!==k) return; if(r.result!=='ok'){ render([],ERR[r.error]||'⚠️ Xatolik'); return; } render(r.items); }).catch(()=>render([],ERR.net)); }
+  function show(){ if(H||loading) return; loading=true; busy();
+    api('/app/api/media/home',{}).then(r=>{ loading=false; if(r.result!=='ok'){ render([],ERR[r.error]||'⚠️ Xatolik'); return; } H=r;
+      if(!r.search) note('🔑 Qidiruv hali sozlanmagan (YOUTUBE_API_KEY). YouTube havolasini yuqoriga qo‘yib ko‘rishingiz mumkin.');
+      pick(r.search?'trend':(r.history.length?'history':'favs')); }).catch(()=>{ loading=false; render([],ERR.net); }); }
+  // havola yoki qidiruv → elementlar ro'yxati (Promise<{items}|{error}>)
+  function find(v){ v=String(v||'').trim(); if(!v) return Promise.resolve({error:'q'});
+    if(isLink(v)) return api('/app/api/media/resolve',{url:v}).then(r=>r.result==='ok'?{items:[r.item],link:true}:r);
+    return api('/app/api/media/search',{q:v}).then(r=>r.result==='ok'?{items:r.items}:r); }
+  function search(){ const q=document.getElementById('mdQ'); const v=q?q.value.trim():''; if(!v) return;
+    if(!isLink(v)&&H&&!H.search){ toast(ERR.no_key); return; }
+    cur='q'; drawCats(); busy(); note('');
+    find(v).then(r=>{ if(r.error){ render([],ERR[r.error]||'⚠️ Xatolik'); return; } if(r.link){ render(r.items); play(r.items[0],r.items); } else { note('🔎 «'+v+'» — '+r.items.length+' ta natija'); render(r.items); } })
+      .catch(()=>render([],ERR.net)); }
+  function openYT(vid){ const u='https://www.youtube.com/watch?v='+encodeURIComponent(vid); if(tg&&tg.openLink) tg.openLink(u); else window.open(u,'_blank'); }
+  function stop(){ if(pl){ try{ pl.destroy(); }catch(e){} pl=null; } }
+  function close(){ stop(); const ov=document.getElementById('mpv'); if(ov){ ov.className=''; ov.innerHTML=''; } now=null; }
+  function play(it,more){ if(!it) return; now=it;
+    let ov=document.getElementById('mpv'); if(!ov){ ov=document.createElement('div'); ov.id='mpv'; document.body.appendChild(ov); }
+    stop(); SND.music(null);
+    const rest=(more||[]).filter(x=>x.vid!==it.vid);
+    ov.innerHTML='<div class="mph"><span class="chv-b" id="mpB">‹</span><b>🎬 Media</b></div>'+
+      '<div class="mpf"><div id="mpYT"></div><div class="mperr" id="mpE"></div></div><div class="mpbody">'+
+      '<div class="mpt">'+esc(it.title)+'</div><div class="hsub">'+esc(it.channel)+(it.views?' · 👁 '+fviews(it.views):'')+'</div>'+
+      '<div class="mpbtns"><button class="btn" id="mpF"></button><button class="btn" id="mpVC">👥 Xonada birga</button><button class="btn" id="mpO">↗ YouTube</button></div>'+
+      (rest.length?'<div class="lbl" style="margin-top:14px">▶ Keyingi</div><div class="mdgrid" id="mpMore">'+rest.map(cardHtml).join('')+'</div>':'')+'</div>';
+    ov.className='show';
+    const fb=ov.querySelector('#mpF'), paintF=()=>{ const on=isFav(it.vid); fb.textContent=on?'⭐ Sevimlida':'☆ Sevimli'; fb.classList.toggle('go',on); }; paintF();
+    fb.onclick=()=>{ const on=!isFav(it.vid); api('/app/api/media/fav',{vid:it.vid,title:it.title,channel:it.channel,on}).then(r=>{
+        if(r.result==='ok'){ if(H) H.favs=r.favs; paintF(); toast(on?'⭐ Sevimlilarga qo‘shildi':'☆ Sevimlilardan olindi'); if(cur==='favs') render(H.favs); } else toast(ERR[r.error]||'⚠️ Xatolik'); }); };
+    ov.querySelector('#mpO').onclick=()=>openYT(it.vid);
+    ov.querySelector('#mpB').onclick=close;
+    ov.querySelector('#mpVC').onclick=()=>{ if(!VOICE.state){ toast('🎙 Avval ovozli xonaga kiring: Chat → Ovozli xonalar'); return; }
+      let t=0; try{ t=pl&&pl.getCurrentTime?pl.getCurrentTime():0; }catch(e){}
+      VOICE.media({op:'set',vid:it.vid,title:it.title,channel:it.channel,pos:t}).then(ok=>{ if(ok){ close(); VOICE.open(window.D||{},VOICE.state.room.id); toast('👥 Xonada hamma bilan birga ko‘ryapsiz'); } }); };
+    ov.querySelectorAll('#mpMore .mdi').forEach(el=>el.onclick=()=>play(rest[+el.dataset.i],more));
+    api('/app/api/media/watched',{vid:it.vid,title:it.title,channel:it.channel}).catch(()=>{});
+    const E=ov.querySelector('#mpE');
+    const fail=c=>{ E.innerHTML='<div>'+(c===101||c===150?ERR.embed:c===100?ERR.not_found:'⚠️ Video ochilmadi')+'</div><button class="btn go" id="mpEO">↗ YouTube’da ochish</button>';
+      E.classList.add('on'); E.querySelector('#mpEO').onclick=()=>openYT(it.vid); };
+    ytApi().then(()=>{ if(now!==it) return; pl=ytMake('mpYT',it.vid,0,{onError:e=>fail(e.data)}); }).catch(()=>fail(0));
+  }
+  return {show, search, find, play, close, cardHtml, thumb, ERR, get list(){ return list; }};
+})();
+function mediaPage(d){
+  const sec=$('<div class="sec" id="s-media"></div>');
+  sec.innerHTML='<div class="gback" data-back="games">‹ Games</div><h2>🎬 Media'+(d.media_test?' <span class="avtest">TEST</span>':'')+'</h2>'+
+    '<div class="mdq"><input id="mdQ" maxlength="300" enterkeyhint="search" placeholder="🔎 Qidirish yoki YouTube havolasi"><button class="btn go" id="mdGo">🔎</button></div>'+
+    '<div class="mdcats" id="mdCats"></div><div class="hsub mdnote" id="mdNote"></div><div class="mdgrid" id="mdGrid"></div>'+
+    '<div class="hsub" style="margin-top:14px;text-align:center">▶ Videolar YouTube’ning rasmiy pleyerida ochiladi · 👥 Ovozli xonada do‘stlar bilan birga ko‘ring</div>';
+  sec.querySelector('#mdGo').onclick=MEDIA.search;
+  sec.querySelector('#mdQ').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); MEDIA.search(); } };
+  return sec;
+}
 // ---- 🎙 Ovozli xonalar (Telegram uslubi): umumiy xona + foydalanuvchi yaratgan xonalar; WebRTC mesh, signal — /app/api/voice/* ----
 const VOICE=(()=>{
   let st=null;   // {me, seq, room, stream, conns:{uid:{pc,el,q,state}}, peers, muted, forced, timer, ice, an, ov}
@@ -24635,6 +25086,62 @@ const VOICE=(()=>{
     ov.querySelector('#ovx').onclick=close; ov.onclick=e=>{ if(e.target===ov) close(); };
     const t=ov.querySelector('#vcT'); setTimeout(()=>t.focus(),50);
     ov.querySelector('#vcC').onclick=()=>{ const v=t.value.trim(); if(v.length<2){ toast(VERR.title); return; } close(); open(d,null,v); };
+  }
+  // 🎬 Birga ko'rish: xonada bitta umumiy YouTube video, holat (vid/pauza/pozitsiya) server soati bo'yicha
+  let md={vid:null,v:0,pl:null,ready:false,quiet:0,m:null,born:0};
+  function mdKill(){ if(md.pl){ try{ md.pl.destroy(); }catch(e){} } md={vid:null,v:0,pl:null,ready:false,quiet:0,m:null,born:0}; }
+  function media(body){ return api('/app/api/voice/media',body).then(r=>{ if(r.result!=='ok'){ toast(r.error==='not_admin'?'👑 Videoni xona egasi yoki uni qo‘ygan odam boshqaradi':'⚠️ Xatolik'); return false; }
+      if(st) mdSync(r.media); return true; }).catch(()=>{ toast('⚠️ Aloqa xatosi'); return false; }); }
+  function mdPos(){ try{ return md.pl&&md.ready?md.pl.getCurrentTime():0; }catch(e){ return 0; } }
+  function mdState(e){   // boshqaruvchi o'z pleyerida pauza/o'tkazish qilsa — hammaga yuboriladi
+    if(!st||!md.m||!md.m.can||Date.now()<md.quiet) return;
+    if(e.data===1) media({op:'play',pos:mdPos()}); else if(e.data===2) media({op:'pause',pos:mdPos()});
+  }
+  function mdApply(){
+    const m=md.m; if(!m||!md.ready||!md.pl) return; let s=-1, t=0; try{ s=md.pl.getPlayerState(); t=md.pl.getCurrentTime(); }catch(e){ return; }
+    const hush=()=>{ md.quiet=Date.now()+1500; };
+    if(Math.abs(t-m.pos)>(m.playing?3:1.5)){ hush(); try{ md.pl.seekTo(m.pos,true); }catch(e){} }
+    if(m.playing&&s!==1&&s!==3){ hush(); try{ md.pl.playVideo(); }catch(e){} }
+    if(!m.playing&&s===1){ hush(); try{ md.pl.pauseVideo(); }catch(e){} }
+    const tap=st.ov.querySelector('#vcMdTap'); if(tap) tap.classList.toggle('on',m.playing&&s!==1&&s!==3&&Date.now()-md.born>3000);
+  }
+  function mdSync(m){
+    if(!st||!m) return; const box=st.ov.querySelector('#vcMd'); if(!box) return; md.m=m;
+    if(!m.vid){ if(md.vid) mdKill(); box.className='vcmd'; box.innerHTML=''; return; }
+    if(m.vid!==md.vid){ mdKill(); md.m=m; md.vid=m.vid; md.born=Date.now();
+      box.className='vcmd on'; box.innerHTML='<div class="vcmf"><div id="vcYT"></div><div class="vcmtap" id="vcMdTap">▶ Videoni yoqish</div></div>'+
+        '<div class="vcmi"><div><b></b><span class="hsub"></span></div><span class="vcms" id="vcMdStop">⏹</span></div>';
+      box.querySelector('#vcMdTap').onclick=()=>{ try{ md.pl.playVideo(); }catch(e){} };
+      box.querySelector('#vcMdStop').onclick=()=>media({op:'stop'});
+      const vid=m.vid;
+      ytApi().then(()=>{ if(!st||md.vid!==vid) return;
+        md.pl=ytMake('vcYT',vid,m.pos,{onReady:()=>{ md.ready=true; md.quiet=Date.now()+1500; mdApply(); },onStateChange:mdState,
+          onError:()=>{ const t=box.querySelector('#vcMdTap'); if(t){ t.textContent='🚫 Bu video bu yerda ochilmaydi'; t.classList.add('on'); } }}); })
+        .catch(()=>toast('⚠️ YouTube pleyeri yuklanmadi'));
+    }
+    md.v=m.v;
+    box.querySelector('.vcmi b').textContent='🎬 '+m.title;
+    box.querySelector('.vcmi .hsub').textContent=(m.playing?'▶ ':'⏸ ')+'qo‘ydi: '+m.by+(m.can?' · siz boshqarasiz':'');
+    box.querySelector('#vcMdStop').style.display=m.can?'':'none';
+    mdApply();
+  }
+  function mdPicker(){
+    if(md.m&&md.m.vid&&!md.m.can){ toast('👑 Videoni xona egasi yoki uni qo‘ygan odam almashtiradi'); return; }
+    let ov=document.getElementById('ov'); if(!ov){ ov=document.createElement('div'); ov.id='ov'; ov.className='ov'; document.body.appendChild(ov); }
+    ov.innerHTML='<div class="sheet"><div style="font-weight:800;font-size:16px;margin-bottom:8px">🎬 Birga ko‘rish</div>'+
+      '<div class="mdq"><input id="vcMQ" maxlength="300" enterkeyhint="search" placeholder="YouTube havolasi yoki qidiruv"><button class="btn go" id="vcMG">🔎</button></div>'+
+      '<div class="mdgrid mdsheet" id="vcMR"><div class="hsub">Video hamma uchun bir vaqtda o‘ynaydi. Pauza va o‘tkazishni siz boshqarasiz.</div></div>'+
+      '<button class="btn full" id="ovx" style="margin-top:8px;background:#1c1830;color:var(--txt)">Yopish</button></div>';
+    ov.className='ov show'; const close=()=>{ ov.className='ov'; };
+    ov.querySelector('#ovx').onclick=close; ov.onclick=e=>{ if(e.target===ov) close(); };
+    const q=ov.querySelector('#vcMQ'), R=ov.querySelector('#vcMR'); let items=[];
+    const go=()=>{ R.innerHTML='<div class="mdload"><i></i><i></i><i></i></div>';
+      MEDIA.find(q.value).then(r=>{ if(r.error){ R.innerHTML='<div class="hsub">'+(MEDIA.ERR[r.error]||'⚠️ Xatolik')+'</div>'; return; } items=r.items;
+        R.innerHTML=items.length?items.map(MEDIA.cardHtml).join(''):'<div class="hsub">Hech narsa topilmadi</div>';
+        R.querySelectorAll('.mdi').forEach(el=>el.onclick=()=>{ const it=items[+el.dataset.i]; media({op:'set',vid:it.vid,title:it.title,channel:it.channel,pos:0}).then(ok=>{ if(ok){ close(); toast('🎬 '+it.title); } }); });
+      }).catch(()=>{ R.innerHTML='<div class="hsub">⚠️ Aloqa xatosi</div>'; }); };
+    ov.querySelector('#vcMG').onclick=go; q.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); go(); } };
+    setTimeout(()=>q.focus(),50);
   }
   function conn(uid){
     let c=st.conns[uid]; if(c) return c;
@@ -24675,7 +25182,7 @@ const VOICE=(()=>{
       if(r.error==='not_in_room'||r.error==='disabled'){ toast('🎙 Xonadan chiqdingiz (xona yopilgan yoki sizni chiqarishgan)'); close(true); return; }
       if(r.peers){ if(r.forced!==st.forced){ st.forced=r.forced; applyMute(); toast(st.forced?'🔇 Xona egasi mikrofoningizni o‘chirdi':'🎙 Xona egasi mikrofoningizga ruxsat berdi'); }
         if(r.room) st.room=r.room;
-        for(const m of (r.msgs||[])) await onMsg(m).catch(()=>{}); sync(r.peers); }
+        for(const m of (r.msgs||[])) await onMsg(m).catch(()=>{}); sync(r.peers); if(r.media) mdSync(r.media); }
     }catch(e){}
     if(st) st.timer=setTimeout(tick,700);
   }
@@ -24705,7 +25212,8 @@ const VOICE=(()=>{
     if(r.result!=='joined'){ stream.getTracks().forEach(t=>t.stop()); toast(VERR[r.error]||'⚠️ Ulanib bo‘lmadi'); refresh(); return; }
     let ov=document.getElementById('vcv'); if(!ov){ ov=document.createElement('div'); ov.id='vcv'; document.body.appendChild(ov); }
     ov.innerHTML='<div class="vch"><div><b class="vctitle"></b><span class="vccnt"></span></div><span class="vcx" id="vcMin">⌄</span></div>'+
-      '<div class="vcgrid"></div><div class="hsub vchint" id="vcHint"></div><div class="vcbar"><button class="btn" id="vcMic"></button><button class="btn vcleave" id="vcLeave">📴 Chiqish</button></div>'+
+      '<div class="vcmd" id="vcMd"></div><div class="vcgrid"></div><div class="hsub vchint" id="vcHint"></div><div class="vcbar"><button class="btn" id="vcMic"></button>'+
+      (window.DD&&window.DD.media?'<button class="btn vcvid" id="vcVid">🎬</button>':'')+'<button class="btn vcleave" id="vcLeave">📴 Chiqish</button></div>'+
       '<button class="btn full vcclose" id="vcClose">🗑 Xonani yopish</button>';
     ov.className='show';
     st={me:r.me,seq:r.seq,room:r.room,stream,conns:{},peers:r.peers,muted:false,forced:false,ice:r.ice,ov,speakingNow:false};
@@ -24713,13 +25221,14 @@ const VOICE=(()=>{
     try{ const AC=window.AudioContext||window.webkitAudioContext; st.ac=new AC(); const src=st.ac.createMediaStreamSource(stream); st.an=st.ac.createAnalyser(); st.an.fftSize=512; src.connect(st.an); }catch(e){}
     ov.querySelector('#vcMic').onclick=()=>{ if(st.forced) return; st.muted=!st.muted; applyMute(); draw(); api('/app/api/voice/state',{muted:st.muted}).catch(()=>{}); };
     ov.querySelector('#vcLeave').onclick=()=>close();
+    const vb=ov.querySelector('#vcVid'); if(vb) vb.onclick=mdPicker;
     ov.querySelector('#vcClose').onclick=()=>{ const b=ov.querySelector('#vcClose'); if(!b.dataset.arm){ b.dataset.arm=1; b.textContent='⚠️ Yana bosing — xona hamma uchun yopiladi'; setTimeout(()=>{ if(b.isConnected){ delete b.dataset.arm; b.textContent='🗑 Xonani yopish'; } },4000); return; }
       api('/app/api/voice/close',{}).then(x=>{ if(x.result==='closed'){ toast('🗑 Xona yopildi'); close(true); } else toast('⚠️ Xatolik'); }); };
     ov.querySelector('#vcMin').onclick=()=>{ ov.classList.remove('show'); list(); };
-    sync(r.peers); tick(); haptic('success'); toast('🎙 '+r.room.title); refresh();
+    sync(r.peers); mdSync(r.media); tick(); haptic('success'); toast('🎙 '+r.room.title); refresh();
   }
   function close(silent){
-    if(!st) return; clearTimeout(st.timer);
+    if(!st) return; clearTimeout(st.timer); mdKill();
     Object.keys(st.conns).forEach(u=>{ send(+u,'bye',{}); drop(+u); });
     st.stream.getTracks().forEach(t=>t.stop()); try{ st.ac&&st.ac.close(); }catch(e){}
     if(!silent) api('/app/api/voice/leave',{}).catch(()=>{});
@@ -24727,7 +25236,7 @@ const VOICE=(()=>{
   }
   window.addEventListener('pagehide',()=>{ if(st) close(); });
   setInterval(()=>{ const s=document.getElementById('s-chat'); if(s&&s.classList.contains('on')&&document.getElementById('vcRooms')) refresh(); },8000);
-  return {open, close, create, list, refresh, get state(){ return st; }};
+  return {open, close, create, list, refresh, media, get state(){ return st; }};
 })();
 function initChat(d){
   const sec=document.getElementById('s-chat'); if(!sec) return;
@@ -25204,10 +25713,11 @@ function kidErr(e,wait){
 function setTab(k){
   TAB=k;
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==='s-'+k));
-  const tk=(k==='crash'||k==='frog'||k==='kami'||k==='casino'||k==='vip')?'games':(k==='bank'||k==='birja')?'moliya':k;
+  const tk=(k==='crash'||k==='frog'||k==='kami'||k==='casino'||k==='vip'||k==='media')?'games':(k==='bank'||k==='birja')?'moliya':k;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===tk));
   if(k==='crash' && window.CR) window.CR.poke();
   if(k==='news' && window.DD) newsSeen(window.DD);
+  if(k==='media') MEDIA.show();
   SND.music(k==='crash'||k==='frog'||k==='kami'?k:null);
   window.scrollTo(0,0);
 }

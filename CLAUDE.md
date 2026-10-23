@@ -413,3 +413,15 @@
   ixtiyoriy TURN env `VOICE_TURN_URL`/`VOICE_TURN_USER`/`VOICE_TURN_PASS`. Klient `VOICE` (`list/refresh/create/open/close`, `#vcv`):
   yangi kirgan (seq katta) offer yuboradi, ~700 ms polling, AnalyserNode bilan gapirayotgan (yashil halqa), 👑 egasi belgisi, admin a'zo
   kartasini bosib boshqaradi. Payload `voice` (rooms/count/max), `voice_test`.
+- 🎬 Media (YouTube; test — `media_enabled_for`: webapp_config "media" yoki `can_test`; Owner → ⚙️ "Media (YouTube) — hamma uchun"): Games →
+  🎬 MEDIA (`.gcc.media`) → `#s-media` (`mediaPage`, `MEDIA` modul, "‹ Games"). Video FAQAT rasmiy IFrame pleyerda (`ytApi`/`ytMake`,
+  youtube-nocookie, playsinline) — yuklab olinmaydi/saqlanmaydi; embed taqiqlangan (101/150) → "↗ YouTube'da ochish" (`tg.openLink`).
+  API `/app/api/media/{home,search,cat,resolve,fav,watched,history}` → `web_media`. Qidiruv/kategoriyalar — YouTube Data API v3,
+  kalit env `YOUTUBE_API_KEY` (faqat serverda; bo'lmasa `search:false` — faqat havola). Havola — oEmbed (kalitsiz, `MEDIA_URL_RE`).
+  Kvota: kesh `_MEDIA_CACHE` (qidiruv 6 s, kategoriya 3 s), `MEDIA_DAILY_SEARCH` 90/kun (UTC), foydalanuvchi `MEDIA_USER_RATE` 12/10 daq
+  (ownerlarga yo'q); `MEDIA_CATS` trend/music/funny/sport — mostPopular (1 birlik, UZ), yo'q bo'lsa qidiruv; kino (long)/multfilm — qidiruv.
+  Jadvallar `media_favs` (200) / `media_history` (60). 👥 Birga ko'rish: ovozli xona `room["media"]` (vid/playing/pos/at/by/v),
+  `voice/media` op set|play|pause|seek|stop (`voice_media_act`; boshqaradi xona egasi/bot egasi, qo'ygan odam yoki hech kim qo'ymagan
+  bo'lsa har kim), holat poll/join javobida `voice_media_view` (pozitsiya server soati bo'yicha). Klient VOICE ichida `mdSync`/`mdApply`
+  (drift >3 s → seek, boshqaruvchi pleyeridagi pauza/play `mdState` orqali hammaga), xonada 🎬 tugma (`mdPicker`), Media pleyerida
+  "👥 Xonada birga". z-index: `.ov` 96 (sheet'lar ovozli xona ustida), `#vcv` 92, `#mpv` 91, toast 99.

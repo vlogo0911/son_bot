@@ -17250,7 +17250,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         elif path in ("/app/api/edu/add", "/app/api/edu/update", "/app/api/edu/toggle"):
             coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
         elif path in ("/app/api/voice/join", "/app/api/voice/leave", "/app/api/voice/poll", "/app/api/voice/signal",
-                      "/app/api/voice/state"):
+                      "/app/api/voice/state", "/app/api/voice/rooms", "/app/api/voice/create", "/app/api/voice/kick",
+                      "/app/api/voice/mute", "/app/api/voice/close"):
             coro = web_voice(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/kid/pack":
             coro = web_kid_pack_buy(uid)
@@ -20427,12 +20428,16 @@ def tops_payload(uid):
 # ── 🎙 Ovozli xona (web app → Chat): bitta umumiy xona, WebRTC mesh (ovoz to'g'ridan-to'g'ri foydalanuvchilar orasida).
 # Server faqat signalizatsiya qiladi (offer/answer/ICE) — HTTP polling orqali; holat xotirada (restartda xona bo'shaydi).
 # Test: standart ownerlar va testerlar; Owner → ⚙️ Sozlamalar → "Ovozli xona — hamma uchun" (`voice` flag).
-VOICE_MAX = 10                 # mesh — har kim har kim bilan ulanadi, shuning uchun xona kichik
+VOICE_MAX = 10                 # bitta xonada (mesh — har kim har kim bilan ulanadi, shuning uchun xona kichik)
 VOICE_STALE = 15               # shuncha soniya poll bo'lmasa — xonadan chiqarilgan hisoblanadi
 VOICE_SIGNAL_MAX = 24000       # bitta SDP/ICE xabari (belgi)
 VOICE_INBOX_MAX = 300
-VOICE_ROOM: dict[int, dict] = {}      # uid -> {name, seq, muted, speaking, joined, seen}
-VOICE_INBOX: dict[int, list] = {}     # uid -> [{from, type, data}]
+VOICE_ROOMS_MAX = 20           # bir vaqtda ochiq xonalar (umumiy xona bilan)
+VOICE_EMPTY_TTL = 120          # foydalanuvchi xonasi bo'sh qolsa shuncha soniyadan keyin yopiladi
+VOICE_KICK_BAN = 120           # chiqarib yuborilgan odam shu xonaga qayta kira olmaydi (soniya)
+VOICE_MAIN = "main"            # 🎙 Umumiy xona — doim ochiq
+VOICE_ROOMS: dict[str, dict] = {}     # rid -> {id, title, owner, created, members{uid:{...}}, inbox{uid:[...]}, kicked{uid:until}, empty}
+VOICE_WHERE: dict[int, str] = {}      # uid -> rid (bir vaqtda faqat bitta xonada)
 _VOICE_SEQ = [0]
 
 
@@ -20450,21 +20455,54 @@ def voice_ice_servers():
     return out
 
 
+def _voice_room_new(rid, title, owner):
+    VOICE_ROOMS[rid] = {"id": rid, "title": title, "owner": owner, "created": time.time(), "members": {}, "inbox": {},
+                        "kicked": {}, "empty": time.time()}
+    return VOICE_ROOMS[rid]
+
+
+def _voice_drop(uid):
+    rid = VOICE_WHERE.pop(uid, None)
+    room = VOICE_ROOMS.get(rid)
+    if room:
+        room["members"].pop(uid, None)
+        room["inbox"].pop(uid, None)
+        if not room["members"]:
+            room["empty"] = time.time()
+
+
 def _voice_gc():
+    if VOICE_MAIN not in VOICE_ROOMS:
+        _voice_room_new(VOICE_MAIN, "🎙 Umumiy xona", 0)
     now = time.time()
-    for u in [u for u, p in VOICE_ROOM.items() if now - p["seen"] > VOICE_STALE]:
-        VOICE_ROOM.pop(u, None)
-        VOICE_INBOX.pop(u, None)
+    for rid, room in list(VOICE_ROOMS.items()):
+        for u in [u for u, p in room["members"].items() if now - p["seen"] > VOICE_STALE]:
+            _voice_drop(u)
+        if rid != VOICE_MAIN and not room["members"] and now - room["empty"] > VOICE_EMPTY_TTL:
+            VOICE_ROOMS.pop(rid, None)
 
 
-def voice_peers():
+def _voice_admin(room, uid):
+    return uid in CAREER_OWNER_IDS or (room["owner"] and room["owner"] == uid)
+
+
+def voice_peers(room):
+    return [{"id": u, "name": p["name"], "seq": p["seq"], "muted": p["muted"] or p["forced"], "forced": p["forced"],
+             "speaking": p["speaking"], "admin": u == room["owner"]}
+            for u, p in sorted(room["members"].items(), key=lambda x: x[1]["seq"])]
+
+
+def voice_rooms_list():
     _voice_gc()
-    return [{"id": u, "name": p["name"], "seq": p["seq"], "muted": p["muted"], "speaking": p["speaking"]}
-            for u, p in sorted(VOICE_ROOM.items(), key=lambda x: x[1]["seq"])]
+    rooms = sorted(VOICE_ROOMS.values(), key=lambda r: (r["id"] != VOICE_MAIN, -len(r["members"]), r["created"]))
+    return [{"id": r["id"], "title": r["title"], "count": len(r["members"]), "max": VOICE_MAX,
+             "owner": _web_player_name(r["owner"]) if r["owner"] else None, "main": r["id"] == VOICE_MAIN,
+             "names": [p["name"] for p in list(r["members"].values())[:3]]} for r in rooms]
 
 
 def voice_summary():
-    return {"count": len(voice_peers()), "max": VOICE_MAX}
+    rooms = voice_rooms_list()
+    return {"count": sum(r["count"] for r in rooms), "rooms": rooms, "max": VOICE_MAX}
 
 
 async def web_voice(uid, act, body):
@@ -20472,39 +20510,88 @@ async def web_voice(uid, act, body):
         return {"error": "disabled"}
     now = time.time()
     _voice_gc()
-    me = VOICE_ROOM.get(uid)
+    if act == "rooms":
+        return {"result": "ok", "rooms": voice_rooms_list(), "mine": VOICE_WHERE.get(uid)}
+    if act == "create":
+        title = re.sub(r"\s+", " ", str(body.get("title") or "")).strip()
+        if not 2 <= len(title) <= 40:
+            return {"error": "title"}
+        if any(r["owner"] == uid for r in VOICE_ROOMS.values()):
+            return {"error": "has_room"}
+        if len(VOICE_ROOMS) >= VOICE_ROOMS_MAX:
+            return {"error": "rooms_full"}
+        rid = secrets.token_hex(4)
+        _voice_room_new(rid, title, uid)
+        body = dict(body, room=rid)
+        act = "join"
     if act == "join":
-        if not me:
-            if len(VOICE_ROOM) >= VOICE_MAX:
+        rid = str(body.get("room") or VOICE_MAIN)
+        room = VOICE_ROOMS.get(rid)
+        if not room:
+            return {"error": "no_room"}
+        if room["kicked"].get(uid, 0) > now:
+            return {"error": "kicked"}
+        if VOICE_WHERE.get(uid) != rid:
+            _voice_drop(uid)
+            if len(room["members"]) >= VOICE_MAX:
                 return {"error": "full", "max": VOICE_MAX}
             _VOICE_SEQ[0] += 1
-            VOICE_ROOM[uid] = me = {"name": _web_player_name(uid), "seq": _VOICE_SEQ[0], "muted": False,
+            room["members"][uid] = {"name": _web_player_name(uid), "seq": _VOICE_SEQ[0], "muted": False, "forced": False,
                                     "speaking": False, "joined": now, "seen": now}
-        VOICE_INBOX[uid] = []        # qayta kirish — eski signallar o'chadi, ulanishlar yangidan
+            VOICE_WHERE[uid] = rid
+        me = room["members"][uid]
+        room["inbox"][uid] = []        # qayta kirish — eski signallar o'chadi, ulanishlar yangidan
         me["seen"] = now
-        return {"result": "joined", "me": uid, "seq": me["seq"], "peers": voice_peers(), "ice": voice_ice_servers()}
-    if not me:
+        return {"result": "joined", "me": uid, "seq": me["seq"], "room": {"id": rid, "title": room["title"],
+                "admin": _voice_admin(room, uid), "main": rid == VOICE_MAIN},
+                "peers": voice_peers(room), "ice": voice_ice_servers()}
+    room = VOICE_ROOMS.get(VOICE_WHERE.get(uid))
+    if not room:
         return {"error": "not_in_room"}
+    me = room["members"][uid]
     me["seen"] = now
     if act == "leave":
-        VOICE_ROOM.pop(uid, None)
-        VOICE_INBOX.pop(uid, None)
+        _voice_drop(uid)
         return {"result": "left"}
     if act == "state":
         me["muted"] = bool(body.get("muted"))
-        me["speaking"] = bool(body.get("speaking")) and not me["muted"]
+        me["speaking"] = bool(body.get("speaking")) and not (me["muted"] or me["forced"])
         return {"result": "ok"}
+    if act in ("kick", "mute", "close"):      # 🛡 xona egasi (yoki bot egasi) boshqaradi
+        if not _voice_admin(room, uid):
+            return {"error": "not_admin"}
+        if act == "close":
+            if room["id"] == VOICE_MAIN:
+                return {"error": "main"}
+            for u in list(room["members"]):
+                VOICE_WHERE.pop(u, None)
+            VOICE_ROOMS.pop(room["id"], None)
+            return {"result": "closed"}
+        try:
+            target = int(body.get("uid"))
+        except (TypeError, ValueError):
+            return {"error": "uid"}
+        if target == uid or target not in room["members"]:
+            return {"error": "uid"}
+        if act == "kick":
+            room["kicked"][target] = now + VOICE_KICK_BAN
+            _voice_drop(target)
+            return {"result": "kicked"}
+        t = room["members"][target]
+        t["forced"] = not t["forced"]
+        t["speaking"] = False
+        return {"result": "muted" if t["forced"] else "unmuted"}
     if act == "signal":
         to, kind, data = body.get("to"), body.get("type"), body.get("data")
         try:
             to = int(to)
         except (TypeError, ValueError):
             return {"error": "to"}
-        if to not in VOICE_ROOM or to == uid or kind not in ("offer", "answer", "ice", "bye"):
+        if to not in room["members"] or to == uid or kind not in ("offer", "answer", "ice", "bye"):
             return {"error": "to"}
         if len(json.dumps(data)) > VOICE_SIGNAL_MAX:
             return {"error": "big"}
-        box = VOICE_INBOX.setdefault(to, [])
+        box = room["inbox"].setdefault(to, [])
         if len(box) >= VOICE_INBOX_MAX:
             del box[: len(box) - VOICE_INBOX_MAX + 1]
         box.append({"from": uid, "type": kind, "data": data})
@@ -20512,9 +20599,10 @@ async def web_voice(uid, act, body):
     if act == "poll":
         if "muted" in body:
             me["muted"] = bool(body.get("muted"))
-            me["speaking"] = bool(body.get("speaking")) and not me["muted"]
-        msgs, VOICE_INBOX[uid] = VOICE_INBOX.get(uid, []), []
-        return {"result": "ok", "peers": voice_peers(), "msgs": msgs}
+            me["speaking"] = bool(body.get("speaking")) and not (me["muted"] or me["forced"])
+        msgs, room["inbox"][uid] = room["inbox"].get(uid, []), []
+        return {"result": "ok", "peers": voice_peers(room), "msgs": msgs, "forced": me["forced"],
+                "room": {"id": room["id"], "title": room["title"], "admin": _voice_admin(room, uid), "main": room["id"] == VOICE_MAIN}}
     return {"error": "act"}
 
 
@@ -22108,9 +22196,19 @@ WEBAPP_HTML = r"""<!doctype html>
     background:radial-gradient(circle,#fff8d6,#ffd24a 50%,rgba(255,180,30,0) 70%);animation:spark .6s ease-out forwards}
   @keyframes spark{to{transform:translate(var(--dx),var(--dy)) scale(.2);opacity:0}}
   /* ───── 🎙 Ovozli xona ───── */
-  .vccard{display:flex;align-items:center;gap:12px;margin-bottom:12px;background:linear-gradient(90deg,rgba(255,210,74,.16),rgba(255,210,74,.03));box-shadow:inset 0 0 0 1px var(--gold2)}
-  .vccard .vci{font-size:30px;filter:drop-shadow(0 3px 6px rgba(0,0,0,.5))}
-  .vccard .vcm{flex:1;min-width:0}
+  .vcbox{margin-bottom:12px;background:linear-gradient(180deg,rgba(255,210,74,.14),rgba(255,210,74,.03));box-shadow:inset 0 0 0 1px var(--gold2)}
+  .vchd{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+  .vchd .btn{padding:8px 12px;font-size:13px;white-space:nowrap}
+  .vcroom{display:flex;align-items:center;gap:10px;padding:10px 6px;border-top:1px solid var(--line);cursor:pointer}
+  .vcroom:first-child{border-top:0}
+  .vcroom.here{background:rgba(74,222,128,.08);border-radius:12px}
+  .vcroom .vcri{font-size:24px}
+  .vcroom .vcrm{flex:1;min-width:0}
+  .vcroom .vcrm b{display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vcroom .vcrm .hsub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vcroom .vcgo{font-size:12px;font-weight:900;color:#2b1b02;background:var(--g-metal);padding:6px 10px;border-radius:999px;white-space:nowrap}
+  .vchint{text-align:center;margin-top:8px}
+  .vcclose{margin-top:8px;background:#2a1414;color:#ffb4b4}
   #vcv{position:fixed;inset:0;z-index:9500;display:none;flex-direction:column;background:radial-gradient(120% 80% at 50% 0%,#2a1d07,#0a0705 70%);
     padding:calc(14px + env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left))}
   #vcv.show{display:flex}
@@ -22627,15 +22725,15 @@ function render(res){
   // 💬 CHAT: ID / @username orqali topib suhbatlashish
   const ch=$('<div class="sec" id="s-chat"></div>');
   ch.innerHTML='<h2>💬 Chat</h2>'+
-    (d.voice?'<div class="card full vccard" id="vcCard"><div class="vci">🎙</div><div class="vcm"><b>Ovozli xona'+(d.voice_test?' <span class="avtest">TEST</span>':'')+'</b>'+
-      '<div class="hsub" id="vcCnt">'+d.voice.count+' / '+d.voice.max+' kishi suhbatda</div></div><button class="btn go" id="vcJoin">🎧 Kirish</button></div>':'')+
+    (d.voice?'<div class="card full vcbox" id="vcCard"><div class="vchd"><b>🎙 Ovozli xonalar'+(d.voice_test?' <span class="avtest">TEST</span>':'')+'</b>'+
+      '<button class="btn go" id="vcNew">➕ Xona yaratish</button></div><div id="vcRooms"></div></div>':'')+
     '<div class="card full chs"><div class="lbl">🔎 Foydalanuvchini topish</div>'+
     '<div class="chq"><input class="bet" id="chQ" placeholder="ID yoki @username" autocomplete="off" style="text-align:left">'+
     '<button class="btn go" id="chGo">Topish</button></div><div id="chRes"></div></div>'+
     '<h2 style="margin-top:18px">🗨 Suhbatlar</h2><div id="chList" class="chlist"><div class="hsub">Yuklanmoqda…</div></div>';
   app.appendChild(ch);
   initChat(d);
-  const vj=document.getElementById('vcJoin'); if(vj) vj.onclick=()=>VOICE.open(d);
+  if(d.voice){ VOICE.list(d.voice.rooms); const vn=document.getElementById('vcNew'); if(vn) vn.onclick=()=>VOICE.create(d); }
 
   // KAMIKAZE (test: faqat ownerlar, keyin hamma uchun)
   if(d.kami){
@@ -24514,10 +24612,30 @@ function peerInfo(u){
     '<span class="chip">⭐ '+esc(u.level)+'</span>'+(u.profession?'<span class="chip">💼 '+esc(u.profession)+'</span>':'')+
     '<span class="chip">'+(u.has_pair?'💞 Jufti bor':'💍 Jufti yo‘q')+'</span>'+(u.divorces?'<span class="chip">💔 Ajrashgan: '+esc(u.divorces)+'</span>':'')+'</div>';
 }
-// ---- 🎙 Ovozli xona: bitta umumiy xona, WebRTC mesh; signalizatsiya — /app/api/voice/* (HTTP polling) ----
+// ---- 🎙 Ovozli xonalar (Telegram uslubi): umumiy xona + foydalanuvchi yaratgan xonalar; WebRTC mesh, signal — /app/api/voice/* ----
 const VOICE=(()=>{
-  let st=null;   // {me, seq, stream, conns:{uid:{pc,el,q:[]}}, peers:[], muted, timer, ice, an, ov}
+  let st=null;   // {me, seq, room, stream, conns:{uid:{pc,el,q,state}}, peers, muted, forced, timer, ice, an, ov}
+  let lastRooms=[];
   const send=(to,type,data)=>api('/app/api/voice/signal',{to,type,data}).catch(()=>{});
+  const VERR={full:'🎙 Xona to‘la',disabled:'🎙 Ovozli xonalar yopiq',no_room:'🎙 Xona topilmadi (yopilgan bo‘lishi mumkin)',kicked:'⛔ Sizni bu xonadan chiqarishgan — birozdan keyin urinib ko‘ring',
+    title:'✍️ Xona nomi 2–40 belgi bo‘lsin',has_room:'🎙 Sizda allaqachon ochiq xona bor',rooms_full:'🎙 Hozir xonalar soni chegarada — keyinroq urinib ko‘ring'};
+  function list(rooms){ lastRooms=rooms||lastRooms; const box=document.getElementById('vcRooms'); if(!box) return;
+    box.innerHTML=lastRooms.map(r=>'<div class="vcroom'+(st&&st.room.id===r.id?' here':'')+'" data-id="'+esc(r.id)+'"><div class="vcri">'+(r.main?'🌐':'🎙')+'</div>'+
+      '<div class="vcrm"><b>'+esc(r.title)+'</b><div class="hsub">'+(r.count?('👥 '+r.count+' / '+r.max+' · '+esc(r.names.join(', '))+(r.count>3?'…':'')):'Hozircha bo‘sh')+
+      (r.owner?' · 👑 '+esc(r.owner):'')+'</div></div><span class="vcgo">'+(st&&st.room.id===r.id?'🎙 Qaytish':'Kirish')+'</span></div>').join('')||'<div class="hsub">Xona yo‘q</div>';
+    box.querySelectorAll('.vcroom').forEach(el=>el.onclick=()=>open(window.D||{},el.dataset.id)); }
+  function refresh(){ api('/app/api/voice/rooms',{}).then(r=>{ if(r.rooms) list(r.rooms); }).catch(()=>{}); }
+  function create(d){
+    let ov=document.getElementById('ov'); if(!ov){ ov=document.createElement('div'); ov.id='ov'; ov.className='ov'; document.body.appendChild(ov); }
+    ov.innerHTML='<div class="sheet"><div style="font-weight:800;font-size:16px;margin-bottom:8px">➕ Yangi ovozli xona</div>'+
+      '<input class="bet" id="vcT" maxlength="40" placeholder="Xona nomi (masalan: Kechki suhbat)" style="text-align:left">'+
+      '<div class="hsub" style="margin:6px 0 10px">Xonani siz boshqarasiz: a’zoni jim qilish, chiqarib yuborish, xonani yopish. Bo‘sh qolsa 2 daqiqada yopiladi.</div>'+
+      '<button class="btn go full" id="vcC">🎙 Yaratish va kirish</button><button class="btn full" id="ovx" style="margin-top:8px;background:#1c1830;color:var(--txt)">Bekor qilish</button></div>';
+    ov.className='ov show'; const close=()=>{ ov.className='ov'; };
+    ov.querySelector('#ovx').onclick=close; ov.onclick=e=>{ if(e.target===ov) close(); };
+    const t=ov.querySelector('#vcT'); setTimeout(()=>t.focus(),50);
+    ov.querySelector('#vcC').onclick=()=>{ const v=t.value.trim(); if(v.length<2){ toast(VERR.title); return; } close(); open(d,null,v); };
+  }
   function conn(uid){
     let c=st.conns[uid]; if(c) return c;
     const pc=new RTCPeerConnection({iceServers:st.ice});
@@ -24526,8 +24644,7 @@ const VOICE=(()=>{
     c=st.conns[uid]={pc,el,q:[],state:'new'};
     pc.onicecandidate=e=>{ if(e.candidate) send(uid,'ice',e.candidate.toJSON()); };
     pc.ontrack=e=>{ el.srcObject=e.streams[0]; const p=el.play(); if(p&&p.catch) p.catch(()=>{}); };
-    pc.onconnectionstatechange=()=>{ c.state=pc.connectionState; draw();
-      if(pc.connectionState==='failed'){ drop(uid); } };
+    pc.onconnectionstatechange=()=>{ c.state=pc.connectionState; draw(); if(pc.connectionState==='failed') drop(uid); };
     return c;
   }
   function drop(uid){ const c=st&&st.conns[uid]; if(!c) return; try{ c.pc.close(); }catch(e){} c.el.remove(); delete st.conns[uid]; }
@@ -24549,52 +24666,68 @@ const VOICE=(()=>{
     peers.forEach(p=>{ if(p.id!==st.me && !st.conns[p.id] && st.seq>p.seq) offer(p.id).catch(()=>{}); });
     draw();
   }
+  function applyMute(){ const off=st.muted||st.forced; st.stream.getAudioTracks().forEach(t=>t.enabled=!off); }
   function level(){ if(!st||!st.an) return 0; const a=new Uint8Array(st.an.fftSize); st.an.getByteTimeDomainData(a); let m=0; for(const v of a) m=Math.max(m,Math.abs(v-128)); return m; }
   async function tick(){
-    if(!st) return; const speaking=!st.muted && level()>14; st.speakingNow=speaking;
+    if(!st) return; const speaking=!(st.muted||st.forced) && level()>14; st.speakingNow=speaking;
     try{ const r=await api('/app/api/voice/poll',{muted:st.muted,speaking});
       if(!st) return;
-      if(r.error==='not_in_room'||r.error==='disabled'){ toast('🎙 Xonadan chiqdingiz'); close(true); return; }
-      if(r.peers){ for(const m of (r.msgs||[])) await onMsg(m).catch(()=>{}); sync(r.peers); }
+      if(r.error==='not_in_room'||r.error==='disabled'){ toast('🎙 Xonadan chiqdingiz (xona yopilgan yoki sizni chiqarishgan)'); close(true); return; }
+      if(r.peers){ if(r.forced!==st.forced){ st.forced=r.forced; applyMute(); toast(st.forced?'🔇 Xona egasi mikrofoningizni o‘chirdi':'🎙 Xona egasi mikrofoningizga ruxsat berdi'); }
+        if(r.room) st.room=r.room;
+        for(const m of (r.msgs||[])) await onMsg(m).catch(()=>{}); sync(r.peers); }
     }catch(e){}
     if(st) st.timer=setTimeout(tick,700);
+  }
+  function peerMenu(p){
+    if(!st||!st.room.admin||p.id===st.me) return;
+    sheet('🛡 '+esc(p.name),[{label:p.forced?'🎙 Mikrofonga ruxsat berish':'🔇 Mikrofonini o‘chirish',value:'mute'},{label:'🚪 Xonadan chiqarib yuborish',value:'kick'}],
+      act=>api('/app/api/voice/'+act,{uid:p.id}).then(r=>{ toast(r.result==='kicked'?'🚪 '+p.name+' chiqarildi':r.result==='muted'?'🔇 '+p.name+' jim qilindi':r.result==='unmuted'?'🎙 '+p.name+' gapira oladi':'⚠️ Xatolik'); }));
   }
   function draw(){
     if(!st) return; const g=st.ov.querySelector('.vcgrid');
     g.innerHTML=st.peers.map(p=>{ const me=p.id===st.me, c=st.conns[p.id], sp=me?st.speakingNow:p.speaking, ok=me||(c&&c.state==='connected');
-      return '<div class="vcp'+(sp?' sp':'')+(p.muted?' mu':'')+'">'+chAva(p.id,p.name)+'<b>'+esc(p.name)+(me?' (siz)':'')+'</b>'+
-        '<small>'+(p.muted?'🔇 Mikrofon o‘chiq':me?'🎙 Siz':ok?'🟢 Ulangan':'⏳ Ulanmoqda…')+'</small></div>'; }).join('');
-    st.ov.querySelector('.vccnt').textContent=st.peers.length+' kishi';
-    const mb=st.ov.querySelector('#vcMic'); mb.textContent=st.muted?'🔇 Mikrofon o‘chiq':'🎙 Mikrofon yoniq'; mb.classList.toggle('off',st.muted);
+      return '<div class="vcp'+(sp?' sp':'')+(p.muted?' mu':'')+'" data-id="'+p.id+'">'+chAva(p.id,p.name)+'<b>'+(p.admin?'👑 ':'')+esc(p.name)+(me?' (siz)':'')+'</b>'+
+        '<small>'+(p.forced?'🔇 Jim qilingan':p.muted?'🔇 Mikrofon o‘chiq':me?'🎙 Siz':ok?'🟢 Ulangan':'⏳ Ulanmoqda…')+'</small></div>'; }).join('');
+    g.querySelectorAll('.vcp').forEach(el=>el.onclick=()=>{ const p=st.peers.find(x=>x.id===+el.dataset.id); if(p) peerMenu(p); });
+    st.ov.querySelector('.vctitle').textContent=st.room.title;
+    st.ov.querySelector('.vccnt').textContent=st.peers.length+' kishi'+(st.room.admin&&!st.room.main?' · siz boshqarasiz':'');
+    const mb=st.ov.querySelector('#vcMic'); mb.textContent=st.forced?'🔇 Jim qilingansiz':st.muted?'🔇 Mikrofon o‘chiq':'🎙 Mikrofon yoniq'; mb.classList.toggle('off',st.muted||st.forced); mb.disabled=st.forced;
+    const cb=st.ov.querySelector('#vcClose'); cb.style.display=st.room.admin&&!st.room.main?'':'none';
   }
-  async function open(d){
-    if(st){ st.ov.classList.add('show'); return; }
+  async function open(d,rid,newTitle){
+    if(st && (!rid || st.room.id===rid) && !newTitle){ st.ov.classList.add('show'); return; }
+    if(st) close();
     if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.RTCPeerConnection)){ toast('⚠️ Bu qurilmada ovozli chat qo‘llab-quvvatlanmaydi'); return; }
     let stream; try{ stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false}); }
     catch(e){ toast('🎙 Mikrofonga ruxsat berilmadi'); return; }
-    const r=await api('/app/api/voice/join',{}).catch(()=>({error:'net'}));
-    if(r.result!=='joined'){ stream.getTracks().forEach(t=>t.stop()); toast(r.error==='full'?'🎙 Xona to‘la ('+r.max+' kishi)':r.error==='disabled'?'🎙 Ovozli xona yopiq':'⚠️ Ulanib bo‘lmadi'); return; }
+    const r=await (newTitle?api('/app/api/voice/create',{title:newTitle}):api('/app/api/voice/join',{room:rid||'main'})).catch(()=>({error:'net'}));
+    if(r.result!=='joined'){ stream.getTracks().forEach(t=>t.stop()); toast(VERR[r.error]||'⚠️ Ulanib bo‘lmadi'); refresh(); return; }
     let ov=document.getElementById('vcv'); if(!ov){ ov=document.createElement('div'); ov.id='vcv'; document.body.appendChild(ov); }
-    ov.innerHTML='<div class="vch"><div><b>🎙 Ovozli xona</b><span class="vccnt"></span></div><span class="vcx" id="vcMin">⌄</span></div>'+
-      '<div class="vcgrid"></div><div class="vcbar"><button class="btn" id="vcMic"></button><button class="btn vcleave" id="vcLeave">📴 Chiqish</button></div>';
+    ov.innerHTML='<div class="vch"><div><b class="vctitle"></b><span class="vccnt"></span></div><span class="vcx" id="vcMin">⌄</span></div>'+
+      '<div class="vcgrid"></div><div class="hsub vchint" id="vcHint"></div><div class="vcbar"><button class="btn" id="vcMic"></button><button class="btn vcleave" id="vcLeave">📴 Chiqish</button></div>'+
+      '<button class="btn full vcclose" id="vcClose">🗑 Xonani yopish</button>';
     ov.className='show';
-    st={me:r.me,seq:r.seq,stream,conns:{},peers:r.peers,muted:false,ice:r.ice,ov,speakingNow:false};
+    st={me:r.me,seq:r.seq,room:r.room,stream,conns:{},peers:r.peers,muted:false,forced:false,ice:r.ice,ov,speakingNow:false};
+    ov.querySelector('#vcHint').textContent=r.room.admin?'👑 A’zoni bosib — jim qilish yoki chiqarib yuborish':'';
     try{ const AC=window.AudioContext||window.webkitAudioContext; st.ac=new AC(); const src=st.ac.createMediaStreamSource(stream); st.an=st.ac.createAnalyser(); st.an.fftSize=512; src.connect(st.an); }catch(e){}
-    ov.querySelector('#vcMic').onclick=()=>{ st.muted=!st.muted; st.stream.getAudioTracks().forEach(t=>t.enabled=!st.muted); draw(); api('/app/api/voice/state',{muted:st.muted}).catch(()=>{}); };
+    ov.querySelector('#vcMic').onclick=()=>{ if(st.forced) return; st.muted=!st.muted; applyMute(); draw(); api('/app/api/voice/state',{muted:st.muted}).catch(()=>{}); };
     ov.querySelector('#vcLeave').onclick=()=>close();
-    ov.querySelector('#vcMin').onclick=()=>{ ov.classList.remove('show'); const c=document.getElementById('vcJoin'); if(c) c.textContent='🎙 Qaytish'; };
-    sync(r.peers); tick(); haptic('success'); toast('🎙 Xonaga kirdingiz');
+    ov.querySelector('#vcClose').onclick=()=>{ const b=ov.querySelector('#vcClose'); if(!b.dataset.arm){ b.dataset.arm=1; b.textContent='⚠️ Yana bosing — xona hamma uchun yopiladi'; setTimeout(()=>{ if(b.isConnected){ delete b.dataset.arm; b.textContent='🗑 Xonani yopish'; } },4000); return; }
+      api('/app/api/voice/close',{}).then(x=>{ if(x.result==='closed'){ toast('🗑 Xona yopildi'); close(true); } else toast('⚠️ Xatolik'); }); };
+    ov.querySelector('#vcMin').onclick=()=>{ ov.classList.remove('show'); list(); };
+    sync(r.peers); tick(); haptic('success'); toast('🎙 '+r.room.title); refresh();
   }
   function close(silent){
     if(!st) return; clearTimeout(st.timer);
     Object.keys(st.conns).forEach(u=>{ send(+u,'bye',{}); drop(+u); });
     st.stream.getTracks().forEach(t=>t.stop()); try{ st.ac&&st.ac.close(); }catch(e){}
     if(!silent) api('/app/api/voice/leave',{}).catch(()=>{});
-    st.ov.className=''; st.ov.innerHTML=''; st=null;
-    const c=document.getElementById('vcJoin'); if(c) c.textContent='🎧 Kirish';
+    st.ov.className=''; st.ov.innerHTML=''; st=null; setTimeout(refresh,300);
   }
   window.addEventListener('pagehide',()=>{ if(st) close(); });
-  return {open, close, get state(){ return st; }};
+  setInterval(()=>{ const s=document.getElementById('s-chat'); if(s&&s.classList.contains('on')&&document.getElementById('vcRooms')) refresh(); },8000);
+  return {open, close, create, list, refresh, get state(){ return st; }};
 })();
 function initChat(d){
   const sec=document.getElementById('s-chat'); if(!sec) return;

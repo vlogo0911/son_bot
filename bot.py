@@ -17249,6 +17249,9 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_edu_enroll(uid, body.get("kid"), body.get("inst"))
         elif path in ("/app/api/edu/add", "/app/api/edu/update", "/app/api/edu/toggle"):
             coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
+        elif path in ("/app/api/voice/join", "/app/api/voice/leave", "/app/api/voice/poll", "/app/api/voice/signal",
+                      "/app/api/voice/state"):
+            coro = web_voice(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/kid/pack":
             coro = web_kid_pack_buy(uid)
         elif path == "/app/api/owner/kidpack":
@@ -20061,7 +20064,7 @@ async def web_news_admin(uid, act, body):
 
 
 # ⚙️ Owner panel (web): xususiyatlarni hamma uchun ochish/yopish — bot panelidagi bilan bir xil flaglar
-OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip")
+OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip", "voice")
 
 
 def owner_flags_payload():
@@ -20257,6 +20260,8 @@ async def webapp_payload(user_id):
         "crash_history": list(WEB_CRASH_HISTORY),
         "edu": edu_list(True), "edu_min_age": EDU_MIN_AGE, "edu_default_fee": KID_FEES,
         "kid_pack": kid_pack_payload(user_id),
+        "voice": voice_summary() if voice_enabled_for(user_id) else None,
+        "voice_test": not webapp_flags().get("voice", 0),
         "kid_premium": [{"key": k, "min": v[0], "max": v[1], "price": v[2], "happy": v[3], "name": v[4], "desc": v[5]}
                         for k, v in KID_PREMIUM.items()],
         "edu_all": edu_list(False) if is_owner else [],
@@ -20417,6 +20422,100 @@ def tops_payload(uid):
     res["pairs"] = {"rows": [{"n": r["n"], "v": r["v"], "a": r["a"], "b": 0, "me": uid in r["uid"]} for r in lists["pairs"]],
                     "me": pme}
     return res
+
+
+# ── 🎙 Ovozli xona (web app → Chat): bitta umumiy xona, WebRTC mesh (ovoz to'g'ridan-to'g'ri foydalanuvchilar orasida).
+# Server faqat signalizatsiya qiladi (offer/answer/ICE) — HTTP polling orqali; holat xotirada (restartda xona bo'shaydi).
+# Test: standart ownerlar va testerlar; Owner → ⚙️ Sozlamalar → "Ovozli xona — hamma uchun" (`voice` flag).
+VOICE_MAX = 10                 # mesh — har kim har kim bilan ulanadi, shuning uchun xona kichik
+VOICE_STALE = 15               # shuncha soniya poll bo'lmasa — xonadan chiqarilgan hisoblanadi
+VOICE_SIGNAL_MAX = 24000       # bitta SDP/ICE xabari (belgi)
+VOICE_INBOX_MAX = 300
+VOICE_ROOM: dict[int, dict] = {}      # uid -> {name, seq, muted, speaking, joined, seen}
+VOICE_INBOX: dict[int, list] = {}     # uid -> [{from, type, data}]
+_VOICE_SEQ = [0]
+
+
+def voice_enabled_for(uid):
+    return web_enabled_for(uid) and (bool(webapp_flags().get("voice", 0)) or can_test(uid))
+
+
+def voice_ice_servers():
+    """STUN (Google, bepul) + ixtiyoriy TURN (env: VOICE_TURN_URL / VOICE_TURN_USER / VOICE_TURN_PASS)."""
+    out = [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]
+    turn = os.environ.get("VOICE_TURN_URL")
+    if turn:
+        out.append({"urls": [u.strip() for u in turn.split(",") if u.strip()],
+                    "username": os.environ.get("VOICE_TURN_USER", ""), "credential": os.environ.get("VOICE_TURN_PASS", "")})
+    return out
+
+
+def _voice_gc():
+    now = time.time()
+    for u in [u for u, p in VOICE_ROOM.items() if now - p["seen"] > VOICE_STALE]:
+        VOICE_ROOM.pop(u, None)
+        VOICE_INBOX.pop(u, None)
+
+
+def voice_peers():
+    _voice_gc()
+    return [{"id": u, "name": p["name"], "seq": p["seq"], "muted": p["muted"], "speaking": p["speaking"]}
+            for u, p in sorted(VOICE_ROOM.items(), key=lambda x: x[1]["seq"])]
+
+
+def voice_summary():
+    return {"count": len(voice_peers()), "max": VOICE_MAX}
+
+
+async def web_voice(uid, act, body):
+    if not voice_enabled_for(uid):
+        return {"error": "disabled"}
+    now = time.time()
+    _voice_gc()
+    me = VOICE_ROOM.get(uid)
+    if act == "join":
+        if not me:
+            if len(VOICE_ROOM) >= VOICE_MAX:
+                return {"error": "full", "max": VOICE_MAX}
+            _VOICE_SEQ[0] += 1
+            VOICE_ROOM[uid] = me = {"name": _web_player_name(uid), "seq": _VOICE_SEQ[0], "muted": False,
+                                    "speaking": False, "joined": now, "seen": now}
+        VOICE_INBOX[uid] = []        # qayta kirish — eski signallar o'chadi, ulanishlar yangidan
+        me["seen"] = now
+        return {"result": "joined", "me": uid, "seq": me["seq"], "peers": voice_peers(), "ice": voice_ice_servers()}
+    if not me:
+        return {"error": "not_in_room"}
+    me["seen"] = now
+    if act == "leave":
+        VOICE_ROOM.pop(uid, None)
+        VOICE_INBOX.pop(uid, None)
+        return {"result": "left"}
+    if act == "state":
+        me["muted"] = bool(body.get("muted"))
+        me["speaking"] = bool(body.get("speaking")) and not me["muted"]
+        return {"result": "ok"}
+    if act == "signal":
+        to, kind, data = body.get("to"), body.get("type"), body.get("data")
+        try:
+            to = int(to)
+        except (TypeError, ValueError):
+            return {"error": "to"}
+        if to not in VOICE_ROOM or to == uid or kind not in ("offer", "answer", "ice", "bye"):
+            return {"error": "to"}
+        if len(json.dumps(data)) > VOICE_SIGNAL_MAX:
+            return {"error": "big"}
+        box = VOICE_INBOX.setdefault(to, [])
+        if len(box) >= VOICE_INBOX_MAX:
+            del box[: len(box) - VOICE_INBOX_MAX + 1]
+        box.append({"from": uid, "type": kind, "data": data})
+        return {"result": "sent"}
+    if act == "poll":
+        if "muted" in body:
+            me["muted"] = bool(body.get("muted"))
+            me["speaking"] = bool(body.get("speaking")) and not me["muted"]
+        msgs, VOICE_INBOX[uid] = VOICE_INBOX.get(uid, []), []
+        return {"result": "ok", "peers": voice_peers(), "msgs": msgs}
+    return {"error": "act"}
 
 
 async def webapp_fetch(user_id):
@@ -22008,6 +22107,29 @@ WEBAPP_HTML = r"""<!doctype html>
   .spark{position:fixed;width:6px;height:6px;border-radius:50%;pointer-events:none;z-index:200;
     background:radial-gradient(circle,#fff8d6,#ffd24a 50%,rgba(255,180,30,0) 70%);animation:spark .6s ease-out forwards}
   @keyframes spark{to{transform:translate(var(--dx),var(--dy)) scale(.2);opacity:0}}
+  /* ───── 🎙 Ovozli xona ───── */
+  .vccard{display:flex;align-items:center;gap:12px;margin-bottom:12px;background:linear-gradient(90deg,rgba(255,210,74,.16),rgba(255,210,74,.03));box-shadow:inset 0 0 0 1px var(--gold2)}
+  .vccard .vci{font-size:30px;filter:drop-shadow(0 3px 6px rgba(0,0,0,.5))}
+  .vccard .vcm{flex:1;min-width:0}
+  #vcv{position:fixed;inset:0;z-index:9500;display:none;flex-direction:column;background:radial-gradient(120% 80% at 50% 0%,#2a1d07,#0a0705 70%);
+    padding:calc(14px + env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left))}
+  #vcv.show{display:flex}
+  #vcv audio{display:none}
+  .vch{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+  .vch b{font:900 19px "Cinzel",Georgia,serif;background:var(--g-text);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .vch .vccnt{display:block;color:var(--dim);font-size:12px}
+  .vch .vcx{font-size:26px;color:var(--txt);cursor:pointer;padding:0 8px}
+  .vcgrid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:12px;align-content:start}
+  .vcp{display:flex;flex-direction:column;align-items:center;text-align:center;gap:4px;min-width:0;padding:12px 6px;border-radius:16px;background:var(--card);box-shadow:inset 0 0 0 1px var(--line)}
+  .vcp .chava{width:58px;height:58px;font-size:22px;transition:box-shadow .15s}
+  .vcp.sp .chava{box-shadow:0 0 0 3px #4ade80,0 0 18px rgba(74,222,128,.6)}
+  .vcp.mu{opacity:.75}
+  .vcp b{font-size:13px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vcp small{font-size:10px;color:var(--dim)}
+  .vcbar{display:flex;gap:10px;margin-top:12px}
+  .vcbar .btn{flex:1}
+  .vcbar #vcMic.off{background:#3a1f1f;color:#ffb4b4}
+  .vcbar .vcleave{background:linear-gradient(180deg,#e0484d,#a11c22);color:#fff}
   /* ───── 🍱 Premium ovqatlar ───── */
   .kbtn.kprem{background:var(--g-metal);color:#2b1b02;font-weight:900}
   .pfs .pfh{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:16px}
@@ -22505,12 +22627,15 @@ function render(res){
   // 💬 CHAT: ID / @username orqali topib suhbatlashish
   const ch=$('<div class="sec" id="s-chat"></div>');
   ch.innerHTML='<h2>💬 Chat</h2>'+
+    (d.voice?'<div class="card full vccard" id="vcCard"><div class="vci">🎙</div><div class="vcm"><b>Ovozli xona'+(d.voice_test?' <span class="avtest">TEST</span>':'')+'</b>'+
+      '<div class="hsub" id="vcCnt">'+d.voice.count+' / '+d.voice.max+' kishi suhbatda</div></div><button class="btn go" id="vcJoin">🎧 Kirish</button></div>':'')+
     '<div class="card full chs"><div class="lbl">🔎 Foydalanuvchini topish</div>'+
     '<div class="chq"><input class="bet" id="chQ" placeholder="ID yoki @username" autocomplete="off" style="text-align:left">'+
     '<button class="btn go" id="chGo">Topish</button></div><div id="chRes"></div></div>'+
     '<h2 style="margin-top:18px">🗨 Suhbatlar</h2><div id="chList" class="chlist"><div class="hsub">Yuklanmoqda…</div></div>';
   app.appendChild(ch);
   initChat(d);
+  const vj=document.getElementById('vcJoin'); if(vj) vj.onclick=()=>VOICE.open(d);
 
   // KAMIKAZE (test: faqat ownerlar, keyin hamma uchun)
   if(d.kami){
@@ -24342,7 +24467,7 @@ function amnestyCard(d){
   draw(d.amnesty); return box;
 }
 function ownerFlags(d){
-  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun']];
+  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun'],['voice','🎙','Ovozli xona — hamma uchun']];
   const box=$('<div class="card full"></div>');
   const draw=f=>{ box.innerHTML='<div class="lbl">⚙️ Xususiyatlar</div>'+F.map(([k,i,l])=>'<div class="oflag" data-k="'+k+'"><span>'+i+' '+l+'</span>'+
       '<span class="otg'+(f[k]?' on':'')+'"><i></i></span></div>').join('')+
@@ -24389,6 +24514,88 @@ function peerInfo(u){
     '<span class="chip">⭐ '+esc(u.level)+'</span>'+(u.profession?'<span class="chip">💼 '+esc(u.profession)+'</span>':'')+
     '<span class="chip">'+(u.has_pair?'💞 Jufti bor':'💍 Jufti yo‘q')+'</span>'+(u.divorces?'<span class="chip">💔 Ajrashgan: '+esc(u.divorces)+'</span>':'')+'</div>';
 }
+// ---- 🎙 Ovozli xona: bitta umumiy xona, WebRTC mesh; signalizatsiya — /app/api/voice/* (HTTP polling) ----
+const VOICE=(()=>{
+  let st=null;   // {me, seq, stream, conns:{uid:{pc,el,q:[]}}, peers:[], muted, timer, ice, an, ov}
+  const send=(to,type,data)=>api('/app/api/voice/signal',{to,type,data}).catch(()=>{});
+  function conn(uid){
+    let c=st.conns[uid]; if(c) return c;
+    const pc=new RTCPeerConnection({iceServers:st.ice});
+    st.stream.getTracks().forEach(t=>pc.addTrack(t,st.stream));
+    const el=document.createElement('audio'); el.autoplay=true; el.playsInline=true; el.setAttribute('playsinline',''); st.ov.appendChild(el);
+    c=st.conns[uid]={pc,el,q:[],state:'new'};
+    pc.onicecandidate=e=>{ if(e.candidate) send(uid,'ice',e.candidate.toJSON()); };
+    pc.ontrack=e=>{ el.srcObject=e.streams[0]; const p=el.play(); if(p&&p.catch) p.catch(()=>{}); };
+    pc.onconnectionstatechange=()=>{ c.state=pc.connectionState; draw();
+      if(pc.connectionState==='failed'){ drop(uid); } };
+    return c;
+  }
+  function drop(uid){ const c=st&&st.conns[uid]; if(!c) return; try{ c.pc.close(); }catch(e){} c.el.remove(); delete st.conns[uid]; }
+  async function offer(uid){ const c=conn(uid); const o=await c.pc.createOffer(); await c.pc.setLocalDescription(o); send(uid,'offer',{type:o.type,sdp:o.sdp}); }
+  async function onMsg(m){
+    if(!st) return; const uid=m.from;
+    if(m.type==='bye'){ drop(uid); return; }
+    if(m.type==='offer'){ if(st.conns[uid]&&st.conns[uid].pc.signalingState!=='stable') drop(uid);
+      const c=conn(uid); await c.pc.setRemoteDescription(m.data); const a=await c.pc.createAnswer(); await c.pc.setLocalDescription(a);
+      send(uid,'answer',{type:a.type,sdp:a.sdp}); for(const x of c.q.splice(0)) await c.pc.addIceCandidate(x).catch(()=>{}); return; }
+    const c=st.conns[uid]; if(!c) return;
+    if(m.type==='answer'){ if(c.pc.signalingState==='have-local-offer'){ await c.pc.setRemoteDescription(m.data); for(const x of c.q.splice(0)) await c.pc.addIceCandidate(x).catch(()=>{}); } return; }
+    if(m.type==='ice'){ if(c.pc.remoteDescription) await c.pc.addIceCandidate(m.data).catch(()=>{}); else c.q.push(m.data); }
+  }
+  function sync(peers){
+    st.peers=peers; const ids=new Set(peers.map(p=>p.id));
+    Object.keys(st.conns).forEach(u=>{ if(!ids.has(+u)) drop(+u); });
+    // yangi kirgan (seq katta) avvalgilarga offer yuboradi — ikki tomon bir vaqtda offer qilmasin
+    peers.forEach(p=>{ if(p.id!==st.me && !st.conns[p.id] && st.seq>p.seq) offer(p.id).catch(()=>{}); });
+    draw();
+  }
+  function level(){ if(!st||!st.an) return 0; const a=new Uint8Array(st.an.fftSize); st.an.getByteTimeDomainData(a); let m=0; for(const v of a) m=Math.max(m,Math.abs(v-128)); return m; }
+  async function tick(){
+    if(!st) return; const speaking=!st.muted && level()>14; st.speakingNow=speaking;
+    try{ const r=await api('/app/api/voice/poll',{muted:st.muted,speaking});
+      if(!st) return;
+      if(r.error==='not_in_room'||r.error==='disabled'){ toast('🎙 Xonadan chiqdingiz'); close(true); return; }
+      if(r.peers){ for(const m of (r.msgs||[])) await onMsg(m).catch(()=>{}); sync(r.peers); }
+    }catch(e){}
+    if(st) st.timer=setTimeout(tick,700);
+  }
+  function draw(){
+    if(!st) return; const g=st.ov.querySelector('.vcgrid');
+    g.innerHTML=st.peers.map(p=>{ const me=p.id===st.me, c=st.conns[p.id], sp=me?st.speakingNow:p.speaking, ok=me||(c&&c.state==='connected');
+      return '<div class="vcp'+(sp?' sp':'')+(p.muted?' mu':'')+'">'+chAva(p.id,p.name)+'<b>'+esc(p.name)+(me?' (siz)':'')+'</b>'+
+        '<small>'+(p.muted?'🔇 Mikrofon o‘chiq':me?'🎙 Siz':ok?'🟢 Ulangan':'⏳ Ulanmoqda…')+'</small></div>'; }).join('');
+    st.ov.querySelector('.vccnt').textContent=st.peers.length+' kishi';
+    const mb=st.ov.querySelector('#vcMic'); mb.textContent=st.muted?'🔇 Mikrofon o‘chiq':'🎙 Mikrofon yoniq'; mb.classList.toggle('off',st.muted);
+  }
+  async function open(d){
+    if(st){ st.ov.classList.add('show'); return; }
+    if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.RTCPeerConnection)){ toast('⚠️ Bu qurilmada ovozli chat qo‘llab-quvvatlanmaydi'); return; }
+    let stream; try{ stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false}); }
+    catch(e){ toast('🎙 Mikrofonga ruxsat berilmadi'); return; }
+    const r=await api('/app/api/voice/join',{}).catch(()=>({error:'net'}));
+    if(r.result!=='joined'){ stream.getTracks().forEach(t=>t.stop()); toast(r.error==='full'?'🎙 Xona to‘la ('+r.max+' kishi)':r.error==='disabled'?'🎙 Ovozli xona yopiq':'⚠️ Ulanib bo‘lmadi'); return; }
+    let ov=document.getElementById('vcv'); if(!ov){ ov=document.createElement('div'); ov.id='vcv'; document.body.appendChild(ov); }
+    ov.innerHTML='<div class="vch"><div><b>🎙 Ovozli xona</b><span class="vccnt"></span></div><span class="vcx" id="vcMin">⌄</span></div>'+
+      '<div class="vcgrid"></div><div class="vcbar"><button class="btn" id="vcMic"></button><button class="btn vcleave" id="vcLeave">📴 Chiqish</button></div>';
+    ov.className='show';
+    st={me:r.me,seq:r.seq,stream,conns:{},peers:r.peers,muted:false,ice:r.ice,ov,speakingNow:false};
+    try{ const AC=window.AudioContext||window.webkitAudioContext; st.ac=new AC(); const src=st.ac.createMediaStreamSource(stream); st.an=st.ac.createAnalyser(); st.an.fftSize=512; src.connect(st.an); }catch(e){}
+    ov.querySelector('#vcMic').onclick=()=>{ st.muted=!st.muted; st.stream.getAudioTracks().forEach(t=>t.enabled=!st.muted); draw(); api('/app/api/voice/state',{muted:st.muted}).catch(()=>{}); };
+    ov.querySelector('#vcLeave').onclick=()=>close();
+    ov.querySelector('#vcMin').onclick=()=>{ ov.classList.remove('show'); const c=document.getElementById('vcJoin'); if(c) c.textContent='🎙 Qaytish'; };
+    sync(r.peers); tick(); haptic('success'); toast('🎙 Xonaga kirdingiz');
+  }
+  function close(silent){
+    if(!st) return; clearTimeout(st.timer);
+    Object.keys(st.conns).forEach(u=>{ send(+u,'bye',{}); drop(+u); });
+    st.stream.getTracks().forEach(t=>t.stop()); try{ st.ac&&st.ac.close(); }catch(e){}
+    if(!silent) api('/app/api/voice/leave',{}).catch(()=>{});
+    st.ov.className=''; st.ov.innerHTML=''; st=null;
+    const c=document.getElementById('vcJoin'); if(c) c.textContent='🎧 Kirish';
+  }
+  window.addEventListener('pagehide',()=>{ if(st) close(); });
+  return {open, close, get state(){ return st; }};
+})();
 function initChat(d){
   const sec=document.getElementById('s-chat'); if(!sec) return;
   const q=document.getElementById('chQ'), go=document.getElementById('chGo'), res=document.getElementById('chRes'), list=document.getElementById('chList');

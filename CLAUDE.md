@@ -424,4 +424,7 @@
   `voice/media` op set|play|pause|seek|stop (`voice_media_act`; boshqaradi xona egasi/bot egasi, qo'ygan odam yoki hech kim qo'ymagan
   bo'lsa har kim), holat poll/join javobida `voice_media_view` (pozitsiya server soati bo'yicha). Klient VOICE ichida `mdSync`/`mdApply`
   (drift >3 s → seek, boshqaruvchi pleyeridagi pauza/play `mdState` orqali hammaga), xonada 🎬 tugma (`mdPicker`), Media pleyerida
-  "👥 Xonada birga". z-index: `.ov` 96 (sheet'lar ovozli xona ustida), `#vcv` 92, `#mpv` 91, toast 99.
+  "👥 Xonada birga". 📚 Kalitsiz rejim: ownerlar to'ldiradigan ro'yxatlar `media_lists` (cat, vid UNIQUE, `MEDIA_LIB_MAX` 300/kategoriya):
+  Media sahifasida owner uchun `#mdAdm` (bir nechta havola, `media_lib_add` — oEmbed, takror/embed taqiqlangan o'tkaziladi, ≤30),
+  kartalarda 🗑 (`media/del`), pleyerda "📌 Kategoriya ro'yxatiga" (`media/add`). `cat`/`search` — avval `media_lib` (qidiruv LIKE
+  nom/kanal bo'yicha), kalit bo'lsa `_media_api` natijalari qo'shiladi (API xatosida ro'yxat + `warn`). z-index: `.ov` 96 (sheet'lar ovozli xona ustida), `#vcv` 92, `#mpv` 91, toast 99.

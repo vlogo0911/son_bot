@@ -13729,7 +13729,9 @@ KID_ITEMS = {
 KID_MEAL_GAP = 12 * 3600    # farzand 12 soatda 1 marta ovqatlanadi
 # 🍱 Premium to'yimli ovqatlar (🪙 EMP Coin'ga): har biri to'qlikni darhol 100% qiladi (+ kayfiyat bonusi).
 # 12 soatlik ovqat qoidasi saqlanadi: vaqti kelgan bo'lsa — o'sish uchun ovqat hisoblanadi, aks holda faqat to'yg'izadi.
-# kalit: (yoshdan, yoshgacha, EMP narxi — hammasi 1 EMP, kayfiyat +, nomi, qisqa tavsif)
+# Taomlar endi faqat 📦 to'plam orqali (umumiy narx `kid_pack_price`, ownerlar boshqaradi) — har biridan 1 tadan zaxiraga
+# (`kid_food_stock`); berganda zaxiradan 1 ta kamayadi. Uchinchi maydon (eski donalik narx) ishlatilmaydi.
+# kalit: (yoshdan, yoshgacha, eski narx, kayfiyat +, nomi, qisqa tavsif)
 KID_PREMIUM = {
     "p_formula": (0, 2, 1, 10, "🍼 Premium sut aralashmasi", "vitaminli, chaqaloqlar uchun"),
     "p_porridge": (0, 8, 1, 10, "🥣 Asal-mevali bo‘tqa", "issiq, yumshoq, to‘yimli"),
@@ -13745,6 +13747,51 @@ KID_PREMIUM = {
     "p_steak": (12, 22, 1, 20, "🥩 Steyk va sabzavotlar", "eng to‘yimli taom"),
 }
 KID_PREMIUM_HAPPY_MAX = 100.0
+KID_PACK_DEFAULT = 1          # 📦 to'plam narxi (EMP) — ownerlar web Owner → 🪙 EMP bo'limida o'zgartiradi
+KID_PACK_MAX = 100000
+
+
+def kid_pack_price():
+    return int(webapp_flags().get("kid_pack_price", KID_PACK_DEFAULT))
+
+
+def kid_food_stock(uid):
+    try:
+        return {k: q for k, q in db().execute("SELECT item, qty FROM kid_food_stock WHERE user_id=? AND qty>0", (uid,))}
+    except sqlite3.OperationalError:
+        return {}
+
+
+def kid_pack_payload(uid):
+    return {"price": kid_pack_price(), "stock": kid_food_stock(uid), "size": len(KID_PREMIUM)}
+
+
+async def web_kid_pack_buy(uid):
+    """📦 Premium ovqatlar to'plami: umumiy narx (EMP) → 12 ta taomning har biridan 1 tadan zaxiraga."""
+    if not emp_enabled_for(uid):
+        return {"error": "emp_off"}
+    price = kid_pack_price()
+    with db() as c:
+        cur = c.execute("UPDATE emp_wallet SET emp=emp-? WHERE user_id=? AND emp>=?", (price, uid, price))
+        if cur.rowcount != 1:
+            return {"error": "emp_funds", "emp": emp_balance(uid)}
+        for item in KID_PREMIUM:
+            c.execute("INSERT INTO kid_food_stock(user_id, item, qty) VALUES (?,?,1) "
+                      "ON CONFLICT(user_id, item) DO UPDATE SET qty=qty+1", (uid, item))
+    return {"result": "pack", "price": price, "emp": emp_balance(uid), "pack": kid_pack_payload(uid)}
+
+
+async def web_kid_pack_price(uid, body):
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner_only"}
+    try:
+        price = int(body.get("price"))
+    except (TypeError, ValueError):
+        return {"error": "price"}
+    if not 0 <= price <= KID_PACK_MAX:
+        return {"error": "price"}
+    webapp_set("kid_pack_price", price)
+    return {"result": "saved", "price": price}
 
 
 def kid_meals_need(age):
@@ -17202,6 +17249,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_edu_enroll(uid, body.get("kid"), body.get("inst"))
         elif path in ("/app/api/edu/add", "/app/api/edu/update", "/app/api/edu/toggle"):
             coro = web_edu_admin(uid, path.rsplit("/", 1)[1], body)
+        elif path == "/app/api/kid/pack":
+            coro = web_kid_pack_buy(uid)
+        elif path == "/app/api/owner/kidpack":
+            coro = web_kid_pack_price(uid, body)
         elif path == "/app/api/owner/amnesty":
             coro = web_amnesty(uid, body)
         elif path in ("/app/api/judges/add", "/app/api/judges/remove"):
@@ -18318,6 +18369,9 @@ def init_webapp():
             plays INTEGER NOT NULL DEFAULT 0, wagered INTEGER NOT NULL DEFAULT 0, won INTEGER NOT NULL DEFAULT 0,
             best_win INTEGER NOT NULL DEFAULT 0, best_mult REAL NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
             PRIMARY KEY(user_id, game))""")
+        # 🍱 Premium ovqatlar zaxirasi (to'plamdan)
+        c.execute("""CREATE TABLE IF NOT EXISTS kid_food_stock (user_id INTEGER NOT NULL, item TEXT NOT NULL,
+            qty INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, item))""")
         # ⚖️ Ajrimchilar (juftlik/ajrim arizalarini ko'rib chiqadi)
         c.execute("""CREATE TABLE IF NOT EXISTS judges (user_id INTEGER PRIMARY KEY, added_by INTEGER,
             created_at INTEGER NOT NULL)""")
@@ -20202,6 +20256,7 @@ async def webapp_payload(user_id):
         "birja_pcts": BIRJA_PCTS, "birja_min": BIRJA_MIN_ORDER,
         "crash_history": list(WEB_CRASH_HISTORY),
         "edu": edu_list(True), "edu_min_age": EDU_MIN_AGE, "edu_default_fee": KID_FEES,
+        "kid_pack": kid_pack_payload(user_id),
         "kid_premium": [{"key": k, "min": v[0], "max": v[1], "price": v[2], "happy": v[3], "name": v[4], "desc": v[5]}
                         for k, v in KID_PREMIUM.items()],
         "edu_all": edu_list(False) if is_owner else [],
@@ -20999,8 +21054,6 @@ async def web_kid_action(uid, kid_id, act, item):
         it = KID_PREMIUM.get(item)
         if not it or not it[0] <= kid["age"] <= it[1]:
             return {"error": "item"}
-        if not emp_enabled_for(uid):
-            return {"error": "emp_off"}
         if kid["hunger"] >= 100 and kid["happy"] >= KID_PREMIUM_HAPPY_MAX:
             return {"error": "full"}
         now = int(time.time())
@@ -21011,12 +21064,12 @@ async def web_kid_action(uid, kid_id, act, item):
         kid["happy"] = min(KID_PREMIUM_HAPPY_MAX, kid["happy"] + it[3])
         kid["alerts"] &= ~(KID_ALERT_HUNGRY | KID_ALERT_SAD)
         with c:
-            cur = c.execute("UPDATE emp_wallet SET emp=emp-? WHERE user_id=? AND emp>=?", (it[2], uid, it[2]))
-            if cur.rowcount != 1:
-                return {"error": "emp_funds", "emp": emp_balance(uid)}
+            cur = c.execute("UPDATE kid_food_stock SET qty=qty-1 WHERE user_id=? AND item=? AND qty>0", (uid, item))
+            if cur.rowcount != 1:      # zaxirada yo'q — avval to'plam olinadi
+                return {"error": "no_stock", "pack": kid_pack_payload(uid)}
             kid_save(c, kid)
         return {"result": "premium", "name": it[4], "hunger": 100, "happy": round(kid["happy"]), "meal": meal,
-                "meals": kid["meals"], "need": kid_meals_need(kid["age"]), "emp": emp_balance(uid)}
+                "meals": kid["meals"], "need": kid_meals_need(kid["age"]), "pack": kid_pack_payload(uid)}
     if act == "fee":
         stage = kid_stage(kid)
         if stage not in KID_FEES or kid["fee_age"] >= kid["age"]:
@@ -21972,6 +22025,11 @@ WEBAPP_HTML = r"""<!doctype html>
   .pfc.off{opacity:.45}
   .pfc.poor .pfp{background:none;color:#ff8a8a;box-shadow:inset 0 0 0 1px #7a2a2a}
   .pfc.busy{opacity:.6;pointer-events:none}
+  .pfc .pfq{position:absolute;top:6px;right:8px;font-size:11px;font-weight:900;color:var(--gold)}
+  .pfpack{display:flex;align-items:center;gap:10px;margin:8px 0;padding:10px 12px;border-radius:14px;background:linear-gradient(90deg,rgba(255,210,74,.18),rgba(255,210,74,.05));box-shadow:inset 0 0 0 1px var(--gold2)}
+  .pfpack>div{flex:1;min-width:0}
+  .pfpack small{display:block;color:var(--dim);font-size:11px;margin-top:2px}
+  .pfpack .btn{white-space:nowrap;padding:10px 14px}
   /* ───── 🏆 TOP kategoriyalari ───── */
   #s-reyting .tcat{display:flex;gap:8px;overflow-x:auto;margin:0 -2px 10px;padding:2px 2px 6px;scrollbar-width:none}
   #s-reyting .tcat::-webkit-scrollbar{display:none}
@@ -22284,7 +22342,7 @@ function render(res){
         fb.onclick=()=>k.next_meal?toast('⏳ '+esc(k.name)+' yaqinda ovqatlandi. Keyingi ovqat: '+hm(k.next_meal)+' (12 soatda 1 marta)'):sheet('🍔 '+esc(k.name)+' — ovqat',k.food.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
           (item)=>api('/app/api/kid',{kid:k.id,act:'feed',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('✅ To‘qlik '+r.value+'% · 🍽 '+r.meals+'/'+r.need); refresh(); } else toast(kidErr(r.error,r.wait)); }));
         btns.appendChild(fb); }
-      if((d.kid_premium||[]).some(p=>p.min<=k.age&&k.age<=p.max) && d.emp && !d.emp.disabled){
+      if((d.kid_premium||[]).some(p=>p.min<=k.age&&k.age<=p.max) && (d.emp || Object.keys((d.kid_pack||{}).stock||{}).length)){
         const pb=$('<div class="kbtn kprem">🍱 Premium</div>'); pb.onclick=()=>premiumSheet(k,d); btns.appendChild(pb); }
       if((k.toy||[]).length){ const tb=$('<div class="kbtn">🧸 O‘yinchoq</div>');
         tb.onclick=()=>sheet('🧸 '+esc(k.name)+' — o‘yinchoq',k.toy.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
@@ -22552,6 +22610,14 @@ function render(res){
             limit_out:app_q(ea,'#swLo').value,limit_in:app_q(ea,'#swLi').value}).then(done); }
       };
       drawEA(d.emp); G.emp.appendChild(ea);
+      const kp=$('<div class="card full" style="margin-top:12px"><div class="lbl">🍱 Farzand ovqatlari to‘plami</div>'+
+        '<div class="hsub">'+((d.kid_premium||[]).length)+' xil premium taom — to‘plam sotib olinganda har biridan 1 tadan ota-onaning zaxirasiga tushadi.</div>'+
+        '<div class="frow" style="margin-top:8px"><input class="bet" id="kpP" type="number" inputmode="numeric" min="0" value="'+((d.kid_pack&&d.kid_pack.price)||0)+'" placeholder="Narx (EMP)">'+
+        '<button class="btn go" id="kpS">💾 Saqlash</button></div><div class="hsub">0 — bepul · narx EMP Coin’da</div></div>');
+      app_q(kp,'#kpS').onclick=()=>api('/app/api/owner/kidpack',{price:app_q(kp,'#kpP').value}).then(r=>{
+        if(r.result==='saved'){ if(d.kid_pack) d.kid_pack.price=r.price; toast('✅ To‘plam narxi: '+fmtMoney(r.price)+' EMP'); }
+        else toast(r.error==='price'?'⚠️ Narx 0–100 000 EMP bo‘lsin':'⚠️ Xatolik'); });
+      G.emp.appendChild(kp);
     } else G.emp.appendChild($('<div class="card full"><div class="hsub">🪙 EMP ma’lumoti yo‘q</div></div>'));
     showG(OG.some(x=>x[0]===window.OGRP)?window.OGRP:'stat');
     app.appendChild(o);
@@ -24750,27 +24816,39 @@ function eduErr(e){
   if(e==='owner_only') return 'Faqat bot egalari uchun';
   return errText(e);
 }
-// 🍱 Premium to'yimli ovqatlar (EMP Coin): bittasi to'qlikni 100% qiladi
+// 🍱 Premium to'yimli ovqatlar: 📦 to'plam (umumiy narx, EMP) → har taomdan 1 tadan zaxira; bittasi to'qlikni 100% qiladi
 function premiumSheet(k,d){
   let ov=document.getElementById('ov'); if(!ov){ ov=document.createElement('div'); ov.id='ov'; ov.className='ov'; document.body.appendChild(ov); }
-  const bal=(d.emp&&d.emp.balance)||0;
-  const items=(d.kid_premium||[]).map(p=>{ const ok=p.min<=k.age&&k.age<=p.max, em=p.name.split(' ')[0], nm=p.name.slice(em.length+1);
-    return '<div class="pfc'+(ok?'':' off')+(ok&&bal<p.price?' poor':'')+'" data-k="'+p.key+'"><div class="pfe">'+em+'</div><b>'+esc(nm)+'</b>'+
-      '<small>'+esc(p.desc)+'</small><div class="pfx">🍽 100% · 😊 +'+p.happy+'</div>'+
-      (ok?'<span class="pfp">🪙 '+p.price+' EMP</span>':'<span class="pfp lock">🔒 '+p.min+' yoshdan</span>')+'</div>'; }).join('');
-  ov.innerHTML='<div class="sheet pfs"><div class="pfh"><b>🍱 Premium ovqatlar</b><span>🪙 '+fmtMoney(bal)+' EMP</span></div>'+
-    '<div class="hsub" style="margin:2px 0 10px">'+esc(k.name)+' uchun · bittasi to‘qlikni <b>100%</b> qiladi. 12 soatlik ovqat vaqti kelgan bo‘lsa, o‘sish uchun ham hisoblanadi.</div>'+
-    '<div class="pfgrid">'+items+'</div><button class="btn full" id="ovx" style="margin-top:10px;background:#1c1830;color:var(--txt)">Yopish</button></div>';
-  ov.className='ov show';
-  const close=()=>{ ov.className='ov'; };
-  ov.querySelector('#ovx').onclick=close; ov.onclick=e=>{ if(e.target===ov) close(); };
-  ov.querySelectorAll('.pfc').forEach(el=>el.onclick=()=>{
-    if(el.classList.contains('off')){ toast('🔒 Bu taom '+esc(k.name)+' yoshiga hali mos emas'); return; }
-    if(el.classList.contains('busy')) return; el.classList.add('busy');
-    api('/app/api/kid',{kid:k.id,act:'premium',item:el.dataset.k}).then(r=>{
-      if(r.result==='premium'){ close(); if(d.emp) d.emp.balance=r.emp; const he=document.getElementById('hdrEmp'); if(he) he.textContent=fmtMoney(r.emp);
-        toast('🎉 '+r.name+' — to‘qlik 100%'+(r.meal?' · 🍽 '+r.meals+'/'+r.need:'')+' · 😊 '+r.happy+'%'); refresh(); }
-      else { el.classList.remove('busy'); toast(r.error==='emp_funds'?'🪙 EMP yetmaydi — Profil → EMP Coin do‘konidan oling':r.error==='full'?'😋 '+esc(k.name)+' to‘q va xursand':kidErr(r.error)); } }); });
+  const P=d.kid_pack||{price:1,stock:{},size:12}, st=P.stock||{}, bal=(d.emp&&d.emp.balance)||0;
+  const draw=()=>{
+    const items=(d.kid_premium||[]).map(p=>{ const ok=p.min<=k.age&&k.age<=p.max, q=st[p.key]||0, em=p.name.split(' ')[0], nm=p.name.slice(em.length+1);
+      return '<div class="pfc'+(ok?'':' off')+(ok&&!q?' poor':'')+'" data-k="'+p.key+'"><span class="pfq">×'+q+'</span><div class="pfe">'+em+'</div><b>'+esc(nm)+'</b>'+
+        '<small>'+esc(p.desc)+'</small><div class="pfx">🍽 100% · 😊 +'+p.happy+'</div>'+
+        (ok?'<span class="pfp">'+(q?'🍽 Berish':'📦 To‘plamda')+'</span>':'<span class="pfp lock">🔒 '+p.min+' yoshdan</span>')+'</div>'; }).join('');
+    const total=Object.values(st).reduce((a,b)=>a+b,0);
+    ov.innerHTML='<div class="sheet pfs"><div class="pfh"><b>🍱 Premium ovqatlar</b><span>🪙 '+fmtMoney((d.emp&&d.emp.balance)||0)+' EMP</span></div>'+
+      '<div class="pfpack"><div><b>📦 To‘yimli ovqatlar to‘plami</b><small>'+P.size+' xil taom va shirinlik — har biridan 1 tadan · zaxirangiz: '+total+' ta</small></div>'+
+      '<button class="btn go" id="pfBuy">🪙 '+fmtMoney(P.price)+' EMP</button></div>'+
+      '<div class="hsub" style="margin:2px 0 10px">'+esc(k.name)+' uchun taomni tanlang — bittasi to‘qlikni <b>100%</b> qiladi. 12 soatlik ovqat vaqti kelgan bo‘lsa, o‘sish uchun ham hisoblanadi.</div>'+
+      '<div class="pfgrid">'+items+'</div><button class="btn full" id="ovx" style="margin-top:10px;background:#1c1830;color:var(--txt)">Yopish</button></div>';
+    const close=()=>{ ov.className='ov'; };
+    ov.querySelector('#ovx').onclick=close; ov.onclick=e=>{ if(e.target===ov) close(); };
+    const buy=ov.querySelector('#pfBuy');
+    buy.onclick=()=>{ buy.disabled=true; api('/app/api/kid/pack',{}).then(r=>{
+      if(r.result==='pack'){ if(d.emp) d.emp.balance=r.emp; d.kid_pack=r.pack; Object.assign(st,r.pack.stock); P.price=r.pack.price;
+        const he=document.getElementById('hdrEmp'); if(he) he.textContent=fmtMoney(r.emp); toast('🎉 To‘plam olindi: +'+P.size+' ta taom'); draw(); }
+      else { buy.disabled=false; toast(r.error==='emp_funds'?'🪙 EMP yetmaydi — Profil → EMP Coin do‘konidan oling':r.error==='emp_off'?'🪙 EMP Coin hozir yopiq':'⚠️ Xatolik'); } }); };
+    ov.querySelectorAll('.pfc').forEach(el=>el.onclick=()=>{
+      if(el.classList.contains('off')){ toast('🔒 Bu taom '+esc(k.name)+' yoshiga hali mos emas'); return; }
+      if(!(st[el.dataset.k]>0)){ toast('📦 Bu taom zaxirada yo‘q — avval to‘plamni oling'); return; }
+      if(el.classList.contains('busy')) return; el.classList.add('busy');
+      api('/app/api/kid',{kid:k.id,act:'premium',item:el.dataset.k}).then(r=>{
+        if(r.result==='premium'){ close(); d.kid_pack=r.pack;
+          toast('🎉 '+r.name+' — to‘qlik 100%'+(r.meal?' · 🍽 '+r.meals+'/'+r.need:'')+' · 😊 '+r.happy+'%'); refresh(); }
+        else { el.classList.remove('busy'); if(r.pack){ d.kid_pack=r.pack; Object.keys(st).forEach(x=>delete st[x]); Object.assign(st,r.pack.stock); draw(); }
+          toast(r.error==='no_stock'?'📦 Zaxirada qolmagan — to‘plam oling':r.error==='full'?'😋 '+esc(k.name)+' to‘q va xursand':kidErr(r.error)); } }); });
+  };
+  draw(); ov.className='ov show';
 }
 function kidErr(e,wait){
   if(e==='too_soon') return '⏳ Yaqinda ovqatlandi. Keyingi ovqat: '+hm(wait||0)+' dan keyin';

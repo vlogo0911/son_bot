@@ -395,8 +395,10 @@
 - ⚖️ Ajrimchilar: web Owner → ⚖️ Ajrimchilar (`judgeAdmin`, `/app/api/judges/{add,remove}` → `web_judge_admin`, jadval `judges`,
   `is_judge`/`judges()` kesh). `notify_pair_owners` — `JUDGE_KINDS` (pair, divorce) arizalari ownerlar + ajrimchilarga; `rel:owner`
   callback ajrimchiga faqat shu turlarda ruxsat (ishdan bo'shash va boshqa owner amallari — yo'q).
-- 🍱 Farzandlar uchun premium to'yimli ovqatlar (🪙 EMP Coin'ga): `KID_PREMIUM` — 12 taom/shirinlik (yosh oralig'i, EMP narxi — har biri 1 EMP,
-  kayfiyat bonusi, nomi, tavsif). Web: farzand kartasida "🍱 Premium" (`premiumSheet` — 3 ustunli kartalar, yoshga mos bo'lmasa 🔒),
-  `/app/api/kid` act=`premium` → `web_kid_action`: faqat ota-ona, `emp_enabled_for`, EMP atomik yechiladi (`emp_wallet`), to'qlik = 100,
-  kayfiyat +bonus; 12 soatlik qoida saqlanadi — vaqti kelgan bo'lsa `kid_eat` (o'sish ovqati), aks holda faqat to'yg'izadi; to'q va
-  xursand bo'lsa `full`. Payload `kid_premium`.
+- 🍱 Farzandlar uchun premium to'yimli ovqatlar — 📦 TO'PLAM orqali: `KID_PREMIUM` (12 taom/shirinlik: yosh oralig'i, kayfiyat bonusi,
+  nomi, tavsif; 3-maydon — eski donalik narx, ishlatilmaydi). To'plam umumiy narxi `kid_pack_price()` (webapp_config `kid_pack_price`,
+  standart `KID_PACK_DEFAULT` 1 EMP, 0–100 000) — web Owner → 🪙 EMP → "🍱 Farzand ovqatlari to'plami" (`/app/api/owner/kidpack` →
+  `web_kid_pack_price`, faqat ownerlar). Sotib olish `/app/api/kid/pack` → `web_kid_pack_buy` (`emp_enabled_for`, EMP atomik) — har taomdan
+  +1 ota-onaning zaxirasiga (`kid_food_stock` jadvali, user_id+item). Berish: farzand kartasida "🍱 Premium" (`premiumSheet`: to'plam
+  tugmasi, kartalarda ×zaxira, yoshga mos bo'lmasa 🔒), `/app/api/kid` act=`premium` → zaxiradan 1 ta (`no_stock`), to'qlik = 100,
+  kayfiyat +bonus; 12 soatlik qoida saqlanadi (vaqti kelgan bo'lsa `kid_eat`); to'q va xursand bo'lsa `full`. Payload `kid_pack`, `kid_premium`.

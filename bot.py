@@ -13727,6 +13727,24 @@ KID_ITEMS = {
     "dorm": ("gear", 19, 22, 500, 35, {"uz": "🏠 Yotoqxona jihozlari", "eng": "🏠 Dorm essentials", "ru": "🏠 Вещи для общежития", "kz": "🏠 Жатақхана заттары"}),
 }
 KID_MEAL_GAP = 12 * 3600    # farzand 12 soatda 1 marta ovqatlanadi
+# 🍱 Premium to'yimli ovqatlar (🪙 EMP Coin'ga): har biri to'qlikni darhol 100% qiladi (+ kayfiyat bonusi).
+# 12 soatlik ovqat qoidasi saqlanadi: vaqti kelgan bo'lsa — o'sish uchun ovqat hisoblanadi, aks holda faqat to'yg'izadi.
+# kalit: (yoshdan, yoshgacha, EMP narxi, kayfiyat +, nomi, qisqa tavsif)
+KID_PREMIUM = {
+    "p_formula": (0, 2, 5, 10, "🍼 Premium sut aralashmasi", "vitaminli, chaqaloqlar uchun"),
+    "p_porridge": (0, 8, 6, 10, "🥣 Asal-mevali bo‘tqa", "issiq, yumshoq, to‘yimli"),
+    "p_yogurt": (1, 22, 6, 15, "🍓 Qulupnayli yogurt", "kaltsiy va mevalar"),
+    "p_icecream": (2, 22, 7, 25, "🍦 Muzqaymoq", "vanil va shokolad"),
+    "p_cake": (2, 22, 10, 30, "🍰 Qulupnayli tort", "bayramona shirinlik"),
+    "p_pasta": (3, 22, 8, 15, "🍝 Pishloqli makaron", "bolalarning sevimlisi"),
+    "p_cupcake": (3, 22, 8, 25, "🧁 Kapkeyk va kakao", "kremli, iliq kakao bilan"),
+    "p_choco": (3, 22, 8, 25, "🍫 Shokoladli keks", "yong‘oqli, mayin"),
+    "p_honey": (4, 22, 8, 15, "🍯 Asal va yong‘oqlar", "kuch-quvvat beradi"),
+    "p_burger": (6, 22, 10, 20, "🍔 Burger va sharbat", "katta porsiya"),
+    "p_sushi": (10, 22, 12, 20, "🍣 Sushi to‘plami", "baliq va guruch"),
+    "p_steak": (12, 22, 15, 20, "🥩 Steyk va sabzavotlar", "eng to‘yimli taom"),
+}
+KID_PREMIUM_HAPPY_MAX = 100.0
 
 
 def kid_meals_need(age):
@@ -20184,6 +20202,8 @@ async def webapp_payload(user_id):
         "birja_pcts": BIRJA_PCTS, "birja_min": BIRJA_MIN_ORDER,
         "crash_history": list(WEB_CRASH_HISTORY),
         "edu": edu_list(True), "edu_min_age": EDU_MIN_AGE, "edu_default_fee": KID_FEES,
+        "kid_premium": [{"key": k, "min": v[0], "max": v[1], "price": v[2], "happy": v[3], "name": v[4], "desc": v[5]}
+                        for k, v in KID_PREMIUM.items()],
         "edu_all": edu_list(False) if is_owner else [],
         "kami": kami_enabled_for(user_id),
         "kami_test": not webapp_flags().get("kami", 0),
@@ -20975,6 +20995,28 @@ async def web_kid_action(uid, kid_id, act, item):
             kid_save(c, kid)
         return {"result": "ok", "stat": stat, "value": round(kid[stat]), "balance": wallet_balance(uid),
                 "meals": kid["meals"], "need": kid_meals_need(kid["age"]), "age": kid["age"]}
+    if act == "premium":      # 🍱 EMP Coin'ga premium ovqat: to'qlik 100%
+        it = KID_PREMIUM.get(item)
+        if not it or not it[0] <= kid["age"] <= it[1]:
+            return {"error": "item"}
+        if not emp_enabled_for(uid):
+            return {"error": "emp_off"}
+        if kid["hunger"] >= 100 and kid["happy"] >= KID_PREMIUM_HAPPY_MAX:
+            return {"error": "full"}
+        now = int(time.time())
+        meal = not kid_eat_check(kid, now)          # 12 soat o'tgan bo'lsa — o'sish uchun ovqat hisoblanadi
+        if meal:
+            kid_eat(kid, now)
+        kid["hunger"] = 100.0
+        kid["happy"] = min(KID_PREMIUM_HAPPY_MAX, kid["happy"] + it[3])
+        kid["alerts"] &= ~(KID_ALERT_HUNGRY | KID_ALERT_SAD)
+        with c:
+            cur = c.execute("UPDATE emp_wallet SET emp=emp-? WHERE user_id=? AND emp>=?", (it[2], uid, it[2]))
+            if cur.rowcount != 1:
+                return {"error": "emp_funds", "emp": emp_balance(uid)}
+            kid_save(c, kid)
+        return {"result": "premium", "name": it[4], "hunger": 100, "happy": round(kid["happy"]), "meal": meal,
+                "meals": kid["meals"], "need": kid_meals_need(kid["age"]), "emp": emp_balance(uid)}
     if act == "fee":
         stage = kid_stage(kid)
         if stage not in KID_FEES or kid["fee_age"] >= kid["age"]:
@@ -21913,6 +21955,23 @@ WEBAPP_HTML = r"""<!doctype html>
   .spark{position:fixed;width:6px;height:6px;border-radius:50%;pointer-events:none;z-index:200;
     background:radial-gradient(circle,#fff8d6,#ffd24a 50%,rgba(255,180,30,0) 70%);animation:spark .6s ease-out forwards}
   @keyframes spark{to{transform:translate(var(--dx),var(--dy)) scale(.2);opacity:0}}
+  /* ───── 🍱 Premium ovqatlar ───── */
+  .kbtn.kprem{background:var(--g-metal);color:#2b1b02;font-weight:900}
+  .pfs .pfh{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:16px}
+  .pfs .pfh span{font-weight:900;color:var(--gold);white-space:nowrap}
+  .pfgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;max-height:58vh;overflow-y:auto;padding:2px}
+  .pfc{position:relative;display:flex;flex-direction:column;align-items:center;text-align:center;gap:2px;padding:10px 6px 9px;border-radius:14px;cursor:pointer;min-width:0;
+    background:linear-gradient(180deg,rgba(255,210,74,.12),rgba(255,210,74,.03));box-shadow:inset 0 0 0 1px var(--line);transition:transform .1s}
+  .pfc:active{transform:scale(.96)}
+  .pfc .pfe{font-size:34px;line-height:1.1;filter:drop-shadow(0 4px 6px rgba(0,0,0,.45))}
+  .pfc b{font-size:12px;line-height:1.2;max-width:100%}
+  .pfc small{font-size:10px;color:var(--dim);line-height:1.2}
+  .pfc .pfx{font-size:10px;color:var(--lime);margin-top:2px}
+  .pfc .pfp{margin-top:5px;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:900;color:#2b1b02;background:var(--g-metal)}
+  .pfc .pfp.lock{background:none;color:var(--dim);box-shadow:inset 0 0 0 1px var(--line)}
+  .pfc.off{opacity:.45}
+  .pfc.poor .pfp{background:none;color:#ff8a8a;box-shadow:inset 0 0 0 1px #7a2a2a}
+  .pfc.busy{opacity:.6;pointer-events:none}
   /* ───── 🏆 TOP kategoriyalari ───── */
   #s-reyting .tcat{display:flex;gap:8px;overflow-x:auto;margin:0 -2px 10px;padding:2px 2px 6px;scrollbar-width:none}
   #s-reyting .tcat::-webkit-scrollbar{display:none}
@@ -22225,6 +22284,8 @@ function render(res){
         fb.onclick=()=>k.next_meal?toast('⏳ '+esc(k.name)+' yaqinda ovqatlandi. Keyingi ovqat: '+hm(k.next_meal)+' (12 soatda 1 marta)'):sheet('🍔 '+esc(k.name)+' — ovqat',k.food.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
           (item)=>api('/app/api/kid',{kid:k.id,act:'feed',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('✅ To‘qlik '+r.value+'% · 🍽 '+r.meals+'/'+r.need); refresh(); } else toast(kidErr(r.error,r.wait)); }));
         btns.appendChild(fb); }
+      if((d.kid_premium||[]).some(p=>p.min<=k.age&&k.age<=p.max) && d.emp && !d.emp.disabled){
+        const pb=$('<div class="kbtn kprem">🍱 Premium</div>'); pb.onclick=()=>premiumSheet(k,d); btns.appendChild(pb); }
       if((k.toy||[]).length){ const tb=$('<div class="kbtn">🧸 O‘yinchoq</div>');
         tb.onclick=()=>sheet('🧸 '+esc(k.name)+' — o‘yinchoq',k.toy.map(it=>({label:esc(it.name)+' · '+it.price+'$',value:it.key})),
           (item)=>api('/app/api/kid',{kid:k.id,act:'toy',item:item}).then(r=>{ if(r.result==='ok'){ setBal(r.balance); toast('✅ Kayfiyat '+r.value+'%'); refresh(); } else toast(kidErr(r.error)); }));
@@ -24688,6 +24749,28 @@ function eduErr(e){
   if(e==='kind') return 'Turini tanlang';
   if(e==='owner_only') return 'Faqat bot egalari uchun';
   return errText(e);
+}
+// 🍱 Premium to'yimli ovqatlar (EMP Coin): bittasi to'qlikni 100% qiladi
+function premiumSheet(k,d){
+  let ov=document.getElementById('ov'); if(!ov){ ov=document.createElement('div'); ov.id='ov'; ov.className='ov'; document.body.appendChild(ov); }
+  const bal=(d.emp&&d.emp.balance)||0;
+  const items=(d.kid_premium||[]).map(p=>{ const ok=p.min<=k.age&&k.age<=p.max, em=p.name.split(' ')[0], nm=p.name.slice(em.length+1);
+    return '<div class="pfc'+(ok?'':' off')+(ok&&bal<p.price?' poor':'')+'" data-k="'+p.key+'"><div class="pfe">'+em+'</div><b>'+esc(nm)+'</b>'+
+      '<small>'+esc(p.desc)+'</small><div class="pfx">🍽 100% · 😊 +'+p.happy+'</div>'+
+      (ok?'<span class="pfp">🪙 '+p.price+' EMP</span>':'<span class="pfp lock">🔒 '+p.min+' yoshdan</span>')+'</div>'; }).join('');
+  ov.innerHTML='<div class="sheet pfs"><div class="pfh"><b>🍱 Premium ovqatlar</b><span>🪙 '+fmtMoney(bal)+' EMP</span></div>'+
+    '<div class="hsub" style="margin:2px 0 10px">'+esc(k.name)+' uchun · bittasi to‘qlikni <b>100%</b> qiladi. 12 soatlik ovqat vaqti kelgan bo‘lsa, o‘sish uchun ham hisoblanadi.</div>'+
+    '<div class="pfgrid">'+items+'</div><button class="btn full" id="ovx" style="margin-top:10px;background:#1c1830;color:var(--txt)">Yopish</button></div>';
+  ov.className='ov show';
+  const close=()=>{ ov.className='ov'; };
+  ov.querySelector('#ovx').onclick=close; ov.onclick=e=>{ if(e.target===ov) close(); };
+  ov.querySelectorAll('.pfc').forEach(el=>el.onclick=()=>{
+    if(el.classList.contains('off')){ toast('🔒 Bu taom '+esc(k.name)+' yoshiga hali mos emas'); return; }
+    if(el.classList.contains('busy')) return; el.classList.add('busy');
+    api('/app/api/kid',{kid:k.id,act:'premium',item:el.dataset.k}).then(r=>{
+      if(r.result==='premium'){ close(); if(d.emp) d.emp.balance=r.emp; const he=document.getElementById('hdrEmp'); if(he) he.textContent=fmtMoney(r.emp);
+        toast('🎉 '+r.name+' — to‘qlik 100%'+(r.meal?' · 🍽 '+r.meals+'/'+r.need:'')+' · 😊 '+r.happy+'%'); refresh(); }
+      else { el.classList.remove('busy'); toast(r.error==='emp_funds'?'🪙 EMP yetmaydi — Profil → EMP Coin do‘konidan oling':r.error==='full'?'😋 '+esc(k.name)+' to‘q va xursand':kidErr(r.error)); } }); });
 }
 function kidErr(e,wait){
   if(e==='too_soon') return '⏳ Yaqinda ovqatlandi. Keyingi ovqat: '+hm(wait||0)+' dan keyin';

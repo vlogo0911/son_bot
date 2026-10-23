@@ -402,11 +402,14 @@
   +1 ota-onaning zaxirasiga (`kid_food_stock` jadvali, user_id+item). Berish: farzand kartasida "🍱 Premium" (`premiumSheet`: to'plam
   tugmasi, kartalarda ×zaxira, yoshga mos bo'lmasa 🔒), `/app/api/kid` act=`premium` → zaxiradan 1 ta (`no_stock`), to'qlik = 100,
   kayfiyat +bonus; 12 soatlik qoida saqlanadi (vaqti kelgan bo'lsa `kid_eat`); to'q va xursand bo'lsa `full`. Payload `kid_pack`, `kid_premium`.
-- 🎙 Ovozli xona (web app → Chat tepasida `#vcCard`, test — `voice_enabled_for`: webapp_config "voice" yoki `can_test`; Owner →
-  ⚙️ Sozlamalar → "Ovozli xona — hamma uchun", `OWNER_FLAG_KEYS`): bitta umumiy xona, maks `VOICE_MAX` 10. WebRTC mesh — ovoz
-  to'g'ridan-to'g'ri foydalanuvchilar orasida; server faqat signalizatsiya: `/app/api/voice/{join,leave,poll,signal,state}` → `web_voice`
-  (xotirada `VOICE_ROOM`/`VOICE_INBOX`, `VOICE_STALE` 15 s poll bo'lmasa chiqariladi, signal ≤ `VOICE_SIGNAL_MAX`, faqat xonadagilarga;
-  restartda xona bo'shaydi). ICE: Google STUN + ixtiyoriy TURN env `VOICE_TURN_URL`/`VOICE_TURN_USER`/`VOICE_TURN_PASS`
-  (`voice_ice_servers`) — TURN'siz ba'zi mobil tarmoqlarda (symmetric NAT) ulanmasligi mumkin. Klient `VOICE` (`#vcv`): getUserMedia
-  (echo/noise/AGC), yangi kirgan (seq katta) avvalgilarga offer yuboradi, ~700 ms polling, gapirayotganni AnalyserNode bilan aniqlaydi
-  (yashil halqa), 🎙 mute, ⌄ yig'ish (xonada qoladi), 📴 chiqish. Payload `voice` (count/max), `voice_test`.
+- 🎙 Ovozli xonalar (Telegram uslubi; web app → Chat tepasida `#vcCard` — ro'yxat `#vcRooms` + "➕ Xona yaratish"; test —
+  `voice_enabled_for`: webapp_config "voice" yoki `can_test`; Owner → ⚙️ Sozlamalar → "Ovozli xona — hamma uchun"). `VOICE_ROOMS`
+  (xotirada): doimiy `VOICE_MAIN` "🎙 Umumiy xona" + foydalanuvchi xonalari (nomi 2–40, bittadan ko'p emas, jami `VOICE_ROOMS_MAX` 20,
+  bo'sh qolsa `VOICE_EMPTY_TTL` 120 s da yopiladi). Bitta odam bitta xonada (`VOICE_WHERE`), xonada maks `VOICE_MAX` 10 (mesh).
+  Xona egasi (yoki bot egasi, `_voice_admin`): a'zoni 🔇 majburiy jim qilish (`forced`, klientda trek o'chadi, mic tugmasi bloklanadi),
+  🚪 chiqarish (`VOICE_KICK_BAN` 120 s qayta kira olmaydi), 🗑 xonani yopish (umumiy xonani yopib bo'lmaydi). API
+  `/app/api/voice/{rooms,create,join,leave,poll,signal,state,kick,mute,close}` → `web_voice`; signal faqat shu xonadagilarga,
+  ≤ `VOICE_SIGNAL_MAX`; `VOICE_STALE` 15 s poll bo'lmasa chiqariladi; restartda xonalar bo'shaydi. WebRTC mesh, ICE: Google STUN +
+  ixtiyoriy TURN env `VOICE_TURN_URL`/`VOICE_TURN_USER`/`VOICE_TURN_PASS`. Klient `VOICE` (`list/refresh/create/open/close`, `#vcv`):
+  yangi kirgan (seq katta) offer yuboradi, ~700 ms polling, AnalyserNode bilan gapirayotgan (yashil halqa), 👑 egasi belgisi, admin a'zo
+  kartasini bosib boshqaradi. Payload `voice` (rooms/count/max), `voice_test`.

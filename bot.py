@@ -18394,6 +18394,10 @@ def init_webapp():
         for t in ("media_favs", "media_history"):
             c.execute(f"""CREATE TABLE IF NOT EXISTS {t} (user_id INTEGER NOT NULL, vid TEXT NOT NULL, title TEXT NOT NULL,
                 channel TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL, PRIMARY KEY(user_id, vid))""")
+        # 📚 Ownerlar to'ldiradigan kategoriya ro'yxatlari (API kalitisiz ham ishlaydi)
+        c.execute("""CREATE TABLE IF NOT EXISTS media_lists (id INTEGER PRIMARY KEY AUTOINCREMENT, cat TEXT NOT NULL, vid TEXT NOT NULL,
+            title TEXT NOT NULL, channel TEXT NOT NULL DEFAULT '', added_by INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+            UNIQUE(cat, vid))""")
 
 
 # ── 🧍 Realistik 3D avatar (web app) — test: standart faqat ownerlar ──
@@ -20670,7 +20674,9 @@ def voice_media_act(room, uid, body):
 # Video YouTube'ning rasmiy IFrame pleyerida ko'rsatiladi (yuklab olinmaydi, serverda saqlanmaydi).
 # Qidiruv / kategoriyalar — YouTube Data API v3 (env YOUTUBE_API_KEY, faqat serverda; klientga berilmaydi).
 # Havola orqali ochish — oEmbed (kalitsiz). Kvota tejaladi: natijalar keshda, kunlik qidiruvlar chegarasi.
-MEDIA_ACTS = ("home", "search", "cat", "resolve", "fav", "watched", "history")
+MEDIA_ACTS = ("home", "search", "cat", "resolve", "fav", "watched", "history", "add", "del")
+MEDIA_LIB_MAX = 300             # bitta kategoriyada ownerlar qo'shgan videolar
+MEDIA_ADD_MAX = 30              # bir martada qo'shiladigan havolalar
 MEDIA_VID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
 MEDIA_URL_RE = re.compile(r"(?:youtu\.be/|youtube(?:-nocookie)?\.com/(?:watch\?(?:.*&)?v=|shorts/|embed/|live/|v/))([A-Za-z0-9_-]{11})")
 MEDIA_API = "https://www.googleapis.com/youtube/v3"
@@ -20821,9 +20827,78 @@ def _media_save(uid, table, vid, title, channel, keep):
                   f"(SELECT vid FROM {table} WHERE user_id=? ORDER BY at DESC LIMIT ?)", (uid, uid, keep))
 
 
+def media_lib(cat=None, q=None, limit=MEDIA_LIB_MAX):
+    sql, args = "SELECT vid, title, channel FROM media_lists WHERE 1=1", []
+    if cat:
+        sql += " AND cat=?"
+        args.append(cat)
+    if q:
+        sql += " AND (title LIKE ? ESCAPE '\\' OR channel LIKE ? ESCAPE '\\')"
+        like = "%" + re.sub(r"([%_\\])", r"\\\1", q) + "%"
+        args += [like, like]
+    sql += " ORDER BY id DESC LIMIT ?"
+    out, seen = [], set()
+    for v, t, ch in db().execute(sql, (*args, limit)):
+        if v not in seen:
+            seen.add(v)
+            out.append({"vid": v, "title": t, "channel": ch, "dur": 0, "views": 0, "live": False, "lib": True})
+    return out
+
+
+def media_lib_counts():
+    return dict(db().execute("SELECT cat, COUNT(*) FROM media_lists GROUP BY cat").fetchall())
+
+
+async def _media_resolve(vid):
+    key = "o:" + vid
+    item = _media_cache_get(key, MEDIA_CACHE_TTL)
+    if item is None:
+        try:
+            item = await asyncio.to_thread(_media_oembed_sync, vid)
+        except Exception:  # noqa: BLE001
+            logger.warning("Media oEmbed xatosi", exc_info=True)
+            return {"error": "net"}
+        if item.get("error"):
+            return item
+        _media_cache_put(key, item)
+    return item
+
+
+async def media_lib_add(uid, cat, text):
+    """Owner: matndagi barcha YouTube havolalarini (yoki 11 belgilik ID) kategoriyaga qo'shadi."""
+    raw = str(text or "")[:20000]
+    ids = MEDIA_URL_RE.findall(raw) + [t for t in re.split(r"[\s,]+", raw) if MEDIA_VID_RE.fullmatch(t)]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        return {"error": "url"}
+    ids = ids[:MEDIA_ADD_MAX]
+    have = {v for (v,) in db().execute("SELECT vid FROM media_lists WHERE cat=?", (cat,))}
+    room = MEDIA_LIB_MAX - len(have)
+    added, skipped = [], []
+    for vid in ids:
+        if vid in have:
+            skipped.append({"vid": vid, "why": "dup"})
+            continue
+        if room <= 0:
+            skipped.append({"vid": vid, "why": "full"})
+            continue
+        it = await _media_resolve(vid)
+        if it.get("error"):
+            skipped.append({"vid": vid, "why": it["error"]})
+            continue
+        with db() as c:
+            c.execute("INSERT OR IGNORE INTO media_lists(cat, vid, title, channel, added_by, created_at) VALUES (?,?,?,?,?,?)",
+                      (cat, vid, it["title"], it["channel"], uid, int(time.time())))
+        have.add(vid)
+        room -= 1
+        added.append(it["title"])
+    return {"result": "ok", "added": len(added), "skipped": skipped, "items": media_lib(cat)}
+
+
 def media_home(uid):
-    return {"result": "ok", "search": bool(media_key()),
-            "cats": [{"key": k, "name": v[0]} for k, v in MEDIA_CATS.items()],
+    counts = media_lib_counts()
+    return {"result": "ok", "search": bool(media_key()), "owner": uid in CAREER_OWNER_IDS,
+            "cats": [{"key": k, "name": v[0], "n": counts.get(k, 0)} for k, v in MEDIA_CATS.items()],
             "favs": media_saved(uid, "media_favs", MEDIA_FAV_MAX), "history": media_saved(uid, "media_history", 30)}
 
 
@@ -20856,26 +20931,45 @@ async def web_media(uid, act, body):
         vid = m.group(1) if m else (raw if MEDIA_VID_RE.fullmatch(raw) else None)
         if not vid:
             return {"error": "url"}
-        key = "o:" + vid
-        item = _media_cache_get(key, MEDIA_CACHE_TTL)
-        if item is None:
-            try:
-                item = await asyncio.to_thread(_media_oembed_sync, vid)
-            except Exception:  # noqa: BLE001
-                logger.warning("Media oEmbed xatosi", exc_info=True)
-                return {"error": "net"}
-            if item.get("error"):
-                return item
-            _media_cache_put(key, item)
-        return {"result": "ok", "item": item}
+        item = await _media_resolve(vid)
+        return item if item.get("error") else {"result": "ok", "item": item}
+    if act in ("add", "del"):          # 📚 ro'yxatlarni faqat bot egalari boshqaradi
+        if uid not in CAREER_OWNER_IDS:
+            return {"error": "owner"}
+        ck = str(body.get("cat") or "")
+        if ck not in MEDIA_CATS:
+            return {"error": "cat"}
+        if act == "add":
+            return await media_lib_add(uid, ck, body.get("urls"))
+        with db() as c:
+            n = c.execute("DELETE FROM media_lists WHERE cat=? AND vid=?", (ck, str(body.get("vid") or ""))).rowcount
+        return {"result": "ok" if n else "none", "items": media_lib(ck)}
     if act not in ("search", "cat"):
         return {"error": "act"}
-    if not media_key():
-        return {"error": "no_key"}
+    # 📚 ownerlar ro'yxati har doim birinchi; kalit bo'lsa YouTube natijalari qo'shiladi (kalit/kvota xatosida ro'yxat qoladi)
     if act == "cat":
         ck = str(body.get("cat") or "")
         if ck not in MEDIA_CATS:
             return {"error": "cat"}
+        lib = media_lib(ck)
+    else:
+        q = _media_clean(body.get("q"), 100)
+        if len(q) < 2:
+            return {"error": "q"}
+        lib = media_lib(q=q, limit=40)
+    if not media_key():
+        return {"result": "ok", "items": lib, "lib_only": True}
+    r = await _media_api(uid, act, body)
+    if r.get("result") != "ok":
+        return {"result": "ok", "items": lib, "warn": r.get("error")} if lib else r
+    seen = {i["vid"] for i in lib}
+    return dict(r, items=lib + [i for i in r["items"] if i["vid"] not in seen])
+
+
+async def _media_api(uid, act, body):
+    """YouTube Data API (kalit bilan): kategoriya yoki qidiruv natijalari, kesh va kvota bilan."""
+    if act == "cat":
+        ck = str(body.get("cat") or "")
         key, ttl = "c:" + ck, MEDIA_CAT_TTL
         _, pop_id, query = MEDIA_CATS[ck]
     else:
@@ -22550,6 +22644,10 @@ WEBAPP_HTML = r"""<!doctype html>
   .mdcats::-webkit-scrollbar{display:none}
   .mdc{flex:none;padding:7px 13px;border-radius:999px;font-size:13px;font-weight:800;background:var(--card);box-shadow:inset 0 0 0 1px var(--line);cursor:pointer;white-space:nowrap}
   .mdc.on{background:var(--g-metal);color:#2b1b02;box-shadow:none}
+  .mdc i{font-style:normal;font-size:11px;opacity:.7}
+  .mdadm{margin-bottom:10px}
+  .mdadm textarea{width:100%;box-sizing:border-box;margin:6px 0 8px;padding:10px 12px;border-radius:12px;border:0;outline:0;resize:vertical;background:rgba(0,0,0,.35);color:var(--txt);font:13px/1.4 inherit;box-shadow:inset 0 0 0 1px var(--line)}
+  .mddel{position:absolute;top:6px;right:6px;font-size:13px;font-weight:900;padding:4px 7px;border-radius:8px;background:rgba(0,0,0,.75);color:#fff}
   .mdnote{margin:2px 0 8px}
   .mdgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
   .mdgrid.mdsheet{max-height:55vh;overflow-y:auto;grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -24988,7 +25086,7 @@ const MEDIA=(()=>{
   const ERR={no_key:'🔑 Qidiruv hali sozlanmagan — YouTube havolasini qo‘ying',quota:'📊 Bugungi qidiruv limiti tugadi — ertaga urinib ko‘ring yoki havola qo‘ying',
     rate:'⏳ Juda ko‘p qidiruv — birozdan keyin urinib ko‘ring',url:'🔗 YouTube havolasi noto‘g‘ri',embed:'🚫 Muallif bu videoni boshqa saytlarda ko‘rsatishni taqiqlagan',
     not_found:'🔎 Video topilmadi yoki o‘chirilgan',net:'⚠️ YouTube bilan aloqa xatosi',bad_key:'🔑 API kaliti noto‘g‘ri yoki YouTube Data API yoqilmagan',
-    q:'✍️ Kamida 2 belgi yozing',disabled:'🎬 Media hozircha yopiq',fav_full:'⭐ Sevimlilar ro‘yxati to‘la',cat:'⚠️ Kategoriya topilmadi'};
+    q:'✍️ Kamida 2 belgi yozing',disabled:'🎬 Media hozircha yopiq',fav_full:'⭐ Sevimlilar ro‘yxati to‘la',cat:'⚠️ Kategoriya topilmadi',owner:'👑 Faqat bot egalari'};
   const isLink=v=>/youtu\.?be|^[A-Za-z0-9_-]{11}$/.test(v);
   const fdur=s=>{ if(!s) return ''; const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60; return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(x).padStart(2,'0'); };
   const fviews=n=>!n?'':n>=1e9?(n/1e9).toFixed(1)+' mlrd':n>=1e6?(n/1e6).toFixed(1)+' mln':n>=1e3?Math.round(n/1e3)+' ming':String(n);
@@ -24997,31 +25095,51 @@ const MEDIA=(()=>{
   function cardHtml(it,i){ return '<div class="mdi" data-i="'+i+'" data-tap="1"><div class="mdth"><img loading="lazy" alt="" onerror="this.style.opacity=0" src="'+thumb(it.vid)+'">'+
       (it.live?'<span class="mdd live">🔴 LIVE</span>':it.dur?'<span class="mdd">'+fdur(it.dur)+'</span>':'')+'</div>'+
       '<b>'+esc(it.title)+'</b><div class="hsub">'+esc(it.channel)+(it.views?' · 👁 '+fviews(it.views):'')+'</div></div>'; }
+  const isCat=k=>!!(H&&H.cats.some(c=>c.key===k));
   function render(items,empty){ list=items||[]; const g=document.getElementById('mdGrid'); if(!g) return;
     g.innerHTML=list.length?list.map(cardHtml).join(''):'<div class="card full"><div class="center hsub">'+(empty||'Hech narsa topilmadi')+'</div></div>';
-    g.querySelectorAll('.mdi').forEach(el=>el.onclick=()=>play(list[+el.dataset.i],list)); }
+    const k=cur, adm=H&&H.owner&&isCat(k);
+    g.querySelectorAll('.mdi').forEach(el=>{ const it=list[+el.dataset.i]; el.onclick=()=>play(it,list);
+      if(adm&&it.lib){ const d=document.createElement('span'); d.className='mddel'; d.textContent='🗑'; el.querySelector('.mdth').appendChild(d);
+        d.onclick=e=>{ e.stopPropagation(); if(!d.dataset.arm){ d.dataset.arm=1; d.textContent='✕?'; setTimeout(()=>{ if(d.isConnected){ delete d.dataset.arm; d.textContent='🗑'; } },3000); return; }
+          api('/app/api/media/del',{cat:k,vid:it.vid}).then(r=>{ if(r.items){ toast('🗑 Ro‘yxatdan olindi'); setCount(k,r.items.length); if(cur===k) pick(k); } else toast('⚠️ Xatolik'); }); }; } }); }
+  function setCount(k,n){ const c=H&&H.cats.find(x=>x.key===k); if(c){ c.n=n; drawCats(); } }
+  function drawAdm(){ const box=document.getElementById('mdAdm'); if(!box) return;
+    if(!(H&&H.owner&&isCat(cur))){ box.innerHTML=''; return; }
+    const c=H.cats.find(x=>x.key===cur);
+    box.innerHTML='<div class="card full mdadm"><div class="lbl">👑 '+esc(c.name)+' ro‘yxatiga qo‘shish</div>'+
+      '<textarea id="mdAT" rows="2" placeholder="YouTube havolalari — bir nechtasini qatorma-qator qo‘yish mumkin (bir martada 30 tagacha)"></textarea>'+
+      '<button class="btn go full" id="mdAB">➕ Qo‘shish</button></div>';
+    const b=box.querySelector('#mdAB'), t=box.querySelector('#mdAT'), k=cur;
+    b.onclick=()=>{ if(!t.value.trim()) return; b.disabled=true; b.textContent='⏳ Qo‘shilmoqda…';
+      api('/app/api/media/add',{cat:k,urls:t.value}).then(r=>{ b.disabled=false; b.textContent='➕ Qo‘shish';
+        if(r.result!=='ok'){ toast(ERR[r.error]||'⚠️ Xatolik'); return; }
+        const sk=r.skipped||[], why={dup:'avval qo‘shilgan',full:'ro‘yxat to‘la',embed:'ko‘rsatish taqiqlangan',not_found:'topilmadi',net:'aloqa xatosi'};
+        toast((r.added?'✅ '+r.added+' ta qo‘shildi':'⚠️ Hech narsa qo‘shilmadi')+(sk.length?' · '+sk.length+' ta o‘tkazildi ('+[...new Set(sk.map(x=>why[x.why]||x.why))].join(', ')+')':''));
+        if(r.added) t.value=''; setCount(k,r.items.length); if(cur===k) pick(k); }).catch(()=>{ b.disabled=false; b.textContent='➕ Qo‘shish'; toast(ERR.net); }); };
+  }
   function note(t){ const n=document.getElementById('mdNote'); if(n) n.textContent=t||''; }
   function drawCats(){ const box=document.getElementById('mdCats'); if(!box||!H) return;
-    const cs=(H.search?H.cats:[]).concat([{key:'favs',name:'⭐ Sevimlilar'},{key:'history',name:'🕘 Tarix'}]);
-    box.innerHTML=cs.map(c=>'<span class="mdc'+(c.key===cur?' on':'')+'" data-k="'+esc(c.key)+'">'+esc(c.name)+'</span>').join('');
+    const cs=H.cats.concat([{key:'favs',name:'⭐ Sevimlilar'},{key:'history',name:'🕘 Tarix'}]);
+    box.innerHTML=cs.map(c=>'<span class="mdc'+(c.key===cur?' on':'')+'" data-k="'+esc(c.key)+'">'+esc(c.name)+(!H.search&&c.n!=null?' <i>'+c.n+'</i>':'')+'</span>').join('');
     box.querySelectorAll('.mdc').forEach(el=>el.onclick=()=>pick(el.dataset.k)); }
   function busy(){ const g=document.getElementById('mdGrid'); if(g) g.innerHTML='<div class="mdload"><i></i><i></i><i></i></div>'; }
-  function pick(k){ cur=k; drawCats(); note('');
+  function pick(k){ cur=k; drawCats(); drawAdm(); note('');
     if(k==='favs'){ render(H.favs,'⭐ Hali sevimli video yo‘q — pleyerda ⭐ ni bosing'); return; }
     if(k==='history'){ busy(); api('/app/api/media/history',{}).then(r=>render(r.items||[],'🕘 Hali hech narsa ko‘rilmagan')).catch(()=>render([],ERR.net)); return; }
-    busy(); api('/app/api/media/cat',{cat:k}).then(r=>{ if(cur!==k) return; if(r.result!=='ok'){ render([],ERR[r.error]||'⚠️ Xatolik'); return; } render(r.items); }).catch(()=>render([],ERR.net)); }
+    busy(); api('/app/api/media/cat',{cat:k}).then(r=>{ if(cur!==k) return; if(r.result!=='ok'){ render([],ERR[r.error]||'⚠️ Xatolik'); return; }
+      if(r.warn) note(ERR[r.warn]||''); render(r.items,H.owner?'📚 Ro‘yxat bo‘sh — yuqoriga YouTube havolalarini qo‘ying':'📚 Bu bo‘lim hozircha bo‘sh — tez orada to‘ldiriladi. YouTube havolasini yuqoriga qo‘yib ham ko‘rishingiz mumkin'); }).catch(()=>render([],ERR.net)); }
   function show(){ if(H||loading) return; loading=true; busy();
     api('/app/api/media/home',{}).then(r=>{ loading=false; if(r.result!=='ok'){ render([],ERR[r.error]||'⚠️ Xatolik'); return; } H=r;
-      if(!r.search) note('🔑 Qidiruv hali sozlanmagan (YOUTUBE_API_KEY). YouTube havolasini yuqoriga qo‘yib ko‘rishingiz mumkin.');
-      pick(r.search?'trend':(r.history.length?'history':'favs')); }).catch(()=>{ loading=false; render([],ERR.net); }); }
+      const first=r.search?null:r.cats.find(c=>c.n>0);
+      pick(r.search?'trend':first?first.key:'trend'); }).catch(()=>{ loading=false; render([],ERR.net); }); }
   // havola yoki qidiruv → elementlar ro'yxati (Promise<{items}|{error}>)
   function find(v){ v=String(v||'').trim(); if(!v) return Promise.resolve({error:'q'});
     if(isLink(v)) return api('/app/api/media/resolve',{url:v}).then(r=>r.result==='ok'?{items:[r.item],link:true}:r);
-    return api('/app/api/media/search',{q:v}).then(r=>r.result==='ok'?{items:r.items}:r); }
+    return api('/app/api/media/search',{q:v}).then(r=>r.result==='ok'?{items:r.items,warn:r.warn}:r); }
   function search(){ const q=document.getElementById('mdQ'); const v=q?q.value.trim():''; if(!v) return;
-    if(!isLink(v)&&H&&!H.search){ toast(ERR.no_key); return; }
-    cur='q'; drawCats(); busy(); note('');
-    find(v).then(r=>{ if(r.error){ render([],ERR[r.error]||'⚠️ Xatolik'); return; } if(r.link){ render(r.items); play(r.items[0],r.items); } else { note('🔎 «'+v+'» — '+r.items.length+' ta natija'); render(r.items); } })
+    cur='q'; drawCats(); drawAdm(); busy(); note('');
+    find(v).then(r=>{ if(r.error){ render([],ERR[r.error]||'⚠️ Xatolik'); return; } if(r.link){ render(r.items); play(r.items[0],r.items); } else { note('🔎 «'+v+'» — '+r.items.length+' ta natija'+(r.warn&&ERR[r.warn]?' · '+ERR[r.warn]:'')); render(r.items,'🔎 Topilmadi. YouTube havolasini qo‘yib ko‘ring'); } })
       .catch(()=>render([],ERR.net)); }
   function openYT(vid){ const u='https://www.youtube.com/watch?v='+encodeURIComponent(vid); if(tg&&tg.openLink) tg.openLink(u); else window.open(u,'_blank'); }
   function stop(){ if(pl){ try{ pl.destroy(); }catch(e){} pl=null; } }
@@ -25034,12 +25152,15 @@ const MEDIA=(()=>{
       '<div class="mpf"><div id="mpYT"></div><div class="mperr" id="mpE"></div></div><div class="mpbody">'+
       '<div class="mpt">'+esc(it.title)+'</div><div class="hsub">'+esc(it.channel)+(it.views?' · 👁 '+fviews(it.views):'')+'</div>'+
       '<div class="mpbtns"><button class="btn" id="mpF"></button><button class="btn" id="mpVC">👥 Xonada birga</button><button class="btn" id="mpO">↗ YouTube</button></div>'+
+      (H&&H.owner?'<button class="btn full" id="mpL" style="margin-top:8px">📌 Kategoriya ro‘yxatiga qo‘shish</button>':'')+
       (rest.length?'<div class="lbl" style="margin-top:14px">▶ Keyingi</div><div class="mdgrid" id="mpMore">'+rest.map(cardHtml).join('')+'</div>':'')+'</div>';
     ov.className='show';
     const fb=ov.querySelector('#mpF'), paintF=()=>{ const on=isFav(it.vid); fb.textContent=on?'⭐ Sevimlida':'☆ Sevimli'; fb.classList.toggle('go',on); }; paintF();
     fb.onclick=()=>{ const on=!isFav(it.vid); api('/app/api/media/fav',{vid:it.vid,title:it.title,channel:it.channel,on}).then(r=>{
         if(r.result==='ok'){ if(H) H.favs=r.favs; paintF(); toast(on?'⭐ Sevimlilarga qo‘shildi':'☆ Sevimlilardan olindi'); if(cur==='favs') render(H.favs); } else toast(ERR[r.error]||'⚠️ Xatolik'); }); };
     ov.querySelector('#mpO').onclick=()=>openYT(it.vid);
+    const lb=ov.querySelector('#mpL'); if(lb) lb.onclick=()=>sheet('📌 Qaysi ro‘yxatga?',H.cats.map(c=>({label:c.name+(c.n?' ('+c.n+')':''),value:c.key})),k=>
+      api('/app/api/media/add',{cat:k,urls:it.vid}).then(r=>{ if(r.result==='ok'){ setCount(k,r.items.length); toast(r.added?'✅ Ro‘yxatga qo‘shildi':'ℹ️ Bu video ro‘yxatda bor'); } else toast(ERR[r.error]||'⚠️ Xatolik'); }));
     ov.querySelector('#mpB').onclick=close;
     ov.querySelector('#mpVC').onclick=()=>{ if(!VOICE.state){ toast('🎙 Avval ovozli xonaga kiring: Chat → Ovozli xonalar'); return; }
       let t=0; try{ t=pl&&pl.getCurrentTime?pl.getCurrentTime():0; }catch(e){}
@@ -25057,7 +25178,7 @@ function mediaPage(d){
   const sec=$('<div class="sec" id="s-media"></div>');
   sec.innerHTML='<div class="gback" data-back="games">‹ Games</div><h2>🎬 Media'+(d.media_test?' <span class="avtest">TEST</span>':'')+'</h2>'+
     '<div class="mdq"><input id="mdQ" maxlength="300" enterkeyhint="search" placeholder="🔎 Qidirish yoki YouTube havolasi"><button class="btn go" id="mdGo">🔎</button></div>'+
-    '<div class="mdcats" id="mdCats"></div><div class="hsub mdnote" id="mdNote"></div><div class="mdgrid" id="mdGrid"></div>'+
+    '<div class="mdcats" id="mdCats"></div><div id="mdAdm"></div><div class="hsub mdnote" id="mdNote"></div><div class="mdgrid" id="mdGrid"></div>'+
     '<div class="hsub" style="margin-top:14px;text-align:center">▶ Videolar YouTube’ning rasmiy pleyerida ochiladi · 👥 Ovozli xonada do‘stlar bilan birga ko‘ring</div>';
   sec.querySelector('#mdGo').onclick=MEDIA.search;
   sec.querySelector('#mdQ').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); MEDIA.search(); } };

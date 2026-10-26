@@ -428,3 +428,6 @@
   Media sahifasida owner uchun `#mdAdm` (bir nechta havola, `media_lib_add` — oEmbed, takror/embed taqiqlangan o'tkaziladi, ≤30),
   kartalarda 🗑 (`media/del`), pleyerda "📌 Kategoriya ro'yxatiga" (`media/add`). `cat`/`search` — avval `media_lib` (qidiruv LIKE
   nom/kanal bo'yicha), kalit bo'lsa `_media_api` natijalari qo'shiladi (API xatosida ro'yxat + `warn`). z-index: `.ov` 96 (sheet'lar ovozli xona ustida), `#vcv` 92, `#mpv` 91, toast 99.
+- 💎↔🪙 Empire Mafia bilan kurs: 3 💎 = 1 EMP, komissiyasiz — `init_webapp` da bir martalik `swap_3d1e` belgisi bilan `exchange_asset_config.rate=1/3, fee=0`
+  (keyin owner panelda o'zgartirilsa o'sha qoladi). `swap_quote` floor + 1e-6 (float xatosi), payload `swap.rate_txt` ("3 💎 = 1 EMP").
+  Hamkor (empire-bot) tomonda `DIAMONDS_PER_EMP`/`EMP_FEE_PCT` bir xil bo'lishi kerak.

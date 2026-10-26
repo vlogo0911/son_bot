@@ -16985,7 +16985,8 @@ def swap_quote(emp):
     """EMP → olmos: (olmos, komissiya EMP)."""
     cfg = swap_config()
     fee = math.ceil(emp * cfg["fee_pct"] / 100)
-    return int((emp - fee) // cfg["rate"]) if cfg["rate"] > 0 else 0, fee
+    # float xatosiz: 1 EMP / (1/3) = 2.9999… bo'lib 2 💎 chiqmasligi uchun kichik epsilon
+    return int(math.floor((emp - fee) / cfg["rate"] + 1e-6)) if cfg["rate"] > 0 else 0, fee
 
 
 async def exchange_apply_incoming_asset(txid, user_id, asset, amount):
@@ -17508,7 +17509,9 @@ def swap_min():
 
 def swap_payload(uid):
     cfg = swap_config()
-    return {"ready": swap_ready(), "partner": EXCHANGE_PARTNER_NAME, "rate": cfg["rate"], "fee": cfg["fee_pct"],
+    r = cfg["rate"]
+    rate_txt = f"{round(1 / r):g} 💎 = 1 EMP" if 0 < r < 1 else f"1 💎 = {r:g} EMP"
+    return {"ready": swap_ready(), "partner": EXCHANGE_PARTNER_NAME, "rate": cfg["rate"], "rate_txt": rate_txt, "fee": cfg["fee_pct"],
             "min": swap_min(), "left": max(0, cfg["limit_out"] - swap_today(uid, "out")), "limit_in": cfg["limit_in"]}
 
 
@@ -18387,6 +18390,11 @@ def init_webapp():
         c.execute("""CREATE TABLE IF NOT EXISTS vip_scores (game TEXT NOT NULL, user_id INTEGER NOT NULL, best INTEGER NOT NULL,
             level INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL, PRIMARY KEY(game, user_id))""")
         # 🪙 EMP Coin test rejimdan chiqdi: bir marta hamma uchun yoqiladi (keyin owner panelda o'chirsa, o'sha qoladi)
+        if c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('swap_3d1e', 1)").rowcount:
+            try:   # 💎↔🪙 Empire Mafia bilan kelishilgan kurs: 3 💎 = 1 EMP, komissiyasiz (keyin owner panelda o'zgartirsa — o'sha qoladi)
+                c.execute("UPDATE exchange_asset_config SET rate=?, fee_pct=0 WHERE id=1", (1 / 3,))
+            except sqlite3.OperationalError:
+                pass
         if c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('emp_launch', 1)").rowcount:
             c.execute("INSERT INTO webapp_config(key, value) VALUES ('emp', 1) "
                       "ON CONFLICT(key) DO UPDATE SET value=1")
@@ -23397,7 +23405,7 @@ function openEmpShop(d){
         '<div class="pki">🪙</div><div class="pke">'+fmtMoney(x.emp)+'</div><div class="pkl">EMP</div><div class="pks">⭐ '+fmtMoney(x.stars)+'</div></div>').join('')
         :'<div class="hsub center">Hozircha paket yo‘q</div>')+'</div>'+
       (e.swap&&e.swap.ready?'<div class="empsw"><div class="lbl">💎 '+esc(e.swap.partner)+' olmoslari ↔ 🪙 EMP</div>'+
-        '<div class="hsub">Kurs: <b>1 💎 = '+e.swap.rate+' EMP</b> · komissiya '+e.swap.fee+'% · bugun yana '+fmtMoney(e.swap.left)+' EMP</div>'+
+        '<div class="hsub">Kurs: <b>'+esc(e.swap.rate_txt||('1 💎 = '+e.swap.rate+' EMP'))+'</b> · komissiya '+e.swap.fee+'% · bugun yana '+fmtMoney(e.swap.left)+' EMP</div>'+
         '<div class="swr"><input class="bet" id="empSwA" type="number" inputmode="numeric" placeholder="EMP (min '+e.swap.min+')" style="text-align:left">'+
         '<button class="btn go" id="empSwB">🪙→💎</button></div><div class="swq" id="empSwQ">Miqdorni yozing</div>'+
         '<div class="hsub" style="margin-top:6px">💎→🪙 teskari almashtirish — '+esc(e.swap.partner)+' botida (EMP ga almashtirish).</div></div>':'')+

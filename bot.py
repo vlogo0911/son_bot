@@ -17614,7 +17614,17 @@ def exchange_menu_view(uid):
                   fee=f"{cfg['fee_pct']:g}", left=fmt_money(left))
     buttons = [InlineKeyboardButton(f"{fmt_money(a)}$", callback_data=f"ex:{uid}:a:{a}") for a in EXCHANGE_AMOUNTS]
     rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    if swap_ready() and emp_enabled_for(uid):
+        sp = swap_payload(uid)
+        text += (f"\n\n🪙→💎 <b>EMP Coin → olmos</b> ({escape(sp['rate_txt'])})\n"
+                 f"🪙 EMP: <b>{fmt_money(emp_balance(uid))}</b> · bugungi limit: {fmt_money(sp['left'])} EMP")
+        eb = [InlineKeyboardButton(f"🪙 {n} → 💎 {swap_quote(n)[0]}", callback_data=f"ex:{uid}:e:{n}")
+              for n in EMP_SWAP_AMOUNTS if swap_quote(n)[0] >= 1]
+        rows += [eb[i:i + 2] for i in range(0, len(eb), 2)]
     return text, InlineKeyboardMarkup(rows)
+
+
+EMP_SWAP_AMOUNTS = (1, 5, 10, 50, 100, 500)
 
 
 async def cb_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -17635,6 +17645,36 @@ async def cb_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         text, kb = exchange_menu_view(uid)
         await edit(context.bot, chat_id, q.message.message_id, text, kb)
+        return
+
+    if action in ("e", "eg"):      # 🪙 EMP → 💎 olmos
+        n = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+        if n not in EMP_SWAP_AMOUNTS or not swap_ready() or not emp_enabled_for(uid):
+            await q.answer("⚙️ EMP almashuvi hozir yopiq", show_alert=True)
+            return
+        if emp_balance(uid) < n:
+            await q.answer(f"🪙 EMP yetarli emas (sizda {fmt_money(emp_balance(uid))})", show_alert=True)
+            return
+        if action == "e":
+            await q.answer()
+            d, fee = swap_quote(n)
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton(exch_t(uid, "b_confirm"), callback_data=f"ex:{uid}:eg:{n}"),
+                InlineKeyboardButton(exch_t(uid, "b_cancel"), callback_data=f"ex:{uid}:menu"),
+            ]])
+            await edit(context.bot, chat_id, q.message.message_id,
+                       f"🪙→💎 <b>{fmt_money(n)} EMP</b> → <b>{fmt_money(d)} olmos</b> ({escape(EXCHANGE_PARTNER_NAME)})"
+                       + (f"\nKomissiya: {fmt_money(fee)} EMP" if fee else "") + "\n\nTasdiqlaysizmi?", kb)
+            return
+        await q.answer()
+        r = await web_emp_swap(uid, n)
+        msg = {"done": f"✅ {fmt_money(r.get('diamonds', 0))} olmos {escape(EXCHANGE_PARTNER_NAME)}dagi hisobingizga tushdi.",
+               "pending": "⏳ Yuborildi — hamkor javobi kutilmoqda, tez orada tushadi.",
+               "failed": "😓 Almashtirib bo‘lmadi — EMP qaytarildi."}.get(r.get("result")) or {
+            "funds": "🪙 EMP yetarli emas.", "limit": f"📅 Bugungi limit tugadi (qoldi {r.get('left', 0)} EMP).",
+            "too_small": "Juda kam miqdor."}.get(r.get("error"), "⚙️ Almashuv hozir yopiq.")
+        text, kb = exchange_menu_view(uid)
+        await edit(context.bot, chat_id, q.message.message_id, msg + "\n\n" + (text or ""), kb)
         return
 
     amount = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
@@ -18413,6 +18453,12 @@ def init_webapp():
                 c.execute("UPDATE exchange_asset_config SET rate=?, fee_pct=0 WHERE id=1", (1 / 3,))
             except sqlite3.OperationalError:
                 pass
+        try:   # 🪙→💎 almashuv bir marta yoqiladi (owner keyin o'chirsa — o'sha qoladi)
+            if c.execute("SELECT 1 FROM exchange_asset_config WHERE id=1").fetchone() and \
+                    c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('swap_on1', 1)").rowcount:
+                c.execute("UPDATE exchange_asset_config SET enabled=1 WHERE id=1")
+        except sqlite3.OperationalError:
+            pass
         if c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('emp_launch', 1)").rowcount:
             c.execute("INSERT INTO webapp_config(key, value) VALUES ('emp', 1) "
                       "ON CONFLICT(key) DO UPDATE SET value=1")

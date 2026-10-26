@@ -16766,6 +16766,9 @@ async def cmd_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 EXCHANGE_SECRET = os.getenv("EXCHANGE_SECRET", "").strip()
 EXCHANGE_PARTNER_URL = os.getenv("EXCHANGE_PARTNER_URL", "").strip().rstrip("/")
+if EXCHANGE_PARTNER_URL:   # faqat sxema+domen: ".../app", ".../exchange/credit" kabi yo'llar 404 bermasin
+    _pu = urllib.parse.urlsplit(EXCHANGE_PARTNER_URL if "://" in EXCHANGE_PARTNER_URL else "https://" + EXCHANGE_PARTNER_URL)
+    EXCHANGE_PARTNER_URL = f"{_pu.scheme}://{_pu.netloc}" if _pu.netloc else EXCHANGE_PARTNER_URL
 EXCHANGE_PARTNER_NAME = os.getenv("EXCHANGE_PARTNER_NAME", "Hamkor bot").strip()
 EXCHANGE_PORT = os.getenv("PORT", "").strip()
 EXCHANGE_TS_WINDOW = 300          # imzo yangiligi (soniya)

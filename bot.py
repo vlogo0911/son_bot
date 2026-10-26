@@ -17394,6 +17394,7 @@ EXCH_FAIL_REASONS = {
     "no_user": "hamkor botda hisobingiz topilmadi — avval u botda /start bosing",
     "no_profile": "hamkor botda hisobingiz topilmadi — avval u botda /start bosing",
     "disabled": "hamkor botda almashuv o'chirilgan",
+    "HTTP 404": "hamkor bot manzili noto'g'ri (EXCHANGE_PARTNER_URL faqat domen bo'lsin, masalan https://….up.railway.app)",
 }
 
 
@@ -17432,7 +17433,7 @@ async def exchange_finalize_out(txid, uid):
                 _wallet_add(c, uid, gross)
         if cur.rowcount == 1:
             try:
-                await _EXCHANGE_LOOP_BOT.send_message(uid, exch_t(uid, "failed") + exch_fail_reason(resp.get("error")))
+                await _EXCHANGE_LOOP_BOT.send_message(uid, exch_t(uid, "failed") + exch_fail_reason(resp.get("error") or f"HTTP {status}"))
             except TelegramError:
                 pass
             await log_money_event(

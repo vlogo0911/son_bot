@@ -17388,6 +17388,20 @@ def _exch_post(txid, user_id, amount, asset=None):
         return 0, {"error": str(e)[:80]}
 
 
+EXCH_FAIL_REASONS = {
+    "bad_signature": "hamkor bot bilan maxfiy kalit (EXCHANGE_SECRET) mos emas — bot egasiga ayting",
+    "stale": "server soatlari mos emas — birozdan keyin qayta urinib ko'ring",
+    "no_user": "hamkor botda hisobingiz topilmadi — avval u botda /start bosing",
+    "no_profile": "hamkor botda hisobingiz topilmadi — avval u botda /start bosing",
+    "disabled": "hamkor botda almashuv o'chirilgan",
+}
+
+
+def exch_fail_reason(err):
+    r = EXCH_FAIL_REASONS.get(str(err or ""))
+    return f"\n<i>Sabab: {r}</i>" if r else (f"\n<i>Sabab: {escape(str(err))[:60]}</i>" if err else "")
+
+
 async def exchange_finalize_out(txid, uid):
     """Pending 'out' o'tkazmani hamkorga yuborib yakunlaydi. True — hal bo'ldi (done/failed)."""
     row = db().execute("SELECT amount, net, asset FROM exchange_txns WHERE txid=? AND status='pending'", (txid,)).fetchone()
@@ -17418,7 +17432,7 @@ async def exchange_finalize_out(txid, uid):
                 _wallet_add(c, uid, gross)
         if cur.rowcount == 1:
             try:
-                await _EXCHANGE_LOOP_BOT.send_message(uid, exch_t(uid, "failed"))
+                await _EXCHANGE_LOOP_BOT.send_message(uid, exch_t(uid, "failed") + exch_fail_reason(resp.get("error")))
             except TelegramError:
                 pass
             await log_money_event(

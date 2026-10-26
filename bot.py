@@ -17528,7 +17528,7 @@ def swap_min():
 def swap_payload(uid):
     cfg = swap_config()
     r = cfg["rate"]
-    rate_txt = f"{round(1 / r):g} 💎 = 1 EMP" if 0 < r < 1 else f"1 💎 = {r:g} EMP"
+    rate_txt = f"1 EMP = {round(1 / r, 2):g} 💎" if 0 < r <= 1 else f"1 💎 = {r:g} EMP"
     return {"ready": swap_ready(), "partner": EXCHANGE_PARTNER_NAME, "rate": cfg["rate"], "rate_txt": rate_txt, "fee": cfg["fee_pct"],
             "min": swap_min(), "left": max(0, cfg["limit_out"] - swap_today(uid, "out")), "limit_in": cfg["limit_in"]}
 
@@ -18453,6 +18453,12 @@ def init_webapp():
                 c.execute("UPDATE exchange_asset_config SET rate=?, fee_pct=0 WHERE id=1", (1 / 3,))
             except sqlite3.OperationalError:
                 pass
+        try:   # 💎↔🪙 kurs 1 EMP = 3 💎, komissiyasiz — swap_3d1e jadval yaratilmasdan oldin ishlagan bo'lsa ham qo'llansin
+            if c.execute("SELECT 1 FROM exchange_asset_config WHERE id=1").fetchone() and \
+                    c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('swap_3d1e_v2', 1)").rowcount:
+                c.execute("UPDATE exchange_asset_config SET rate=?, fee_pct=0 WHERE id=1", (1 / 3,))
+        except sqlite3.OperationalError:
+            pass
         try:   # 🪙→💎 almashuv bir marta yoqiladi (owner keyin o'chirsa — o'sha qoladi)
             if c.execute("SELECT 1 FROM exchange_asset_config WHERE id=1").fetchone() and \
                     c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('swap_on1', 1)").rowcount:
@@ -23345,7 +23351,7 @@ function render(res){
           (A.swapcfg?'<div class="lbl" style="margin-top:16px">💎 Hamkor olmosi ↔ 🪙 EMP</div>'+
             '<div class="hsub">Ko‘prik: '+(A.swapcfg.bridge?'✅ ulangan':'❌ yo‘q (EXCHANGE_SECRET / EXCHANGE_PARTNER_URL)')+
             ' · Chiqdi: '+fmtMoney(A.swap_stats.out_emp)+' EMP → '+fmtMoney(A.swap_stats.out_diamonds)+' 💎 · Kirdi: '+fmtMoney(A.swap_stats.in_emp)+' EMP</div>'+
-            '<div class="swcfg"><label>1 💎 = EMP<input id="swRate" type="number" step="0.01" value="'+A.swapcfg.rate+'"></label>'+
+            '<div class="swcfg"><label>1 EMP = 💎<input id="swRate" type="number" step="0.01" value="'+(A.swapcfg.rate>0?Math.round(1e4/A.swapcfg.rate)/1e4:'')+'"></label>'+
             '<label>Komissiya %<input id="swFee" type="number" step="0.1" value="'+A.swapcfg.fee_pct+'"></label>'+
             '<label>Kunlik chiqish (EMP)<input id="swLo" type="number" value="'+A.swapcfg.limit_out+'"></label>'+
             '<label>Kunlik kirish (EMP)<input id="swLi" type="number" value="'+A.swapcfg.limit_in+'"></label></div>'+
@@ -23360,7 +23366,7 @@ function render(res){
         const nr=app_q(ea,'.emprow.new'); app_q(nr,'.ea').onclick=()=>api('/app/api/emp/add',val(nr)).then(done);
         if(A.swapcfg){ let en=!!A.swapcfg.enabled; const enb=app_q(ea,'#swEn');
           enb.onclick=()=>{ en=!en; enb.textContent=en?'🟢 Yoqilgan':'⛔ O‘chiq'; enb.classList.toggle('go',en); };
-          app_q(ea,'#swSave').onclick=()=>api('/app/api/emp/swapcfg',{enabled:en,rate:app_q(ea,'#swRate').value,fee:app_q(ea,'#swFee').value,
+          app_q(ea,'#swSave').onclick=()=>api('/app/api/emp/swapcfg',{enabled:en,rate:(+app_q(ea,'#swRate').value>0?1/+app_q(ea,'#swRate').value:0),fee:app_q(ea,'#swFee').value,
             limit_out:app_q(ea,'#swLo').value,limit_in:app_q(ea,'#swLi').value}).then(done); }
       };
       drawEA(d.emp); G.emp.appendChild(ea);

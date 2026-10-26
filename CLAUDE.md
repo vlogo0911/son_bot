@@ -431,3 +431,6 @@
 - 💎↔🪙 Empire Mafia bilan kurs: 3 💎 = 1 EMP, komissiyasiz — `init_webapp` da bir martalik `swap_3d1e` belgisi bilan `exchange_asset_config.rate=1/3, fee=0`
   (keyin owner panelda o'zgartirilsa o'sha qoladi). `swap_quote` floor + 1e-6 (float xatosi), payload `swap.rate_txt` ("3 💎 = 1 EMP").
   Hamkor (empire-bot) tomonda `DIAMONDS_PER_EMP`/`EMP_FEE_PCT` bir xil bo'lishi kerak.
+- 🪙→💎 Botdagi almashuv menyusida (`exchange_menu_view`, `cb_exchange` `ex:<uid>:e|eg:<n>`) EMP→olmos tugmalari (`EMP_SWAP_AMOUNTS`) —
+  `web_emp_swap` orqali; `swap_ready()` va `emp_enabled_for` bo'lsa chiqadi. `init_webapp` da bir martalik `swap_on1` — almashuv yoqiladi.
+  Hamkor manzili `EXCHANGE_PARTNER_URL` dan faqat sxema+domen olinadi; rad etilsa xabarda sabab (`exch_fail_reason`, HTTP kodi).

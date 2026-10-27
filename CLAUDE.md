@@ -438,3 +438,7 @@
   (`cmd_mod` shaxsiy chatda `cmd_botban` ga yo'naltiradi; guruhdagi `/ban` — oddiy moderatsiya). Jadval `bot_bans`, kesh `BOT_BANS`
   (`init_botban`), `is_bot_banned` (ownerlar hech qachon). `botban_guard` — `TypeHandler` group=-100: cheklanganning har qanday
   update'i to'xtatiladi (callback alert, shaxsiyda 10 daqiqada bir ogohlantirish). Web app: `webapp_check_init_data` None qaytaradi.
+- 💞 Juftlik ↔ Empire Mafia parasi: `para_sync_bg(op,a,b)` → `POST {EXCHANGE_PARTNER_URL}/exchange/para` ({op: pair|unpair, a, b, ts}, o'sha HMAC)
+  `rel:owner` va /tasdiq'da juftlik/ajrashish tasdiqlanganda. Kiruvchi `/exchange/para` → `para_apply_incoming`: pair — ikkalasida faol
+  juftlik yo'q, ikkalasi botni ishlatgan, jinslar qarama-qarshi bo'lsa juftlik (pair_merge_kids); unpair — e'tiborsiz (nikoh faqat ajrashish
+  arizasi bilan). Bir martalik `para_sync_v1` (`para_sync_initial`) — mavjud juftliklar Empire'ga.

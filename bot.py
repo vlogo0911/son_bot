@@ -4326,6 +4326,7 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ).lastrowid
                 merged = pair_merge_kids(c, new_pair, requester, target)
             await notify_kids_merged(context.bot, requester, target, merged)
+            para_sync_bg("pair", requester, target)
         elif kind == "divorce":
             pair = active_pair(requester)
             if (
@@ -4345,6 +4346,7 @@ async def cb_relationship(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (now, pair[0]),
                 )
                 settlement = divorce_settle(c, pair, custody)
+            para_sync_bg("unpair", pair[1], pair[2])
         elif kind == "quit_job":
             with c:
                 c.execute(
@@ -8856,6 +8858,7 @@ async def post_init(application: Application):
     exchange_start_server(application)
     application.create_task(exchange_retry_worker(application), name="exchange-retry")
     application.create_task(web_crash_round_worker(application), name="web-crash-rounds")
+    application.create_task(para_sync_initial(application), name="para-sync-initial")   # 💞 bir martalik: juftliklar → Empire
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -11835,6 +11838,7 @@ async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         (requester, target, group_id or 0, now),
                     ).lastrowid
                     merged = pair_merge_kids(c, new_pair, requester, target)
+                    para_sync_bg("pair", requester, target)
                     if any(merged):
                         details.append(f"#{rid}: {sum(merged)} ta farzand umumiy bo‘ldi")
 
@@ -11857,6 +11861,7 @@ async def cmd_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "SELECT custody_id FROM pair_requests WHERE id=?", (rid,)
                     ).fetchone()[0]
                     settlement = divorce_settle(c, pair, custody)
+                    para_sync_bg("unpair", pair[1], pair[2])
 
                     # Shu juftlikning boshqa ochiq ajrashish arizalari
                     # ham kutilyotgan holatda qolmasin.
@@ -17394,7 +17399,7 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         if path.startswith("/app/api/"):
             self._web_api(path)
             return
-        if path not in ("/exchange/credit", "/exchange/credit_asset"):
+        if path not in ("/exchange/credit", "/exchange/credit_asset", "/exchange/para"):
             self._send(404, {"ok": False})
             return
         try:
@@ -17409,6 +17414,9 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         sig = self.headers.get("X-Signature", "")
         if not hmac.compare_digest(sig, exch_sign(raw)):
             self._send(401, {"ok": False, "error": "bad_signature"})
+            return
+        if path == "/exchange/para":
+            self._para_in(raw)
             return
         try:
             data = json.loads(raw.decode())
@@ -17436,6 +17444,121 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             self._send(500, {"ok": False, "error": "internal"})
             return
         self._send(200 if ok else 409, {"ok": ok, **payload})
+
+
+def _para_in_http(self, raw):
+    try:
+        d = json.loads(raw.decode())
+        op, a, b, ts = d["op"], int(d["a"]), int(d["b"]), int(d["ts"])
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        self._send(400, {"ok": False, "error": "bad_json"})
+        return
+    if abs(time.time() - ts) > EXCHANGE_TS_WINDOW:
+        self._send(401, {"ok": False, "error": "stale"})
+        return
+    if _EXCHANGE_LOOP is None:
+        self._send(503, {"ok": False, "error": "starting"})
+        return
+    try:
+        ok, payload = asyncio.run_coroutine_threadsafe(para_apply_incoming(op, a, b), _EXCHANGE_LOOP).result(timeout=EXCHANGE_HTTP_TIMEOUT)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Para: kiruvchi so'rov bajarilmadi: %s", e)
+        self._send(500, {"ok": False, "error": "internal"})
+        return
+    self._send(200 if ok else 409, {"ok": ok, **payload})
+
+
+_ExchangeHandler._para_in = _para_in_http
+
+
+# ── 💞 Juftlik ↔ Empire Mafia parasi (ikki tomonlama) ──
+# Bu yerda juftlik tuzilsa/ajrashilsa → Empire'ga (u yerda eski para almashtiriladi / o'chadi).
+# Empire'da para tuzilsa → bu yerda ham juftlik (agar ikkalasida faol juftlik yo'q va jinslar qarama-qarshi bo'lsa).
+# Empire'da para bekor qilinsa — bu yerdagi nikoh BEKOR QILINMAYDI (mol-mulk/farzand taqsimoti faqat ajrashish arizasi orqali).
+
+async def para_sync_push(op, a, b):
+    if not EXCHANGE_SECRET or not EXCHANGE_PARTNER_URL:
+        return
+    body = json.dumps({"op": op, "a": int(a), "b": int(b), "ts": int(time.time())}).encode()
+    for attempt in range(3):
+        def _post():
+            req = urllib.request.Request(EXCHANGE_PARTNER_URL + "/exchange/para", data=body, method="POST",
+                                         headers={"Content-Type": "application/json", "X-Signature": exch_sign(body)})
+            try:
+                with urllib.request.urlopen(req, timeout=EXCHANGE_HTTP_TIMEOUT) as resp:
+                    return resp.status
+            except urllib.error.HTTPError as e:
+                return e.code
+            except Exception:  # noqa: BLE001
+                return 0
+        st = await asyncio.to_thread(_post)
+        if st and st < 500:
+            return
+        await asyncio.sleep(3 * (attempt + 1))
+    logger.warning("Para → Empire yetkazilmadi: %s %s-%s", op, a, b)
+
+
+def para_sync_bg(op, a, b):
+    try:
+        asyncio.get_running_loop().create_task(para_sync_push(op, a, b))
+    except RuntimeError:
+        pass
+
+
+async def para_apply_incoming(op, a, b):
+    if a == b or op not in ("pair", "unpair"):
+        return False, {"error": "bad"}
+    if op == "unpair":
+        return True, {"ignored": True}           # nikoh faqat bu botdagi ajrashish arizasi bilan bekor bo'ladi
+    pa, pb = active_pair(a), active_pair(b)
+    if pa and pb and pa[0] == pb[0]:
+        return True, {"same": True}
+    if pa or pb:
+        return False, {"error": "busy"}
+    c = db()
+    users = {r[0] for r in c.execute("SELECT user_id FROM users WHERE user_id IN (?, ?) AND (started=1 OR birth_confirmed=1)", (a, b))}
+    if users != {a, b}:
+        return False, {"error": "no_user"}
+    g = dict(c.execute("SELECT user_id, gender FROM user_gender WHERE user_id IN (?, ?)", (a, b)).fetchall())
+    if len(g) != 2 or g[a] == g[b]:
+        return False, {"error": "gender"}
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with c:
+            pid = c.execute("INSERT INTO pairs (user1_id, user2_id, group_id, started_at, status) VALUES (?, ?, 0, ?, 'active')",
+                            (a, b, now)).lastrowid
+            merged = pair_merge_kids(c, pid, a, b)
+    except sqlite3.IntegrityError:
+        return False, {"error": "busy"}
+    bot = globals().get("_EXCHANGE_LOOP_BOT")
+    if bot:
+        try:
+            await notify_kids_merged(bot, a, b, merged)
+        except Exception:  # noqa: BLE001
+            pass
+        for me, other in ((a, b), (b, a)):
+            try:
+                await bot.send_message(me, f"💞 Empire Mafia'dagi parangiz bilan endi bu yerda ham juftsiz: {person_name(other)}",
+                                       parse_mode=ParseMode.HTML)
+            except TelegramError:
+                pass
+    return True, {"pair": pid}
+
+
+async def para_sync_initial(application):
+    """Bir martalik: mavjud faol juftliklarni Empire'ga ko'chirish."""
+    await asyncio.sleep(20)
+    if not EXCHANGE_SECRET or not EXCHANGE_PARTNER_URL:
+        return
+    c = db()
+    if not c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('para_sync_v1', 1)").rowcount:
+        return
+    c.commit()
+    rows = c.execute("SELECT user1_id, user2_id FROM pairs WHERE status='active'").fetchall()
+    for a, b in rows:
+        await para_sync_push("pair", a, b)
+        await asyncio.sleep(0.3)
+    logger.info("Para: %s ta juftlik Empire'ga ko'chirildi", len(rows))
 
 
 def exchange_start_server(application):
@@ -18706,7 +18829,7 @@ async def web_randpair(uid):
     cd = randpair_status(uid)["cooldown"]
     if cd:
         return {"error": "cooldown", "wait": cd}
-    bot = _EXCHANGE_LOOP_BOT
+    bot = globals().get("_EXCHANGE_LOOP_BOT")
     if bot is None:
         return {"error": "bot"}
     want = "female" if me == "male" else "male"

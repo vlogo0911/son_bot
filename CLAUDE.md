@@ -434,3 +434,7 @@
 - 🪙→💎 Botdagi almashuv menyusida (`exchange_menu_view`, `cb_exchange` `ex:<uid>:e|eg:<n>`) EMP→olmos tugmalari (`EMP_SWAP_AMOUNTS`) —
   `web_emp_swap` orqali; `swap_ready()` va `emp_enabled_for` bo'lsa chiqadi. `init_webapp` da bir martalik `swap_on1` — almashuv yoqiladi.
   Hamkor manzili `EXCHANGE_PARTNER_URL` dan faqat sxema+domen olinadi; rad etilsa xabarda sabab (`exch_fail_reason`, HTTP kodi).
+- 🚫 Botdan foydalanishni cheklash: shaxsiy chatda `/ban ID|@username [sabab]`, `/unban ID`, `/ban` (ro'yxat) — faqat `CAREER_OWNER_IDS`
+  (`cmd_mod` shaxsiy chatda `cmd_botban` ga yo'naltiradi; guruhdagi `/ban` — oddiy moderatsiya). Jadval `bot_bans`, kesh `BOT_BANS`
+  (`init_botban`), `is_bot_banned` (ownerlar hech qachon). `botban_guard` — `TypeHandler` group=-100: cheklanganning har qanday
+  update'i to'xtatiladi (callback alert, shaxsiyda 10 daqiqada bir ogohlantirish). Web app: `webapp_check_init_data` None qaytaradi.

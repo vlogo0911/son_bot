@@ -55,6 +55,7 @@ from telegram.ext import (
     MessageHandler,
     PreCheckoutQueryHandler,
     PrefixHandler,
+    TypeHandler,
     filters,
 )
 
@@ -15101,12 +15102,100 @@ async def mod_target(update, context):
     return None, None, False, args
 
 
+# ── 🚫 Botdan foydalanishni cheklash (faqat bot egalari, shaxsiy chatda /ban ID, /unban ID) ──
+BOT_BANS: set = set()
+_BAN_NOTICE: dict = {}
+
+
+def init_botban():
+    with db() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS bot_bans (user_id INTEGER PRIMARY KEY, by_id INTEGER, reason TEXT, created_at INTEGER)")
+    BOT_BANS.clear()
+    BOT_BANS.update(r[0] for r in db().execute("SELECT user_id FROM bot_bans"))
+
+
+def is_bot_banned(uid):
+    return bool(uid) and uid in BOT_BANS and uid not in CAREER_OWNER_IDS
+
+
+async def botban_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Eng birinchi ishlaydi: bloklangan foydalanuvchining hech bir so'rovi qayta ishlanmaydi."""
+    u = update.effective_user
+    if not u or not is_bot_banned(u.id):
+        return
+    try:
+        if update.callback_query:
+            await update.callback_query.answer("🚫 Siz botdan foydalanishdan cheklangansiz.", show_alert=True)
+        elif update.inline_query:
+            await update.inline_query.answer([], cache_time=60, is_personal=True)
+        elif update.effective_chat and update.effective_chat.type == ChatType.PRIVATE and update.effective_message:
+            now = time.time()
+            if now - _BAN_NOTICE.get(u.id, 0) > 600:
+                _BAN_NOTICE[u.id] = now
+                await update.effective_message.reply_text("🚫 Siz botdan foydalanishdan cheklangansiz.")
+    except TelegramError:
+        pass
+    raise ApplicationHandlerStop
+
+
+async def cmd_botban(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str):
+    msg = update.effective_message
+    me = update.effective_user
+    if not me or me.id not in CAREER_OWNER_IDS:
+        return                                     # boshqalar uchun jim
+    args = (msg.text or "").split()[1:]
+    if not args:
+        rows = db().execute("SELECT user_id, reason, created_at FROM bot_bans ORDER BY created_at DESC LIMIT 50").fetchall()
+        lines = [f"• {person_name(uid)} — <code>{uid}</code>" + (f" · {escape(rs)}" if rs else "") for uid, rs, _ in rows]
+        await msg.reply_text(("🚫 <b>Cheklanganlar</b> (" + str(len(BOT_BANS)) + ")\n\n" + "\n".join(lines)) if rows else
+                             "🚫 Cheklangan foydalanuvchi yo'q.\n\nFoydalanish: <code>/ban ID [sabab]</code>, <code>/unban ID</code>",
+                             parse_mode=ParseMode.HTML)
+        return
+    raw = args[0]
+    uid = int(raw) if re.fullmatch(r"\d{3,16}", raw) else chat_resolve(raw)
+    if not uid:
+        await msg.reply_text("❗ Foydalanuvchi topilmadi. ID yoki @username yozing.")
+        return
+    if command == "ban":
+        if uid in CAREER_OWNER_IDS:
+            await msg.reply_text("❗ Bot egasini cheklab bo'lmaydi.")
+            return
+        reason = " ".join(args[1:])[:200]
+        with db() as c:
+            c.execute("INSERT OR REPLACE INTO bot_bans(user_id, by_id, reason, created_at) VALUES (?, ?, ?, ?)",
+                      (uid, me.id, reason, int(time.time())))
+        BOT_BANS.add(uid)
+        await msg.reply_text(f"🚫 {person_name(uid)} (<code>{uid}</code>) botdan foydalanishdan cheklandi." + (f"\nSabab: {escape(reason)}" if reason else ""),
+                             parse_mode=ParseMode.HTML)
+        try:
+            await context.bot.send_message(uid, "🚫 Siz botdan foydalanishdan cheklandingiz." + (f"\nSabab: {escape(reason)}" if reason else ""),
+                                           parse_mode=ParseMode.HTML)
+        except TelegramError:
+            pass
+    else:
+        with db() as c:
+            n = c.execute("DELETE FROM bot_bans WHERE user_id=?", (uid,)).rowcount
+        BOT_BANS.discard(uid)
+        await msg.reply_text(f"✅ {person_name(uid)} (<code>{uid}</code>) cheklovdan chiqarildi." if n else "ℹ️ Bu foydalanuvchi cheklanmagan edi.",
+                             parse_mode=ParseMode.HTML)
+        if n:
+            try:
+                await context.bot.send_message(uid, "✅ Botdan foydalanish cheklovi olib tashlandi.")
+            except TelegramError:
+                pass
+
+
 async def cmd_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
     if not msg or not chat:
         return
+    if chat.type == ChatType.PRIVATE and msg.text:
+        command = msg.text.split()[0].lstrip("/.!").split("@")[0].lower()
+        if command in ("ban", "unban") and user and user.id in CAREER_OWNER_IDS:
+            await cmd_botban(update, context, command)
+            return
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         await msg.reply_text(mod_t(chat.id, "group_only"))
         return
@@ -19488,6 +19577,8 @@ def webapp_check_init_data(init_data, max_age=86400):
         user = json.loads(data.get("user", "{}"))
     except json.JSONDecodeError:
         return None
+    if user.get("id") and is_bot_banned(int(user["id"])):
+        return None                                # 🚫 cheklangan foydalanuvchiga web app ham yopiq
     return user if user.get("id") else None
 
 
@@ -25956,6 +26047,7 @@ def main():
     init_panel_overrides()
     init_forcesub()
     init_webapp()
+    init_botban()
     init_rereg()
     init_bot_users()
     load_crash_config()
@@ -26040,6 +26132,7 @@ def main():
     # Alohida guruh (-1): a'zolar ro'yxatini yig'adi, asosiy handlerlarni to'smaydi.
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_member), group=-1)
     # Guruh himoyasi eng birinchi ishlaydi: reklama/flood bo'lsa ApplicationHandlerStop bilan to'xtatadi.
+    app.add_handler(TypeHandler(Update, botban_guard), group=-100)     # 🚫 bot cheklovi — hammasidan oldin
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.UpdateType.MESSAGE, guard_messages), group=-2)
     app.add_handler(CallbackQueryHandler(cb_shop, pattern=r"^shop:"))
     app.add_handler(CallbackQueryHandler(cb_contest, pattern=r"^contest:\d+$"))

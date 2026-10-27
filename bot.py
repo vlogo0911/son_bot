@@ -17474,7 +17474,7 @@ _ExchangeHandler._para_in = _para_in_http
 # ── 💞 Juftlik ↔ Empire Mafia parasi (ikki tomonlama) ──
 # Bu yerda juftlik tuzilsa/ajrashilsa → Empire'ga (u yerda eski para almashtiriladi / o'chadi).
 # Empire'da para tuzilsa → bu yerda ham juftlik (agar ikkalasida faol juftlik yo'q va jinslar qarama-qarshi bo'lsa).
-# Empire'da para bekor qilinsa — bu yerdagi nikoh BEKOR QILINMAYDI (mol-mulk/farzand taqsimoti faqat ajrashish arizasi orqali).
+# Empire'da para bekor qilinsa — bu yerda ham ajrashiladi (divorce_settle: pul/sovg'a teng, vasiylik standart qoida bo'yicha).
 
 async def para_sync_push(op, a, b):
     if not EXCHANGE_SECRET or not EXCHANGE_PARTNER_URL:
@@ -17508,8 +17508,27 @@ def para_sync_bg(op, a, b):
 async def para_apply_incoming(op, a, b):
     if a == b or op not in ("pair", "unpair"):
         return False, {"error": "bad"}
-    if op == "unpair":
-        return True, {"ignored": True}           # nikoh faqat bu botdagi ajrashish arizasi bilan bekor bo'ladi
+    if op == "unpair":                        # Mafia'da para buzildi → bu yerda ham ajrashish (odatiy taqsimot bilan)
+        pa = active_pair(a)
+        if not pa or {pa[1], pa[2]} != {a, b}:
+            return True, {"none": True}
+        c = db()
+        now = datetime.now().isoformat(timespec="seconds")
+        with c:
+            n = c.execute("UPDATE pairs SET status='ended', ended_at=? WHERE id=? AND status='active'", (now, pa[0])).rowcount
+            settlement = divorce_settle(c, pa, 0) if n else None   # vasiylik: standart qoida (divorce_default_custody)
+        bot = globals().get("_EXCHANGE_LOOP_BOT")
+        if settlement and bot:
+            try:
+                await divorce_notify(bot, settlement)
+            except Exception:  # noqa: BLE001
+                pass
+            for me in (a, b):
+                try:
+                    await bot.send_message(me, "💔 Empire Mafia'dagi parangiz buzildi — shu sababli bu yerda ham ajrashdingiz.")
+                except TelegramError:
+                    pass
+        return True, {"divorced": bool(settlement)}
     pa, pb = active_pair(a), active_pair(b)
     if pa and pb and pa[0] == pb[0]:
         return True, {"same": True}

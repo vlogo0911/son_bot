@@ -18793,9 +18793,12 @@ def init_webapp():
         # 🚀 Test rejimdan chiqarish (bir martalik): Kamikaze, VIP o'yinlar, ovozli xona, Media — hamma uchun.
         # 🧍 3D avatar test rejimida qoladi (owner panelda alohida yoqiladi).
         if c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('tests_open_v1', 1)").rowcount:
-            for k in ("all", "emp", "kami", "vip", "voice", "media"):
+            for k in ("all", "emp", "kami", "vip", "voice"):
                 c.execute("INSERT INTO webapp_config(key, value) VALUES (?, 1) "
                           "ON CONFLICT(key) DO UPDATE SET value=1", (k,))
+        if c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('media_test_v1', 1)").rowcount:
+            c.execute("INSERT INTO webapp_config(key, value) VALUES ('media', 0) "
+                      "ON CONFLICT(key) DO UPDATE SET value=0")   # 🎬 Media qayta test rejimiga
         # 🎬 Media (YouTube): sevimlilar va ko'rilganlar tarixi
         for t in ("media_favs", "media_history"):
             c.execute(f"""CREATE TABLE IF NOT EXISTS {t} (user_id INTEGER NOT NULL, vid TEXT NOT NULL, title TEXT NOT NULL,
@@ -19777,7 +19780,7 @@ async def web_avatar_save(uid, data):
 
 
 def webapp_flags():
-    d = {"all": 1, "owner": 1, "emp": 1, "kami": 1, "vip": 1, "voice": 1, "media": 1}   # 🧍 avatar — test (0)
+    d = {"all": 1, "owner": 1, "emp": 1, "kami": 1, "vip": 1, "voice": 1, "media": 0}   # 🧍 avatar, 🎬 media — test (0)
     for k, v in db().execute("SELECT key, value FROM webapp_config"):
         d[k] = v
     return d

@@ -446,3 +446,4 @@
   ({user_id, until (0 = yo'q), ts}, o'sha HMAC). Kiruvchi `/exchange/vip` (`_vip_in` → `vip_apply_incoming`): `vip_users.until` yoziladi
   (until ≤ hozir → o'chadi), qayta push QILINMAYDI (aylanma yo'q). Ownerlar `is_vip` orqali doim VIP — push yo'q. Bir martalik `vip_sync_v1`
   (`vip_sync_initial`) — faol VIP'lar Empire'ga.
+- 🚀 Test rejimdan chiqarildi (`init_webapp` bir martalik `tests_open_v1`, `webapp_flags` standartlari): Kamikaze, VIP o'yinlar, ovozli xona, Media, EMP — hamma uchun. 🧍 3D avatar test rejimida qoladi (owner panelda yoqiladi).

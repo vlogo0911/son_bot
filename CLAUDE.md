@@ -442,3 +442,7 @@
   `rel:owner` va /tasdiq'da juftlik/ajrashish tasdiqlanganda. Kiruvchi `/exchange/para` → `para_apply_incoming`: pair — ikkalasida faol
   juftlik yo'q, ikkalasi botni ishlatgan, jinslar qarama-qarshi bo'lsa juftlik (pair_merge_kids); unpair — shu juftlik bo'lsa ajrashish
   (`divorce_settle(c, pair, 0)` — vasiylik standart qoida, `divorce_notify`). Bir martalik `para_sync_v1` (`para_sync_initial`) — mavjud juftliklar Empire'ga.
+- 👑 VIP ↔ Empire Mafia: `web_vip_grant` (berish/uzaytirish/olish) → `vip_sync_bg(uid, until)` → `POST {EXCHANGE_PARTNER_URL}/exchange/vip`
+  ({user_id, until (0 = yo'q), ts}, o'sha HMAC). Kiruvchi `/exchange/vip` (`_vip_in` → `vip_apply_incoming`): `vip_users.until` yoziladi
+  (until ≤ hozir → o'chadi), qayta push QILINMAYDI (aylanma yo'q). Ownerlar `is_vip` orqali doim VIP — push yo'q. Bir martalik `vip_sync_v1`
+  (`vip_sync_initial`) — faol VIP'lar Empire'ga.

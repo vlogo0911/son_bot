@@ -8859,6 +8859,7 @@ async def post_init(application: Application):
     application.create_task(exchange_retry_worker(application), name="exchange-retry")
     application.create_task(web_crash_round_worker(application), name="web-crash-rounds")
     application.create_task(para_sync_initial(application), name="para-sync-initial")   # 💞 bir martalik: juftliklar → Empire
+    application.create_task(vip_sync_initial(application), name="vip-sync-initial")     # 👑 bir martalik: VIP'lar → Empire
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -17399,7 +17400,7 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         if path.startswith("/app/api/"):
             self._web_api(path)
             return
-        if path not in ("/exchange/credit", "/exchange/credit_asset", "/exchange/para"):
+        if path not in ("/exchange/credit", "/exchange/credit_asset", "/exchange/para", "/exchange/vip"):
             self._send(404, {"ok": False})
             return
         try:
@@ -17417,6 +17418,9 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             return
         if path == "/exchange/para":
             self._para_in(raw)
+            return
+        if path == "/exchange/vip":
+            self._vip_in(raw)
             return
         try:
             data = json.loads(raw.decode())
@@ -17469,6 +17473,93 @@ def _para_in_http(self, raw):
 
 
 _ExchangeHandler._para_in = _para_in_http
+
+
+def _vip_in_http(self, raw):
+    try:
+        d = json.loads(raw.decode())
+        user_id, until, ts = int(d["user_id"]), int(d["until"]), int(d["ts"])
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        self._send(400, {"ok": False, "error": "bad_json"})
+        return
+    if abs(time.time() - ts) > EXCHANGE_TS_WINDOW:
+        self._send(401, {"ok": False, "error": "stale"})
+        return
+    if _EXCHANGE_LOOP is None:
+        self._send(503, {"ok": False, "error": "starting"})
+        return
+    try:
+        ok, payload = asyncio.run_coroutine_threadsafe(vip_apply_incoming(user_id, until), _EXCHANGE_LOOP).result(timeout=EXCHANGE_HTTP_TIMEOUT)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("VIP: kiruvchi so'rov bajarilmadi: %s", e)
+        self._send(500, {"ok": False, "error": "internal"})
+        return
+    self._send(200 if ok else 409, {"ok": ok, **payload})
+
+
+_ExchangeHandler._vip_in = _vip_in_http
+
+
+# ── 👑 VIP ↔ Empire Mafia (ikki tomonlama) ──
+# Bu yerda VIP berilsa/o'zgarsa/olinsa → Empire'ga {user_id, until (0 = yo'q), ts}. Kiruvchi faqat lokal yoziladi (qayta push yo'q).
+
+async def vip_sync_push(uid, until_ts):
+    if not EXCHANGE_SECRET or not EXCHANGE_PARTNER_URL:
+        return
+    body = json.dumps({"user_id": int(uid), "until": int(until_ts or 0), "ts": int(time.time())}).encode()
+    for attempt in range(3):
+        def _post():
+            req = urllib.request.Request(EXCHANGE_PARTNER_URL + "/exchange/vip", data=body, method="POST",
+                                         headers={"Content-Type": "application/json", "X-Signature": exch_sign(body)})
+            try:
+                with urllib.request.urlopen(req, timeout=EXCHANGE_HTTP_TIMEOUT) as resp:
+                    return resp.status
+            except urllib.error.HTTPError as e:
+                return e.code
+            except Exception:  # noqa: BLE001
+                return 0
+        st = await asyncio.to_thread(_post)
+        if st and st < 500:
+            return
+        await asyncio.sleep(3 * (attempt + 1))
+    logger.warning("VIP → Empire yetkazilmadi: %s until=%s", uid, until_ts)
+
+
+def vip_sync_bg(uid, until_ts):
+    try:
+        asyncio.get_running_loop().create_task(vip_sync_push(uid, until_ts))
+    except RuntimeError:
+        pass
+
+
+async def vip_apply_incoming(user_id, until):
+    """Empire'dan kelgan VIP holati — faqat lokal (qayta push qilinmaydi: aylanma bo'lmasin)."""
+    if user_id <= 0:
+        return False, {"error": "bad"}
+    now = int(time.time())
+    with db() as c:
+        if until <= now:
+            c.execute("DELETE FROM vip_users WHERE user_id=?", (user_id,))
+            return True, {"result": "removed"}
+        c.execute("INSERT INTO vip_users(user_id, until, granted_by, created_at) VALUES (?,?,0,?) "
+                  "ON CONFLICT(user_id) DO UPDATE SET until=excluded.until, granted_by=0", (user_id, until, now))
+    return True, {"result": "set", "until": until}
+
+
+async def vip_sync_initial(application):
+    """Bir martalik: faol VIP'larni Empire'ga ko'chirish."""
+    await asyncio.sleep(25)
+    if not EXCHANGE_SECRET or not EXCHANGE_PARTNER_URL:
+        return
+    c = db()
+    if not c.execute("INSERT OR IGNORE INTO webapp_config(key, value) VALUES ('vip_sync_v1', 1)").rowcount:
+        return
+    c.commit()
+    rows = c.execute("SELECT user_id, until FROM vip_users WHERE until>?", (int(time.time()),)).fetchall()
+    for u, t in rows:
+        await vip_sync_push(u, t)
+        await asyncio.sleep(0.3)
+    logger.info("VIP: %s ta VIP Empire'ga ko'chirildi", len(rows))
 
 
 # ── 💞 Juftlik ↔ Empire Mafia parasi (ikki tomonlama) ──
@@ -20232,6 +20323,7 @@ async def web_vip_grant(uid, body):
     if not 0 <= days <= VIP_MAX_DAYS:
         return {"error": "days"}
     now = int(time.time())
+    until = 0
     with db() as c:
         if days == 0:
             c.execute("DELETE FROM vip_users WHERE user_id=?", (target,))
@@ -20240,6 +20332,7 @@ async def web_vip_grant(uid, body):
             c.execute("INSERT INTO vip_users(user_id, until, granted_by, created_at) VALUES (?,?,?,?) "
                       "ON CONFLICT(user_id) DO UPDATE SET until=excluded.until, granted_by=excluded.granted_by",
                       (target, until, uid, now))
+    vip_sync_bg(target, until)   # 👑 → Empire Mafia
     if days and _EXCHANGE_LOOP_BOT is not None and vip_enabled_for(target):   # test rejimida xabar yuborilmaydi
         try:
             await _EXCHANGE_LOOP_BOT.send_message(

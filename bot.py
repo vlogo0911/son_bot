@@ -23029,6 +23029,28 @@ WEBAPP_HTML = r"""<!doctype html>
   @keyframes tabGlow{0%,100%{box-shadow:0 8px 20px rgba(200,140,30,.45),inset 0 1px 0 rgba(255,255,255,.6)}50%{box-shadow:0 10px 28px rgba(255,200,60,.75),inset 0 1px 0 rgba(255,255,255,.85)}}
   @keyframes tabSheen{0%{background-position:150% 0}100%{background-position:-100% 0}}
   @media (prefers-reduced-motion:reduce){.tab .ti,.tab.on,.tabs::after{animation:none!important}}
+  /* ═════ ✒️ MINIMALISTIK IKONLAR (pastki tablar) ═════ */
+  .ico{width:24px;height:24px;display:block;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;overflow:visible;
+    animation:icoFloat 3.2s ease-in-out infinite}
+  .ico circle[r=".9"]{fill:currentColor}
+  .tab:nth-child(2) .ico{animation-delay:-.4s}.tab:nth-child(3) .ico{animation-delay:-.8s}.tab:nth-child(4) .ico{animation-delay:-1.2s}
+  .tab:nth-child(5) .ico{animation-delay:-1.6s}.tab:nth-child(6) .ico{animation-delay:-2s}.tab:nth-child(7) .ico{animation-delay:-2.4s}
+  .tab:nth-child(8) .ico{animation-delay:-2.8s}.tab:nth-child(9) .ico{animation-delay:-3.2s}
+  .ico .ln{stroke-dasharray:3 2.2;animation:icoFlow 1.6s linear infinite}
+  .ico .ht{transform-origin:12px 14.5px;animation:icoBeat 1.4s ease-in-out infinite}
+  .ico .hd{transform-origin:12px 8px;animation:icoSwing 2.6s ease-in-out infinite}
+  .tab.on .ico{stroke-width:2.1;animation:icoPop 1.8s ease-in-out infinite}
+  .tab.on .ico>*{stroke-dasharray:80;stroke-dashoffset:0;animation:icoDraw .8s ease-out}
+  .tab.on .ico .ln{stroke-dasharray:3 2.2;animation:icoFlow .9s linear infinite}
+  @keyframes icoFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
+  @keyframes icoPop{0%,100%{transform:translateY(-1px) scale(1.08)}50%{transform:translateY(-3px) scale(1.16)}}
+  @keyframes icoDraw{from{stroke-dashoffset:80}to{stroke-dashoffset:0}}
+  @keyframes icoFlow{to{stroke-dashoffset:-10.4}}
+  @keyframes icoBeat{0%,100%{transform:scale(1)}20%{transform:scale(1.25)}40%{transform:scale(.95)}}
+  @keyframes icoSwing{0%,100%{transform:rotate(-8deg)}50%{transform:rotate(8deg)}}
+  @media (prefers-reduced-motion:reduce){.ico,.ico *{animation:none!important}}
+  
+  .tab .ti,.tab.on .ti{animation:none!important;transform:none!important;filter:none!important;font-size:0;line-height:0}
   /* tegilganda oltin uchqunlar */
   .spark{position:fixed;width:6px;height:6px;border-radius:50%;pointer-events:none;z-index:200;
     background:radial-gradient(circle,#fff8d6,#ffd24a 50%,rgba(255,180,30,0) 70%);animation:spark .6s ease-out forwards}
@@ -23738,8 +23760,9 @@ function render(res){
 
   // TABS
   const tabs=$('<div class="tabs"></div>');
-  const defs=[['profil','👤','Profil'],['news','📰','News'],['reyting','💎','TOP'],['shop','🛍','Do‘kon'],['moliya','💼','Moliya'],['farzand','👶','Oila'],['chat','💬','Chat'],['games','🎮','Games']];
-  if(d.is_owner&&d.owner) defs.push(['owner','👑','Owner']);
+  const TICO={profil:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>',news:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="15" height="16" rx="2"/><path d="M18 8h3v10a2 2 0 0 1-2 2H5"/><path class="ln" d="M7 8h7M7 12h7M7 16h4"/></svg>',top:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1-3 4"/><path d="M12 13v4M8 21h8M9 17h6"/></svg>',shop:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14l-1 12H6z"/><path class="hd" d="M9 8V6a3 3 0 0 1 6 0v2"/></svg>',moliya:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16"/><path class="ln" d="M6 16l4-5 3 3 5-7"/><path d="M15 7h3v3"/></svg>',oila:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path class="ht" d="M12 17s-3-1.8-3-3.6a1.6 1.6 0 0 1 3-.8 1.6 1.6 0 0 1 3 .8C15 15.2 12 17 12 17z"/></svg>',chat:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/><path class="ln" d="M8 10h8M8 13h5"/></svg>',games:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="7" width="19" height="11" rx="5.5"/><path d="M7.5 11v3M6 12.5h3"/><circle cx="15.5" cy="11.5" r=".9"/><circle cx="17.5" cy="13.5" r=".9"/></svg>',owner:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5z"/><path d="M5 19h14"/></svg>'};
+  const defs=[['profil',TICO.profil,'Profil'],['news',TICO.news,'News'],['reyting',TICO.top,'TOP'],['shop',TICO.shop,'Do‘kon'],['moliya',TICO.moliya,'Moliya'],['farzand',TICO.oila,'Oila'],['chat',TICO.chat,'Chat'],['games',TICO.games,'Games']];
+  if(d.is_owner&&d.owner) defs.push(['owner',TICO.owner,'Owner']);
   defs.forEach(([k,t,l])=>{
     const el=$('<div class="tab" data-k="'+k+'"><span class="ti">'+t+'</span><span class="tl">'+l+'</span></div>');
     el.onclick=()=>{setTab(k);};

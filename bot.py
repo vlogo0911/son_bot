@@ -1853,6 +1853,27 @@ async def notify_owners_child_request(bot, rid, requester, partner, name, gender
             pass
 
 
+async def cmd_vips(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/vips — ownerlar: VIP'lar ro'yxati (qachon olgan, qachon tugaydi, qancha qolgan)."""
+    user, msg = update.effective_user, update.effective_message
+    if not user or not msg or user.id not in CAREER_OWNER_IDS:
+        return
+    rows = vip_list()
+    if not rows:
+        await msg.reply_text("❌ Faol VIP foydalanuvchilar yo'q (ownerlar doim VIP).")
+        return
+    text = f"<b>🌟 VIP foydalanuvchilar — {len(rows)} ta</b>\n<i>(Toshkent vaqti, eng tez tugaydigani yuqorida)</i>\n\n"
+    for i, x in enumerate(rows, 1):
+        how = "🪙 o'zi sotib olgan" if x["by"] == x["id"] else ("🔄 Empire'dan" if not x["by"] else "👑 owner bergan")
+        line = (f"{i}. <a href=\"tg://user?id={x['id']}\">{html.escape(x['name'][:40])}</a> <code>{x['id']}</code> · {how}\n"
+                f"   🟢 Olgan: {x['since']}\n   ⏳ Tugaydi: {x['until']} · qoldi: <b>{x['left']}</b>\n")
+        if len(text) + len(line) > 3900:
+            await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            text = "<b>🌟 VIP ro'yxati (davomi)</b>\n\n"
+        text += line
+    await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
 async def cmd_far(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/far — ownerlar: kutilayotgan barcha farzandlarni darhol egalariga yetkazadi."""
     user, msg = update.effective_user, update.effective_message
@@ -17366,6 +17387,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_tester_admin(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/vip/grant":
             coro = web_vip_grant(uid, body)
+        elif path == "/app/api/vip/buy":
+            coro = web_vip_buy(uid, body)
         elif path == "/app/api/vip/score":
             coro = web_vip_score(uid, body)
         elif path == "/app/api/request":
@@ -20304,6 +20327,8 @@ def vip_payload(uid):
     return {"vip": is_vip(uid), "owner": uid in CAREER_OWNER_IDS, "open": vip_enabled_for(uid),
             "test": not webapp_flags().get("vip", 0),
             "until": tashkent_dt(until) if until > time.time() else None,
+            "left": _left_txt(until - time.time()) if until > time.time() else None,
+            "price": VIP_EMP_PRICE, "days": VIP_BUY_DAYS,
             "best": vip_best("strike", uid), "top": vip_top("strike", 5),
             "cs_best": vip_best("cstrike", uid), "cs_top": vip_top("cstrike", 5),
             "nr_best": vip_best("nrush", uid), "nr_top": vip_top("nrush", 5),
@@ -20312,10 +20337,41 @@ def vip_payload(uid):
             "bs_best": vip_best("bstorm", uid), "bs_top": vip_top("bstorm", 5)}
 
 
+def _left_txt(sec):
+    sec = int(sec)
+    if sec <= 0:
+        return "tugagan"
+    d, h, m = sec // 86400, sec % 86400 // 3600, sec % 3600 // 60
+    return f"{d} kun {h} soat" if d else f"{h} soat {m} daq"
+
+
 def vip_list():
+    """Faol VIP'lar: qachon olgan, qachon tugaydi, qancha qolgan (eng tez tugaydigani yuqorida)."""
     now = time.time()
-    return [{"id": u, "name": _plain_person(u), "until": tashkent_dt(t)} for u, t in db().execute(
-        "SELECT user_id, until FROM vip_users WHERE until>? ORDER BY until DESC", (now,))]
+    return [{"id": u, "name": _plain_person(u), "until": tashkent_dt(t), "since": tashkent_dt(ca) if ca else "—",
+             "left": _left_txt(t - now), "by": g or 0} for u, t, ca, g in db().execute(
+        "SELECT user_id, until, created_at, granted_by FROM vip_users WHERE until>? ORDER BY until ASC", (now,))]
+
+
+VIP_EMP_PRICE = 11      # 🪙 web app'da VIP narxi (EMP)
+VIP_BUY_DAYS = 30
+
+
+async def web_vip_buy(uid, body):
+    """👑 VIP sotib olish: VIP_EMP_PRICE EMP → VIP_BUY_DAYS kun (faol bo'lsa uzaytiriladi)."""
+    if not vip_enabled_for(uid) or not emp_enabled_for(uid):
+        return {"error": "closed"}
+    now = int(time.time())
+    with db() as c:
+        cur = c.execute("UPDATE emp_wallet SET emp=emp-? WHERE user_id=? AND emp>=?", (VIP_EMP_PRICE, uid, VIP_EMP_PRICE))
+        if cur.rowcount != 1:
+            return {"error": "no_emp", "price": VIP_EMP_PRICE}
+        until = max(now, vip_until(uid)) + VIP_BUY_DAYS * 86400
+        c.execute("INSERT INTO vip_users(user_id, until, granted_by, created_at) VALUES (?,?,?,?) "
+                  "ON CONFLICT(user_id) DO UPDATE SET until=excluded.until, granted_by=excluded.granted_by",
+                  (uid, until, uid, now))
+    vip_sync_bg(uid, until)   # 👑 → Empire Mafia
+    return {"result": "bought", "vip": vip_payload(uid), "emp": emp_balance(uid)}
 
 
 async def web_vip_grant(uid, body):
@@ -25114,6 +25170,14 @@ function vipPage(d){
         '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 STRIKE 2D — TOP</div>'+(top||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'
       :'<div class="card full viplock"><div class="big">🔒</div><b>Bu bo‘lim faqat VIP foydalanuvchilar uchun</b>'+
         '<div class="hsub" style="margin-top:6px">VIP maqomini bot egalari beradi. Ichida: STRIKE 2D — eski Nokia telefonlaridagi kontr-terror o‘yini uslubida.</div></div>');
+  { const h=sec.querySelector('h2'), bc=$('<div class="card full vipbuy" style="margin:8px 0 12px"></div>');
+    const drawB=()=>{ bc.innerHTML='<div class="lbl">👑 VIP '+(v.vip&&!v.owner?'· faol':'')+'</div>'+
+      (v.owner?'<div class="hsub">Ownerlar doim VIP.</div>':(v.vip&&v.until?'<div class="hsub">⏳ '+esc(v.until)+' gacha · qoldi: <b>'+esc(v.left||'')+'</b></div>':'<div class="hsub">VIP — maxsus 3D o‘yinlar va Empire Mafia’da ham VIP imkoniyatlari.</div>'))+
+      (v.owner?'':'<button class="btn go full" id="vipBuy" style="margin-top:8px">🪙 '+(v.vip?'Uzaytirish':'VIP olish')+' — '+(v.price||11)+' EMP / '+(v.days||30)+' kun</button>');
+      const b=bc.querySelector('#vipBuy'); if(b) b.onclick=()=>{ b.disabled=true;
+        api('/app/api/vip/buy',{}).then(r=>{ if(r.result==='bought'){ d.vip=r.vip; if(d.emp) d.emp.balance=r.emp; Object.assign(v,r.vip); drawB(); toast('✅ VIP faollashdi — '+r.vip.until+' gacha. O‘yinlar ochilishi uchun web app’ni qayta oching'); }
+          else { toast(r.error==='no_emp'?'🪙 EMP yetarli emas ('+(r.price||11)+' EMP kerak)':r.error==='closed'?'🔒 Hozircha yopiq':'⚠️ Xatolik'); b.disabled=false; } }).catch(()=>{ b.disabled=false; toast('⚠️ Tarmoq xatosi'); }); }; };
+    drawB(); if(h) h.after(bc); }
   [['#vipCS',CSTRIKE,'▶ O‘YNASH'],['#vipNR',NRUSH,'▶ POYGA'],['#vipMD',MDASHG,'▶ YUGURISH'],['#vipNS',NSNAKE,'▶ O‘YNASH'],['#vipBS',BSTORMG,'▶ O‘YNASH']].forEach(([sel,G,lab])=>{ const cs=sec.querySelector(sel); if(!cs) return;
     cs.onclick=()=>{ if(cs.dataset.busy) return; cs.dataset.busy='1'; SND.music&&SND.music(null);
       const lb=cs.querySelector('.csp'); lb.textContent='⏳ Yuklanmoqda…';
@@ -25267,7 +25331,7 @@ function vipAdmin(d){
       '<div class="frow"><input class="bet" id="vgD" type="number" inputmode="numeric" value="30" placeholder="Kunlar (0 — olib qo‘yish)"></div>'+
       '<button class="btn go full" id="vgS">👑 VIP berish</button>'+
       '<div class="lbl" style="margin-top:16px">VIP foydalanuvchilar ('+list.length+')</div>'+
-      (list.length?list.map(x=>'<div class="npost"><span class="npi e">👑</span><div class="npm"><b>'+esc(x.name)+'</b><div class="hsub">ID '+x.id+' · '+esc(x.until)+' gacha</div></div>'+
+      (list.length?list.map(x=>'<div class="npost"><span class="npi e">👑</span><div class="npm"><b>'+esc(x.name)+'</b><div class="hsub">ID '+x.id+' · 🟢 '+esc(x.since||'—')+(x.by===x.id?' · 🪙 o‘zi sotib olgan':'')+'</div><div class="hsub">⏳ '+esc(x.until)+' gacha · qoldi: <b>'+esc(x.left||'')+'</b></div></div>'+
         '<span class="na" data-rm="'+x.id+'" title="Olib qo‘yish">🗑</span></div>').join(''):'<div class="hsub">Hali VIP yo‘q (ownerlar doim VIP)</div>');
     box.querySelectorAll('.vgd .chip').forEach(c=>c.onclick=()=>{ app_q(box,'#vgD').value=c.dataset.n; });
     const send=(q,days)=>api('/app/api/vip/grant',{q:q,days:days}).then(r=>{ if(r.result){ toast(r.result==='granted'?'✅ '+r.name+' — VIP berildi':'✅ VIP olib qo‘yildi'); draw(r.vip_list); }
@@ -26363,6 +26427,7 @@ def main():
         (["oila", "family"], cmd_oila),
         (["farzand", "kids"], cmd_farzand),
         (["far"], cmd_far),
+        (["vips"], cmd_vips),
         (["settings", "sozlamalar"], cmd_settings),
         (["warn", "unwarn", "warns", "mute", "tmute", "unmute", "ban", "tban", "unban", "kick"], cmd_mod),
         (["promote", "demote"], cmd_promote),

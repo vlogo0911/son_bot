@@ -447,3 +447,4 @@
   (until ≤ hozir → o'chadi), qayta push QILINMAYDI (aylanma yo'q). Ownerlar `is_vip` orqali doim VIP — push yo'q. Bir martalik `vip_sync_v1`
   (`vip_sync_initial`) — faol VIP'lar Empire'ga.
 - 🚀 Test rejimdan chiqarildi (`init_webapp` bir martalik `tests_open_v1`, `webapp_flags` standartlari): Kamikaze, VIP o'yinlar, ovozli xona, EMP — hamma uchun. 🧍 3D avatar va 🎬 Media (`media_test_v1`) test rejimida qoladi (owner panelda yoqiladi).
+- 👑 VIP: `/vips` (ownerlar, `cmd_vips`) va web Owner → 👑 VIP ro'yxati — olgan sana, tugash, qolgan vaqt, kim bergan (`vip_list`: since/left/by). Web app'da VIP sotib olish `/app/api/vip/buy` → `web_vip_buy`: `VIP_EMP_PRICE` 11 EMP → `VIP_BUY_DAYS` 30 kun (faol bo'lsa uzaytiriladi, EMP atomik, `vip_sync_bg` → Empire); VIP sahifasi tepasida `.vipbuy` karta.

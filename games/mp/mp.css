@@ -1,0 +1,35 @@
+.mpl{position:fixed;inset:0;z-index:10050;background:rgba(4,6,14,.86);display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif}
+.mpl-box{width:min(92vw,420px);max-height:86vh;overflow:auto;background:linear-gradient(160deg,#141a2e,#0b0f1c);border:1px solid #3b4a7a;border-radius:18px;padding:14px;color:#e8ecff;box-shadow:0 0 40px #4f6bff44}
+.mpl-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:16px;letter-spacing:1px}
+.mpl-x{cursor:pointer;font-size:20px;padding:4px 8px}
+.mpl-b{display:block;width:100%;margin:6px 0;padding:12px;border:0;border-radius:12px;background:#24305a;color:#fff;font-weight:700;font-size:15px}
+.mpl-b.go{background:linear-gradient(90deg,#ffb300,#ff5e3a);color:#1a0d00}.mpl-b:disabled{opacity:.5}
+.mpl-row{display:flex;gap:8px}.mpl-row .mpl-b{flex:1}
+.mpl-in,.mpl-mode{flex:1;width:100%;padding:12px;margin:6px 0;border-radius:12px;border:1px solid #3b4a7a;background:#0b1022;color:#fff;font-size:15px;text-transform:uppercase;box-sizing:border-box}
+.mpl-mode{text-transform:none}
+.mpl-lbl{margin:10px 0 4px;opacity:.7;font-size:13px}
+.mpl-list{display:flex;flex-direction:column;gap:6px}
+.mpl-room{display:flex;justify-content:space-between;padding:10px 12px;border-radius:10px;background:#18213f;cursor:pointer}
+.mpl-note{opacity:.65;font-size:13px;margin:6px 0}
+.mpl-code{font-size:18px;text-align:center;margin:4px 0 8px}.mpl-code b{letter-spacing:4px;color:#ffcf4d}.mpl-copy{cursor:pointer}
+.akit{position:fixed;inset:0;z-index:10000;background:#05070f;color:#fff;font-family:system-ui,sans-serif;touch-action:none;user-select:none;-webkit-user-select:none;overflow:hidden}
+.ak-gl,.ak-gl canvas{position:absolute;inset:0;width:100%;height:100%}
+.ak-hud{position:absolute;left:0;right:0;top:0;padding:10px 12px;display:flex;justify-content:space-between;gap:8px;pointer-events:none;font-weight:700;text-shadow:0 2px 4px #000;font-size:14px}
+.ak-hud .ak-box{background:#0008;border-radius:10px;padding:6px 10px}
+.ak-hud .ak-q{pointer-events:auto;cursor:pointer}
+.ak-ctl{position:absolute;inset:0;pointer-events:none}
+.ak-zone{position:absolute;bottom:0;width:50%;height:55%;pointer-events:auto}.ak-zone.l{left:0}.ak-zone.r{right:0}
+.ak-zone span{position:absolute;bottom:14px;left:0;right:0;text-align:center;opacity:.35;font-size:12px}
+.ak-base{position:absolute;width:110px;height:110px;margin:-55px 0 0 -55px;border-radius:50%;border:2px solid #fff3;background:#fff1;left:50%;top:60%;opacity:.45}
+.ak-base.on{opacity:.9}.ak-knob{position:absolute;left:30px;top:30px;width:50px;height:50px;border-radius:50%;background:#fff6}
+.ak-btn{position:absolute;pointer-events:auto;width:74px;height:74px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:26px;background:#ff4d6d55;border:2px solid #ff8aa0;right:22px;bottom:150px}
+.ak-btn.on{transform:scale(.92);background:#ff4d6daa}.ak-btn.b2{right:110px;bottom:60px;background:#3ea8ff55;border-color:#8cc8ff}
+.ak-menu{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:radial-gradient(#101a3acc,#03050cee)}
+.ak-card{width:min(90vw,380px);text-align:center;padding:18px}
+.ak-card h1{font-size:30px;letter-spacing:3px;margin:0 0 6px;background:linear-gradient(90deg,#ffd34d,#ff5e3a);-webkit-background-clip:text;color:transparent}
+.ak-sub{opacity:.75;font-size:14px;margin-bottom:14px;line-height:1.45}
+.ak-mb{display:block;width:100%;margin:8px 0;padding:14px;border-radius:14px;border:1px solid #3b4a7a;background:#18213f;color:#fff;font-size:16px;font-weight:700}
+.ak-mb.go{background:linear-gradient(90deg,#ffb300,#ff5e3a);color:#1a0d00;border:0}
+.ak-board{position:absolute;right:10px;top:52px;background:#0009;border-radius:10px;padding:6px 10px;font-size:12px;min-width:130px;pointer-events:none}
+.ak-board div{display:flex;justify-content:space-between;gap:10px}.ak-board .me{color:#ffd34d}
+.ak-center{position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);font-size:28px;font-weight:900;text-shadow:0 3px 8px #000;pointer-events:none;text-align:center}

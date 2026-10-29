@@ -17373,6 +17373,9 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
                       "/app/api/voice/state", "/app/api/voice/rooms", "/app/api/voice/create", "/app/api/voice/kick",
                       "/app/api/voice/mute", "/app/api/voice/close", "/app/api/voice/media"):
             coro = web_voice(uid, path.rsplit("/", 1)[1], body)
+        elif path.startswith("/app/api/mp/") and path.rsplit("/", 1)[1] in ("list", "create", "quick", "join", "leave",
+                                                                              "start", "end", "sync"):
+            coro = web_mp(uid, path.rsplit("/", 1)[1], body)
         elif path.startswith("/app/api/media/") and path.rsplit("/", 1)[1] in MEDIA_ACTS:
             coro = web_media(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/kid/pack":
@@ -20098,7 +20101,7 @@ REQ_WEB_TEXT = ("📝 <b>Arizalar endi web app'da</b>\n"
 
 # ── 👑 VIP: ownerlar beradi (kunlar bilan); ownerlar doim VIP. VIP o'yinlar: STRIKE 2D (Nokia uslubi) ──
 VIP_MAX_DAYS = 3650
-VIP_GAMES = ("strike", "cstrike", "nrush", "mdash", "nsnake", "bstorm")
+VIP_GAMES = ("strike", "cstrike", "nrush", "mdash", "nsnake", "bstorm", "tank", "bumper", "sea", "checkers")
 VIP_GAME_MAX = {"bstorm": 9999999}     # BLOCK STORM ochkolari katta; boshqalar — VIP_SCORE_MAX
 VIP_SCORE_MAX = 500000
 VIP_SCORE_GAP = 8
@@ -20314,7 +20317,52 @@ def bstorm_check(body, score):
     return maxlv
 
 
-VIP_CHECKS = {"cstrike": cstrike_check, "nrush": nrush_check, "mdash": mdash_check, "nsnake": nsnake_check, "bstorm": bstorm_check}
+def tank_check(body, score):
+    """🛡 TANK ARENA: score = kills·100 + win·500 (+ bonus ≤ 300). level = fraglar."""
+    try:
+        kills = int(body.get("kills") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= kills <= 60 or not 0 <= score <= kills * 100 + 800:
+        return None
+    return max(1, kills)
+
+
+def bumper_check(body, score):
+    """💥 BUMPER ARENA: score = knocks·150 + survived_s·5 + win·600. level = itarib tushirganlar."""
+    try:
+        knocks, surv = int(body.get("knocks") or 0), int(body.get("time") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= knocks <= 40 and 0 <= surv <= 600) or not 0 <= score <= knocks * 150 + surv * 5 + 600:
+        return None
+    return max(1, knocks)
+
+
+def sea_check(body, score):
+    """🚢 DENGIZ JANGI (faqat g'alaba): score = 2000 − shots·15 + diff·300. level = otilgan o'qlar."""
+    try:
+        shots, diff = int(body.get("shots") or 0), int(body.get("diff") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not (17 <= shots <= 100 and 0 <= diff <= 2) or not 0 <= score <= max(0, 2000 - shots * 15) + diff * 300:
+        return None
+    return shots
+
+
+def checkers_check(body, score):
+    """⚪ SHASHKA (faqat g'alaba AI'ga qarshi): score = 500 + diff·500 + left·40. level = qiyinlik (1–3)."""
+    try:
+        diff, left = int(body.get("diff") or 0), int(body.get("left") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= diff <= 2 and 1 <= left <= 12) or not 0 <= score <= 500 + diff * 500 + left * 40:
+        return None
+    return diff + 1
+
+
+VIP_CHECKS = {"cstrike": cstrike_check, "nrush": nrush_check, "mdash": mdash_check, "nsnake": nsnake_check, "bstorm": bstorm_check,
+              "tank": tank_check, "bumper": bumper_check, "sea": sea_check, "checkers": checkers_check}
 
 
 def vip_best(game, uid):
@@ -20334,7 +20382,9 @@ def vip_payload(uid):
             "nr_best": vip_best("nrush", uid), "nr_top": vip_top("nrush", 5),
             "md_best": vip_best("mdash", uid), "md_top": vip_top("mdash", 5),
             "ns_best": vip_best("nsnake", uid), "ns_top": vip_top("nsnake", 5),
-            "bs_best": vip_best("bstorm", uid), "bs_top": vip_top("bstorm", 5)}
+            "bs_best": vip_best("bstorm", uid), "bs_top": vip_top("bstorm", 5),
+            **{f"{k}_best": vip_best(k, uid) for k in ("tank", "bumper", "sea", "checkers")},
+            **{f"{k}_top": vip_top(k, 5) for k in ("tank", "bumper", "sea", "checkers")}}
 
 
 def _left_txt(sec):
@@ -20984,6 +21034,140 @@ def voice_rooms_list():
 def voice_summary():
     rooms = voice_rooms_list()
     return {"count": sum(r["count"] for r in rooms), "rooms": rooms, "max": VOICE_MAX}
+
+
+# ── 🌐 VIP o'yinlar MULTIPLAYER relay (xotirada): xonalar, kod bilan kirish, tez o'yin, ~10 Hz holat almashinuvi ──
+# Har klient o'z holatini (state ≤ MP_STATE_MAX) yuboradi va hodisalar (ev) navbatiga yozadi; server faqat uzatadi.
+MP_GAMES = {"tank": 8, "bumper": 6, "sea": 2, "checkers": 2, "nrush": 6, "cstrike": 8}
+MP_ROOMS = {}            # code -> room
+MP_WHERE = {}            # uid -> code
+MP_STATE_MAX, MP_EV_MAX, MP_EV_KEEP = 1500, 600, 400
+MP_STALE, MP_ROOM_TTL, MP_ROOMS_MAX = 12, 3 * 3600, 300
+
+
+def _mp_gc():
+    now = time.time()
+    for code, r in list(MP_ROOMS.items()):
+        for u, p in list(r["players"].items()):
+            if now - p["t"] > MP_STALE:
+                _mp_drop(r, u)
+        if not r["players"] or now - r["created"] > MP_ROOM_TTL:
+            for u in list(r["players"]):
+                MP_WHERE.pop(u, None)
+            MP_ROOMS.pop(code, None)
+
+
+def _mp_event(r, uid, data):
+    r["eseq"] += 1
+    r["events"].append({"s": r["eseq"], "u": uid, "d": data})
+    if len(r["events"]) > MP_EV_KEEP:
+        del r["events"][:len(r["events"]) - MP_EV_KEEP]
+
+
+def _mp_drop(r, uid):
+    if r["players"].pop(uid, None) is not None:
+        MP_WHERE.pop(uid, None)
+        _mp_event(r, uid, {"k": "left"})
+        if r["host"] == uid and r["players"]:
+            r["host"] = next(iter(r["players"]))
+            _mp_event(r, r["host"], {"k": "host"})
+
+
+def _mp_view(r, uid, after=0):
+    now = time.time()
+    return {"code": r["code"], "game": r["game"], "host": r["host"], "max": r["max"], "started": r["started"],
+            "seed": r["seed"], "mode": r["mode"], "me": uid, "round": r["round"],
+            "players": [{"uid": u, "name": p["name"], "team": p["team"], "state": p["state"],
+                         "age": round(now - p["st"], 2)} for u, p in r["players"].items()],
+            "events": [e for e in r["events"] if e["s"] > after], "eseq": r["eseq"]}
+
+
+def _mp_join(r, uid):
+    old = MP_WHERE.get(uid)
+    if old and old != r["code"] and old in MP_ROOMS:
+        _mp_drop(MP_ROOMS[old], uid)
+    if uid not in r["players"]:
+        teams = [p["team"] for p in r["players"].values()]
+        r["players"][uid] = {"name": _plain_person(uid)[:20], "state": None, "t": time.time(), "st": time.time(),
+                             "team": 0 if teams.count(0) <= teams.count(1) else 1}
+        _mp_event(r, uid, {"k": "join"})
+    MP_WHERE[uid] = r["code"]
+
+
+async def web_mp(uid, act, body):
+    if not vip_enabled_for(uid) or not is_vip(uid):
+        return {"error": "vip"}
+    _mp_gc()
+    game = str(body.get("game") or "")
+    if act in ("list", "create", "quick") and game not in MP_GAMES:
+        return {"error": "game"}
+    if act == "list":
+        rooms = [{"code": r["code"], "host": r["players"].get(r["host"], {}).get("name", "?"), "n": len(r["players"]),
+                  "max": r["max"], "started": r["started"], "mode": r["mode"]}
+                 for r in MP_ROOMS.values() if r["game"] == game and not r["private"]]
+        return {"result": "ok", "rooms": rooms[:30]}
+    if act in ("create", "quick"):
+        if act == "quick":
+            for r in MP_ROOMS.values():
+                if r["game"] == game and not r["private"] and len(r["players"]) < r["max"] and \
+                        (not r["started"] or game in ("tank", "cstrike")):
+                    _mp_join(r, uid)
+                    return {"result": "ok", "room": _mp_view(r, uid)}
+        if len(MP_ROOMS) >= MP_ROOMS_MAX:
+            return {"error": "full"}
+        code = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(5))
+        r = {"code": code, "game": game, "host": uid, "max": MP_GAMES[game], "created": time.time(), "started": False,
+             "seed": secrets.randbelow(10 ** 9), "mode": str(body.get("mode") or "")[:20], "private": bool(body.get("private")),
+             "players": {}, "events": [], "eseq": 0, "round": 0}
+        MP_ROOMS[code] = r
+        _mp_join(r, uid)
+        return {"result": "ok", "room": _mp_view(r, uid)}
+    r = MP_ROOMS.get(str(body.get("code") or "").upper().strip())
+    if act == "join":
+        if not r:
+            return {"error": "not_found"}
+        if uid not in r["players"] and len(r["players"]) >= r["max"]:
+            return {"error": "room_full"}
+        if r["started"] and r["game"] not in ("tank", "cstrike") and uid not in r["players"]:
+            return {"error": "started"}
+        _mp_join(r, uid)
+        return {"result": "ok", "room": _mp_view(r, uid)}
+    if not r or uid not in r["players"]:
+        return {"error": "not_in_room"}
+    if act == "leave":
+        _mp_drop(r, uid)
+        return {"result": "ok"}
+    if act == "start":
+        if r["host"] != uid:
+            return {"error": "host_only"}
+        r["started"], r["round"], r["seed"] = True, r["round"] + 1, secrets.randbelow(10 ** 9)
+        _mp_event(r, uid, {"k": "start", "seed": r["seed"], "round": r["round"]})
+        return {"result": "ok", "room": _mp_view(r, uid)}
+    if act == "end":
+        if r["host"] == uid:
+            r["started"] = False
+            _mp_event(r, uid, {"k": "end"})
+        return {"result": "ok"}
+    if act == "sync":
+        p = r["players"][uid]
+        p["t"] = time.time()
+        st = body.get("state")
+        if st is not None:
+            if len(json.dumps(st, separators=(",", ":"))) > MP_STATE_MAX:
+                return {"error": "big"}
+            p["state"], p["st"] = st, time.time()
+        evs = body.get("ev") or []
+        if not isinstance(evs, list) or len(evs) > 12:
+            return {"error": "ev"}
+        for e in evs:
+            if isinstance(e, dict) and len(json.dumps(e, separators=(",", ":"))) <= MP_EV_MAX:
+                _mp_event(r, uid, e)
+        try:
+            after = int(body.get("after") or 0)
+        except (TypeError, ValueError):
+            after = 0
+        return {"result": "ok", "room": _mp_view(r, uid, after)}
+    return {"error": "act"}
 
 
 async def web_voice(uid, act, body):
@@ -22274,9 +22458,16 @@ NS_GAME_FILES = {"ns_core.js": "application/javascript; charset=utf-8", "ns_game
 BS_GAME_DIR = os.path.join(BASE_DIR, "games", "block_storm")
 BS_GAME_FILES = {"bs_core.js": "application/javascript; charset=utf-8", "bs_game.js": "application/javascript; charset=utf-8",
                  "bs_style.css": "text/css; charset=utf-8"}
+# 🌐 Multiplayer klient (umumiy) va yangi VIP o'yinlar: Tank Arena, Bumper Arena (3D), Dengiz jangi, Shashka (taktik)
+_JS, _CSS = "application/javascript; charset=utf-8", "text/css; charset=utf-8"
 GAME_DIRS = {"classic_strike": (CS_GAME_DIR, CS_GAME_FILES), "neon_rush": (NR_GAME_DIR, NR_GAME_FILES),
              "metro_dash": (MD_GAME_DIR, MD_GAME_FILES), "neon_snake": (NS_GAME_DIR, NS_GAME_FILES),
-             "block_storm": (BS_GAME_DIR, BS_GAME_FILES)}
+             "block_storm": (BS_GAME_DIR, BS_GAME_FILES),
+             "mp": (os.path.join(BASE_DIR, "games", "mp"), {"mp.js": _JS, "kit.js": _JS, "mp.css": _CSS}),
+             "tank_arena": (os.path.join(BASE_DIR, "games", "tank_arena"), {"ta.js": _JS, "ta.css": _CSS}),
+             "bumper_arena": (os.path.join(BASE_DIR, "games", "bumper_arena"), {"ba.js": _JS, "ba.css": _CSS}),
+             "sea_battle": (os.path.join(BASE_DIR, "games", "sea_battle"), {"sb.js": _JS, "sb.css": _CSS}),
+             "checkers": (os.path.join(BASE_DIR, "games", "checkers"), {"ck.js": _JS, "ck.css": _CSS})}
 
 
 def cs_game_version(game="classic_strike"):
@@ -22657,6 +22848,9 @@ WEBAPP_HTML = r"""<!doctype html>
   .gcc .hsub{margin-top:3px}
   .gcc .glk{position:absolute;top:12px;right:14px;font-size:11px;font-weight:800;padding:4px 9px;border-radius:999px;background:rgba(0,0,0,.5);color:#ffd56a}
   .gcc.vip{background:linear-gradient(135deg,rgba(150,90,255,.22),rgba(0,0,0,.35));box-shadow:inset 0 0 0 1.5px rgba(200,160,255,.55),0 10px 24px rgba(0,0,0,.45)}
+  .vipmp{margin:0 0 10px;padding:10px 12px;border-radius:14px;background:linear-gradient(90deg,#1b2b6b,#3a1b6b);font-weight:700;font-size:13px}
+  .csg.tag{background:linear-gradient(135deg,#0d2a1c,#123d2b)}.csg.bag{background:linear-gradient(135deg,#2a0d2a,#4a1240)}
+  .csg.sbg{background:linear-gradient(135deg,#0b2240,#0f3a63)}.csg.ckg{background:linear-gradient(135deg,#3a2414,#5a3a1e)}
   .vipg{display:flex;gap:14px;align-items:center;padding:14px;border-radius:18px;cursor:pointer;background:#0f140b;
     box-shadow:inset 0 0 0 2px #3c4a2c,0 10px 24px rgba(0,0,0,.45)}
   .vipg canvas{width:132px;aspect-ratio:168/120;image-rendering:pixelated;border-radius:6px;flex:none}
@@ -25127,7 +25321,7 @@ function gamesPage(d){
   const sec=$('<div class="sec" id="s-games"></div>'), v=d.vip||{};
   sec.innerHTML='<h2>🎮 Games</h2><div class="gcat">'+
     '<div class="gcc" data-go="casino" data-tap="1"><div class="gci">'+CASINO_ICON.replace('width="27" height="27"','width="40" height="40"')+'</div><div><b>KAZINO</b><div class="hsub">Royal Crash · Hovuz'+(d.kami?' · Kamikaze':'')+' — hamyon puli bilan</div></div></div>'+
-    (v.open?'<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">CLASSIC STRIKE · NEON RUSH · METRO DASH · NEON SNAKE · BLOCK STORM · STRIKE 2D</div></div>'+
+    (v.open?'<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">🌐 ONLINE · TANK ARENA · BUMPER ARENA · DENGIZ JANGI · SHASHKA · CLASSIC STRIKE · NEON RUSH · METRO DASH · NEON SNAKE · BLOCK STORM</div></div>'+
       '<span class="glk">'+(v.test?'🧪 TEST':v.vip?'✅ VIP':'🔒 VIP')+'</span></div>':'')+
     (d.media?'<div class="gcc media" data-go="media" data-tap="1"><div class="gci">🎬</div><div><b>MEDIA</b><div class="hsub">YouTube: musiqa · kino · multfilm · trend — ovozli xonada birga ko‘rish</div></div>'+
       (d.media_test?'<span class="glk">🧪 TEST</span>':'')+'</div>':'')+
@@ -25144,7 +25338,20 @@ function vipPage(d){
   const mdtop=tops(v.md_top,l=>fmtMoney(l)+' m'), nstop=tops(v.ns_top,l=>'L'+l), bstop=tops(v.bs_top,l=>l+'-daraja');
   const topCard=(t,h)=>'<div class="card full" style="margin-top:12px"><div class="lbl">🏆 '+t+' — TOP</div>'+(h||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>';
   sec.innerHTML='<div class="gback" data-back="games">‹ Games</div><h2>👑 VIP o‘yinlar</h2>'+
-    (v.vip?'<div class="csg" id="vipCS" data-tap="1"><div class="csx">🎯</div><div class="cst">CLASSIC</div><div class="csn">STRIKE</div>'+
+    (v.vip?'<div class="vipmp">🌐 Yangi: ONLINE — do‘stlar bilan multiplayer (xona kodi orqali yoki tez o‘yin)</div>'+
+        '<div class="csg tag" id="vipTA" data-tap="1"><div class="csx">🛡</div><div class="cst">TANK</div><div class="csn">ARENA</div>'+
+        '<div class="hsub">3D tank jangi: qaytuvchi o‘qlar, power-up’lar. Solo botlarga qarshi yoki ONLINE 8 kishilik deathmatch.</div>'+
+        '<div class="hsub">🏆 Rekordingiz: <b id="vipTaBest">'+fmtMoney(v.tank_best||0)+'</b></div><span class="csp">▶ O‘YNASH</span></div>'+
+        '<div class="csg bag" id="vipBA" data-tap="1"><div class="csx">💥</div><div class="cst">BUMPER</div><div class="csn">ARENA</div>'+
+        '<div class="hsub">3D sumo-mashinalar: torayuvchi maydondan raqiblarni itarib tushiring. Solo yoki ONLINE 6 kishi.</div>'+
+        '<div class="hsub">🏆 Rekordingiz: <b id="vipBaBest">'+fmtMoney(v.bumper_best||0)+'</b></div><span class="csp">▶ O‘YNASH</span></div>'+
+        '<div class="csg sbg" id="vipSB" data-tap="1"><div class="csx">🚢</div><div class="cst">DENGIZ</div><div class="csn">JANGI</div>'+
+        '<div class="hsub">Taktik: flotni joylashtiring, dushmanni cho‘ktiring. 3 darajali AI yoki ONLINE 1×1.</div>'+
+        '<div class="hsub">🏆 Rekordingiz: <b id="vipSbBest">'+fmtMoney(v.sea_best||0)+'</b></div><span class="csp">▶ O‘YNASH</span></div>'+
+        '<div class="csg ckg" id="vipCK" data-tap="1"><div class="csx">⚪</div><div class="cst">SHASH</div><div class="csn">KA</div>'+
+        '<div class="hsub">Taktik: rus shashkasi qoidalari, damka, ketma-ket urish. Usta AI yoki ONLINE 1×1.</div>'+
+        '<div class="hsub">🏆 Rekordingiz: <b id="vipCkBest">'+fmtMoney(v.checkers_best||0)+'</b></div><span class="csp">▶ O‘YNASH</span></div>'+
+        '<div class="csg" id="vipCS" data-tap="1"><div class="csx">🎯</div><div class="cst">CLASSIC</div><div class="csn">STRIKE</div>'+
         '<div class="hsub">3D taktik shooter: 7 qurol, aqlli botlar, 3 xarita (Desert Base · Urban Strike · Warehouse), TDM · Deathmatch · Bomb Mission · Survival.</div>'+
         '<div class="hsub">🏆 Rekordingiz: <b id="vipCsBest">'+fmtMoney(v.cs_best||0)+'</b></div><span class="csp">▶ O‘YNASH</span></div>'+
         '<div class="csg nrg" id="vipNR" data-tap="1"><div class="csx">🏁</div><div class="cst">NEON</div><div class="csn">RUSH</div>'+
@@ -25166,6 +25373,8 @@ function vipPage(d){
         (v.until?'<div class="hsub" style="margin-top:8px">👑 VIP muddati: '+esc(v.until)+'</div>':(v.owner?'<div class="hsub" style="margin-top:8px">👑 Owner — doimiy VIP</div>':''))+
         '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 CLASSIC STRIKE — TOP</div>'+(cstop||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'+
         '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 NEON RUSH — TOP</div>'+(nrtop||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'+
+        topCard('TANK ARENA',tops(v.tank_top,l=>l+' frag'))+topCard('BUMPER ARENA',tops(v.bumper_top,l=>l+' itarish'))+
+        topCard('DENGIZ JANGI',tops(v.sea_top,l=>l+' o‘q'))+topCard('SHASHKA',tops(v.checkers_top,l=>['Oson','O‘rta','Usta'][l-1]||''))+
         topCard('METRO DASH',mdtop)+topCard('NEON SNAKE',nstop)+topCard('BLOCK STORM',bstop)+
         '<div class="card full" style="margin-top:12px"><div class="lbl">🏆 STRIKE 2D — TOP</div>'+(top||'<div class="hsub">Hali natija yo‘q — birinchi bo‘ling!</div>')+'</div>'
       :'<div class="card full viplock"><div class="big">🔒</div><b>Bu bo‘lim faqat VIP foydalanuvchilar uchun</b>'+
@@ -25178,7 +25387,7 @@ function vipPage(d){
         api('/app/api/vip/buy',{}).then(r=>{ if(r.result==='bought'){ d.vip=r.vip; if(d.emp) d.emp.balance=r.emp; Object.assign(v,r.vip); drawB(); toast('✅ VIP faollashdi — '+r.vip.until+' gacha. O‘yinlar ochilishi uchun web app’ni qayta oching'); }
           else { toast(r.error==='no_emp'?'🪙 EMP yetarli emas ('+(r.price||11)+' EMP kerak)':r.error==='closed'?'🔒 Hozircha yopiq':'⚠️ Xatolik'); b.disabled=false; } }).catch(()=>{ b.disabled=false; toast('⚠️ Tarmoq xatosi'); }); }; };
     drawB(); if(h) h.after(bc); }
-  [['#vipCS',CSTRIKE,'▶ O‘YNASH'],['#vipNR',NRUSH,'▶ POYGA'],['#vipMD',MDASHG,'▶ YUGURISH'],['#vipNS',NSNAKE,'▶ O‘YNASH'],['#vipBS',BSTORMG,'▶ O‘YNASH']].forEach(([sel,G,lab])=>{ const cs=sec.querySelector(sel); if(!cs) return;
+  [['#vipTA',TANKG,'▶ O‘YNASH'],['#vipBA',BUMPG,'▶ O‘YNASH'],['#vipSB',SEAG,'▶ O‘YNASH'],['#vipCK',CHECKG,'▶ O‘YNASH'],['#vipCS',CSTRIKE,'▶ O‘YNASH'],['#vipNR',NRUSH,'▶ POYGA'],['#vipMD',MDASHG,'▶ YUGURISH'],['#vipNS',NSNAKE,'▶ O‘YNASH'],['#vipBS',BSTORMG,'▶ O‘YNASH']].forEach(([sel,G,lab])=>{ const cs=sec.querySelector(sel); if(!cs) return;
     cs.onclick=()=>{ if(cs.dataset.busy) return; cs.dataset.busy='1'; SND.music&&SND.music(null);
       const lb=cs.querySelector('.csp'); lb.textContent='⏳ Yuklanmoqda…';
       G.open(d).catch(()=>toast('⚠️ O‘yin yuklanmadi — internetni tekshiring')).finally(()=>{ delete cs.dataset.busy; lb.textContent=lab; }); }; });
@@ -25200,14 +25409,14 @@ function game3d(dir, ver, files, css, glob, no3d){
 const vipSaved=(d,key,id)=>x=>{ if(x.vip){ d.vip=x.vip; const b=document.getElementById(id); if(b) b.textContent=fmtMoney(x.vip[key]); } };
 // 🎯 CLASSIC STRIKE (3D FPS)
 const CSTRIKE=(()=>{ const load=game3d('classic_strike','__CS_VER__',['cs_core.js','cs_world.js','cs_combat.js','cs_ui.js','cs_game.js'],'cs_style.css','CS3D');
-  function open(d){ return load().then(G=>{ G.launch({
+  function open(d){ return load().then(()=>MPKIT()).then(()=>window['CS3D']).then(G=>{ G.launch({
     onResult:r=>{ api('/app/api/vip/score',{game:'cstrike',score:r.score,kills:r.kills,heads:r.heads,wave:r.wave||0,rounds:r.roundsW||0,win:!!r.win,mode:r.mode}).then(vipSaved(d,'cs_best','vipCsBest')).catch(()=>{}); },
     onExit:()=>{} }); }); }
   return {open, load};
 })();
 // 🏁 NEON RUSH (3D arkada jangovar poyga)
 const NRUSH=(()=>{ const load=game3d('neon_rush','__NR_VER__',['nr_core.js','nr_world.js','nr_race.js','nr_game.js'],'nr_style.css','NR3D');
-  function open(d){ return load().then(G=>{ G.launch({ playerName:(d.name||'Siz').slice(0,14), assets:'/app/games/neon_rush/', ver:'__NR_VER__',
+  function open(d){ return load().then(()=>MPKIT()).then(()=>window['NR3D']).then(G=>{ G.launch({ playerName:(d.name||'Siz').slice(0,14), assets:'/app/games/neon_rush/', ver:'__NR_VER__',
     onResult:r=>{ api('/app/api/vip/score',{game:'nrush',score:r.score,place:r.place,cars:r.cars,fans:r.fans,hits:r.hits,wrecks:r.wrecks,track:r.track}).then(vipSaved(d,'nr_best','vipNrBest')).catch(()=>{}); },
     onExit:()=>{} }); }); }
   return {open, load};
@@ -25231,6 +25440,20 @@ const BSTORMG=(()=>{ const load=game3d('block_storm','__BS_VER__',['bs_core.js',
     onExit:()=>{} }); }); }
   return {open, load};
 })();
+// 🌐 Multiplayer (MPNET) + 3D arena kit (AKIT): yangi VIP o'yinlar shu bilan yuklanadi
+const MPKIT=game3d('mp','__MP_VER__',['mp.js','kit.js'],'mp.css','MPNET_',true);
+function mpGame(dir,ver,file,css,glob,no3d,key,id,fields){
+  const load=game3d(dir,ver,[file],css,glob,no3d);
+  const all=()=>(no3d?Promise.resolve():KID3D.load()).then(MPKIT).then(load);
+  function open(d){ return all().then(G=>{ G.launch({ playerName:(d.name||'Siz').slice(0,14),
+    onResult:r=>{ api('/app/api/vip/score',Object.assign({game:key},r)).then(vipSaved(d,key+'_best',id)).catch(()=>{}); },
+    onExit:()=>{} }); }); }
+  return {open, load:all};
+}
+const TANKG=mpGame('tank_arena','__TA_VER__','ta.js','ta.css','TANKA',false,'tank','vipTaBest');
+const BUMPG=mpGame('bumper_arena','__BA_VER__','ba.js','ba.css','BUMPA',false,'bumper','vipBaBest');
+const SEAG=mpGame('sea_battle','__SB_VER__','sb.js','sb.css','SEAB',true,'sea','vipSbBest');
+const CHECKG=mpGame('checkers','__CK_VER__','ck.js','ck.css','CHECK',true,'checkers','vipCkBest');
 // 🧪 Web testerlar — haqiqiy odamlar jamoasi test rejimidagi bo'limlarni ko'radi
 // ⚖️ Ajrimchilar — juftlashish va ajrashish arizalari ularga ham keladi
 function judgeAdmin(d){
@@ -26370,7 +26593,9 @@ boot();
 </html>"""
 WEBAPP_HTML = (WEBAPP_HTML.replace("__CS_VER__", cs_game_version()).replace("__NR_VER__", cs_game_version("neon_rush"))
                .replace("__MD_VER__", cs_game_version("metro_dash")).replace("__NS_VER__", cs_game_version("neon_snake"))
-               .replace("__BS_VER__", cs_game_version("block_storm")))
+               .replace("__BS_VER__", cs_game_version("block_storm")).replace("__MP_VER__", cs_game_version("mp"))
+               .replace("__TA_VER__", cs_game_version("tank_arena")).replace("__BA_VER__", cs_game_version("bumper_arena"))
+               .replace("__SB_VER__", cs_game_version("sea_battle")).replace("__CK_VER__", cs_game_version("checkers")))
 
 
 def main():

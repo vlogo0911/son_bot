@@ -140,7 +140,7 @@
         h = '<div class="nr-logo"><b>NEON</b><span>RUSH</span><i>arcade combat racing</i></div>' +
           '<div class="nr-sel">' + esc(TR[L.track].name) + ' · ' + esc(CARS[L.car].name) + ' · ' + DIFFS[L.diff][0] + ' · ' + MODES[L.mode][0] + '</div>' +
           '<div class="nr-mm">' + this.btn('▶ PLAY', 'play', 'play') + this.btn('TRACK', '', 'track') + this.btn('CAR', '', 'car') + this.btn('MODE', '', 'mode') + this.btn('DIFFICULTY', '', 'diff') +
-          this.btn('SETTINGS', '', 'set') + this.btn('HOW TO PLAY', '', 'how') + this.btn('✕ CHIQISH', 'ghost', 'exit') + '</div>' +
+          this.btn('🌐 ONLINE', 'play', 'online') + this.btn('SETTINGS', '', 'set') + this.btn('HOW TO PLAY', '', 'how') + this.btn('✕ CHIQISH', 'ghost', 'exit') + '</div>' +
           '<div class="nr-stats"><span>Poygalar <b>' + st.races + '</b></span><span>G‘alaba <b>' + st.wins + '</b></span><span>Podium <b>' + st.podiums + '</b></span><span>Fanlar <b>' + st.fans + ' ✦</b></span><span>Rekord <b>' + st.best + '</b></span></div>';
       } else if (screen === 'track') {
         h = back + '<h2>TRACK</h2><div class="nr-cards">' + Object.keys(TR).map((k) => { const o = NR.Save.trackOpen(k), lap = S.laps[k];
@@ -172,7 +172,7 @@
           '<p class="nr-cred">3D mashina modeli: “Car Concept” — Eric Chadwick, Khronos Group glTF Sample Assets (asli: Unity Fan, CC0), litsenziya <b>CC BY 4.0</b>. O‘zgartirilgan: logotiplar va salon olib tashlangan, soddalashtirilgan, ranglar o‘zgartirilgan.</p></div>';
       }
       m.innerHTML = '<div class="nr-mwrap">' + h + '</div>'; m.classList.add('on');
-      m.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => { A.init(); A.resume(); const g = b.dataset.go; if (g === 'play') H.play(); else if (g === 'exit') H.exit(); else this.showMenu(g); }));
+      m.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => { A.init(); A.resume(); const g = b.dataset.go; if (g === 'play') H.play(); else if (g === 'exit') H.exit(); else if (g === 'online') H.online(); else this.showMenu(g); }));
       m.querySelectorAll('[data-pick]').forEach((c) => (c.onclick = () => {
         const k = c.dataset.pick, v = c.dataset.v;
         if ((k === 'track' && !NR.Save.trackOpen(v)) || (k === 'car' && !NR.Save.carOpen(v))) { this.toast('🔒 Hali ochilmagan'); return; }
@@ -212,7 +212,7 @@
     this.opts = opts || {}; NR.Save.load();
     const root = (this.root = el('div', 'nr3d')); document.body.appendChild(root);
     this.prevOverflow = document.body.style.overflow; document.body.style.overflow = 'hidden';
-    const H = (this.H = { play: () => this.start(), exit: () => this.exit(), menu: () => this.toMenu(), restart: () => this.start(), resume: () => this.resume(), cycle: () => this.cycle(), quality: () => this.setQuality() });
+    const H = (this.H = { play: () => this.start(), exit: () => this.exit(), menu: () => this.toMenu(), restart: () => this.start(), resume: () => this.resume(), cycle: () => this.cycle(), quality: () => this.setQuality(), online: () => this.online() });
     UI.mount(root, H);
     if (!window.THREE || !hasWebGL()) { UI.error('Bu qurilma yoki brauzer WebGL’ni qo‘llab-quvvatlamaydi.'); root.querySelector('button').onclick = () => this.exit(); return; }
     try { this.engine = new Engine(UI.view); } catch (e) { UI.error('3D grafika ishga tushmadi: ' + e.message); root.querySelector('button').onclick = () => this.exit(); return; }
@@ -236,9 +236,11 @@
     }
     this.cleanup();
     const S = NR.Save.data, L = S.last; if (!NR.Save.trackOpen(L.track)) L.track = 'harbor'; if (!NR.Save.carOpen(L.car)) L.car = 'viper';
+    const sess = this.sess, net = sess ? { me: sess.me, emit: (e) => sess.emit(e), players: sess.players.slice().sort((a, b) => a.uid - b.uid) } : null;
+    const trackId = net ? (TR[sess.room.mode] ? sess.room.mode : 'harbor') : L.track;
     try {
-      this.scene = new THREE.Scene(); this.track = new NR.World.Track(L.track); this.track.build(this.scene, this.engine.quality);
-      this.race = new NR.Race.Race({ scene: this.scene, quality: this.engine.quality, diff: L.diff, mode: L.mode, track: this.track, car: L.car, cars: this.engine.quality === 'low' ? 6 : 8,
+      this.scene = new THREE.Scene(); this.track = new NR.World.Track(trackId); this.track.build(this.scene, this.engine.quality);
+      this.race = new NR.Race.Race({ scene: this.scene, quality: this.engine.quality, diff: L.diff, mode: net ? 'race' : L.mode, track: this.track, car: L.car, cars: this.engine.quality === 'low' ? 6 : 8, net,
         playerName: this.opts.playerName || 'Siz', renderer: this.engine.renderer, onEvent: (k, c, a, b) => this.onEvent(k, c, a, b), shake: (v) => (this.shakeA = Math.max(this.shakeA, v)) });
     } catch (e) { console.error(e); UI.toast('⚠️ Poyga ishga tushmadi: ' + e.message); this.cleanup(); UI.showMenu('main'); return; }
     UI.mapBase = null; UI.mm = null; UI.cache = {}; UI.e.feed.innerHTML = '';
@@ -270,7 +272,7 @@
     const mult = { easy: 0.7, normal: 1, hard: 1.4 }[R.diff] || 1, place = pl.place || n;
     const placeBonus = { 1: 500, 2: 300, 3: 200 }[place] || 50;
     pl.fans += placeBonus;
-    const res = { track: L.track, car: L.car, diff: R.diff, mode: R.mode, place, cars: n, laps: R.laps, bestLap: pl.bestLap, fans: pl.fans, hits: pl.hits, wrecks: pl.wrecks, finished: pl.finished };
+    const res = { track: this.track ? this.track.id : L.track, car: L.car, diff: R.diff, mode: R.mode, place, cars: n, laps: R.laps, bestLap: pl.bestLap, fans: pl.fans, hits: pl.hits, wrecks: pl.wrecks, finished: pl.finished };
     res.score = Math.round(((n - place + 1) * 250 + pl.fans + pl.hits * 30) * mult);
     const before = { c: Object.keys(CARS).filter((k) => NR.Save.carOpen(k)), t: Object.keys(TR).filter((k) => NR.Save.trackOpen(k)) };
     res.best = res.score > S.stats.best; NR.Save.record(res);
@@ -279,8 +281,35 @@
     UI.results(res, order, this.H);
     try { this.opts.onResult && this.opts.onResult(res); } catch (e) { /* */ }
   };
+  // 🌐 Online poyga: lobbi (MPNET) → hamma bir trassada, xona egasi qayta boshlaydi
+  GP.online = function () {
+    if (!window.MPNET) { UI.toast('⚠️ Online yuklanmadi'); return; }
+    window.MPNET.lobby({ game: 'nrush', title: 'NEON RUSH', icon: '🏁', min: 2, modes: Object.keys(TR).map((k) => [k, '🏁 ' + TR[k].name]),
+      maxNote: '6 kishigacha. Trassani xona egasi tanlaydi.', onStart: (s) => this.startNet(s), onClose: () => UI.showMenu('main') });
+  };
+  GP.startNet = function (s) {
+    if (this.sess !== s) {
+      this.sess = s;
+      s.on('event', (e) => {
+        if (this.sess !== s) return; const d = e.d, R = this.race;
+        if (d.k === 'start') return this.start();
+        if (!R) return; const car = R.cars.find((c) => c.uid === e.u);
+        if (d.k === 'use' && car && car.remote) { car.items = [d.it]; car.sel = 0; R.use(car, !!d.b); }
+        else if (d.k === 'left' && car && !car.finished) { car.finished = true; car.net = null; R.onFinish(car); UI.feed('🚪 ' + esc(car.name) + ' chiqdi'); }
+        else if (d.k === 'kicked') this.leaveNet();
+      });
+      s.on('sync', (r) => { const R = this.race; if (!R || this.sess !== s) return; for (const p of r.players) { const c = R.cars.find((x) => x.uid === p.uid); if (c && c.remote && p.state) c.net = p.state; } });
+      this.H.restart = () => { if (!this.sess) return this.start(); if (this.sess.isHost()) this.sess.start(); else UI.toast('⏳ Xona egasi qayta boshlaydi'); };
+      this.H.menu = () => { this.leaveNet(); this.toMenu(); };
+    }
+    this.start();
+  };
+  GP.leaveNet = function () {
+    if (!this.sess) return; this.sess.leave(); this.sess = null;
+    this.H.restart = () => this.start(); this.H.menu = () => this.toMenu();
+  };
   GP.cycle = function () { const pl = this.race && this.race.player; if (!pl || pl.items.length < 2) return; pl.sel = (pl.sel + 1) % pl.items.length; A.cycle(); };
-  GP.pause = function () { if (!this.race || this.race.state === 'done') return; this.paused = true; this.input.release(); UI.pause(true, this.H); A.music(false); A.engineSet(0, 0, false); };
+  GP.pause = function () { if (!this.race || this.race.state === 'done') return; if (this.sess) { UI.toast('🌐 Online poygada pauza yo‘q'); return; } this.paused = true; this.input.release(); UI.pause(true, this.H); A.music(false); A.engineSet(0, 0, false); };
   GP.resume = function () { if (!this.race) return; this.paused = false; UI.pause(false); this.last = performance.now(); A.music(true); };
   GP.toMenu = function () { this.cleanup(); this.paused = false; UI.pause(false); UI.showMenu('main'); };
   GP.updateCamera = function (dt) {
@@ -315,6 +344,7 @@
     // fizika qadami: katta dt bo'lsa ikkiga bo'linadi (barqarorlik)
     const steps = dt > 0.034 ? 2 : 1; for (let i = 0; i < steps; i++) R.update(dt / steps, pin);
     if (!this.race) return;
+    if (this.sess && R.net) this.sess.send(R.player.netState());
     this.updateCamera(dt);
     if (R.state === 'race' && !R.player.finished) { const w = (R.player.wrongT || 0) > 0.8; if (w !== this.wrongShown) { this.wrongShown = w; if (w) UI.big('⚠ TESKARI YO‘NALISH', 0, 'bad'); else UI.big('', 0.01); } }
     if (R.state !== 'done') { UI.hudUpdate(R); const pl = R.player; A.engineSet(U.clamp(Math.abs(pl.v) / pl.def.top, 0, 1.3), pin.throttle * (pl.nitro > 0 ? 1.5 : 1), pl.wreck <= 0); }
@@ -330,7 +360,7 @@
     }
   };
   GP.exit = function () {
-    this.alive = false; cancelAnimationFrame(this.raf); this.cleanup();
+    this.leaveNet(); this.alive = false; cancelAnimationFrame(this.raf); this.cleanup();
     if (this.input) this.input.dispose(UI.ctl, this.root);
     if (this.engine) this.engine.dispose();
     NR.Race.disposeShared(); NR.Models.dispose(); A.dispose();

@@ -448,3 +448,16 @@
   (`vip_sync_initial`) — faol VIP'lar Empire'ga.
 - 🚀 Test rejimdan chiqarildi (`init_webapp` bir martalik `tests_open_v1`, `webapp_flags` standartlari): Kamikaze, VIP o'yinlar, ovozli xona, EMP — hamma uchun. 🧍 3D avatar va 🎬 Media (`media_test_v1`) test rejimida qoladi (owner panelda yoqiladi).
 - 👑 VIP: `/vips` (ownerlar, `cmd_vips`) va web Owner → 👑 VIP ro'yxati — olgan sana, tugash, qolgan vaqt, kim bergan (`vip_list`: since/left/by). Web app'da VIP sotib olish `/app/api/vip/buy` → `web_vip_buy`: `VIP_EMP_PRICE` 11 EMP → `VIP_BUY_DAYS` 30 kun (faol bo'lsa uzaytiriladi, EMP atomik, `vip_sync_bg` → Empire); VIP sahifasi tepasida `.vipbuy` karta.
+- 🌐 VIP o'yinlar MULTIPLAYER: server `web_mp` (`/app/api/mp/{list,create,quick,join,leave,start,end,sync}`, faqat VIP) — xotirada `MP_ROOMS`
+  (5 belgili kod, host, `MP_GAMES` maks o'yinchilar, seed/round, `private`), `MP_WHERE`; o'yinchi holati (`state` ≤ `MP_STATE_MAX`) va
+  hodisalar navbati (`ev`, `eseq`, `after` bilan), `MP_STALE` 12 s → chiqariladi, host chiqsa egalik o'tadi. Server faqat uzatadi.
+  Klient `games/mp/mp.js` (`MPNET.lobby` — tez o'yin / xona yaratish / yopiq xona / kod bilan / ochiq xonalar; `Session` ~110 ms sync,
+  `send/emit/on('sync'|'event')`, `isHost`, `start`) + `games/mp/kit.js` (`AKIT`: three renderer, joystik, menyu, sfx, label) + `mp.css`.
+  Web: `MPKIT` yuklovchi, `mpGame(...)`. Yangi VIP o'yinlar (solo + online): 🛡 TANK ARENA (`games/tank_arena/ta.js`, `TANKA`, 8 kishi DM,
+  15 frag/4 daq; o'q egasi emas — qurbon zararni hisoblaydi, `die` hodisasi), 💥 BUMPER ARENA (`games/bumper_arena/ba.js`, `BUMPA`, 6 kishi,
+  torayuvchi maydon, 3 jon, `out` hodisasi), 🚢 DENGIZ JANGI (`games/sea_battle/sb.js`, `SEAB`, 4·3·3·2·2·2·1·1·1·1, AI oson/ov/ehtimollik,
+  online `ready/fire/res`), ⚪ SHASHKA (`games/checkers/ck.js`, `CHECK`, rus qoidalari, alpha-beta 2/4/6, online `mv` yo'li tekshiriladi).
+  Rekordlar `tank_check/bumper_check/sea_check/checkers_check` (faqat solo), payload `vip.<o'yin>_best/_top`.
+  NEON RUSH online: menyu "🌐 ONLINE" (`GP.online/startNet`), `Race({net})` — boshqa o'yinchilar `c.remote` (`netStep`, `netState`), power-up
+  `use` hodisasi, trassa = xona `mode`, pauza yo'q. CLASSIC STRIKE online: `RoundManager.online` (DM 25 frag, botlarsiz), boshqa o'yinchilar
+  bot modeli (`netBot`, `CS3D.netHandlers`), zarar `hit` → qurbon `die`, o'q izi `sh`; xarita = xona `mode`.

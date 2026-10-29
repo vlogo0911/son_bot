@@ -108,7 +108,7 @@
         const st = S.stats;
         h = '<div class="cs-logo"><b>CLASSIC</b><span>STRIKE</span><i>tactical mobile shooter</i></div>' +
           '<div class="cs-sel">' + esc(MODES[L.mode].name) + ' · ' + esc(MS[L.map].name) + ' · ' + esc(DIFFS[L.diff][0]) + ' · ' + esc(WS[L.primary].name) + '</div>' +
-          '<div class="cs-mm">' + this.btn('▶ PLAY', 'play" data-go="play') + this.btn('GAME MODE', '" data-go="mode') + this.btn('MAP SELECT', '" data-go="map') +
+          '<div class="cs-mm">' + this.btn('▶ PLAY', 'play" data-go="play') + this.btn('🌐 ONLINE', 'play" data-go="online') + this.btn('GAME MODE', '" data-go="mode') + this.btn('MAP SELECT', '" data-go="map') +
           this.btn('DIFFICULTY', '" data-go="diff') + this.btn('WEAPONS', '" data-go="weap') + this.btn('SETTINGS', '" data-go="set') +
           this.btn('HOW TO PLAY', '" data-go="how') + this.btn('✕ CHIQISH', 'ghost" data-go="exit') + '</div>' +
           '<div class="cs-stats"><span>O‘yinlar <b>' + st.games + '</b></span><span>G‘alaba <b>' + st.wins + '</b></span><span>Mag‘lubiyat <b>' + st.losses + '</b></span>' +
@@ -147,7 +147,7 @@
           '<p><b>🏆 Progress</b>: fraglar Hawk .50 (10) va Longshot (30) ni ochadi; o‘yinlar Urban Strike (1) va Warehouse (2) xaritalarini ochadi.</p></div>';
       }
       m.innerHTML = '<div class="cs-mwrap">' + h + '</div>';
-      m.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => { CS3D.Audio.init(); CS3D.Audio.resume(); const g = b.dataset.go; if (g === 'play') H.play(); else if (g === 'exit') H.exit(); else this.showMenu(g); }));
+      m.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => { CS3D.Audio.init(); CS3D.Audio.resume(); const g = b.dataset.go; if (g === 'play') H.play(); else if (g === 'exit') H.exit(); else if (g === 'online') H.online(); else this.showMenu(g); }));
       const pick = (attr, key, scr, lockFn) => m.querySelectorAll('[data-' + attr + ']').forEach((c) => (c.onclick = () => {
         const v = c.dataset[attr]; if (lockFn && !lockFn(v)) { this.toast('🔒 Hali ochilmagan'); return; }
         L[key] = v; CS3D.Save.save(); this.showMenu(scr);

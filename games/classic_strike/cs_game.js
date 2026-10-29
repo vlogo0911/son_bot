@@ -250,6 +250,7 @@
     this.bots = []; this.entities = []; this.respawns = []; this.spotT = 0;
     this.vm = null; this.vmSwing = 0; this.vmBob = 0;
     this.world = this; // botlar uchun interfeys
+    this.net = cfg.net || null;
     const pteam = cfg.mode === 'bomb' && cfg.side === 'attack' ? 'T' : 'CT';
     this.player = new Player(this, pteam);
     this.entities.push(this.player);
@@ -274,6 +275,7 @@
   MP.onSpotted = function (bot) { if (bot.team !== this.player.team && this.time - this.spotT > 4) { this.spotT = this.time; A.spotted(); } };
   MP.shoot = function (pl, spread) {
     const e = [pl.x, pl.y + EYE, pl.z], wid = pl.wid();
+    if (this.net && !W[wid].melee) this.net.emit({ k: 'sh', w: wid, y: +(pl.yaw + pl.kickYaw).toFixed(3), p: +(pl.pitch + pl.kick).toFixed(3) });
     const res = CS3D.WeaponSystem.fire(this, pl, wid, e[0], e[1], e[2], pl.yaw + pl.kickYaw, pl.pitch + pl.kick, spread, 1);
     if (!W[wid].melee) {
       pl.st.shots++; A.shot(W[wid].snd, 0); this.noise(pl.x, pl.z, 38, pl.team);
@@ -291,6 +293,10 @@
   };
   MP.damage = function (e, dmg, from, wid, head, dir) {
     if (!e.alive) return;
+    if (this.net) {   // online: zararni qurbon o'zi qabul qiladi (hodisa orqali)
+      if (e.net && from === this.player) this.net.emit({ k: 'hit', to: e.uid, dmg: Math.round(dmg), head: head ? 1 : 0, wid });
+      return;
+    }
     if (e.bot) e.hurt(dmg, from, dir); else e.hurt(dmg, from);
     if (e.bot) A.flesh();
     if (!e.alive) {
@@ -303,7 +309,8 @@
     this.time += dt;
     const pl = this.player, inp = this.game.input;
     pl.update(dt, inp);
-    for (const b of this.bots) b.update(dt);
+    for (const b of this.bots) if (b.net) netBot(b, dt); else b.update(dt);
+    if (this.net) this.net.send({ x: +pl.x.toFixed(2), z: +pl.z.toFixed(2), y: +pl.y.toFixed(2), yw: +pl.yaw.toFixed(2), al: pl.alive ? 1 : 0, w: pl.wid(), k: pl.kills });
     for (let i = this.respawns.length - 1; i >= 0; i--) { const r = this.respawns[i]; r.t -= dt; if (r.t <= 0) { this.respawns.splice(i, 1); this.R.respawn(this, r.e); } }
     this.R.update(this, dt);
     this.fx.update(dt, this.E.camera);
@@ -372,6 +379,53 @@
     if (this.bomb) { this.scene.remove(this.bomb.mesh); this.bomb.mesh.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); }
   };
 
+  // ── 🌐 Online: boshqa o'yinchilar bot modeli bilan ko'rsatiladi, holat tarmoqdan keladi ──
+  function netBot(b, dt) {
+    const s = b.netS, ud = b.mesh.userData; if (!s) return;
+    if (!s.al && b.alive) { b.alive = false; b.deathT = 0; b.fallDir = Math.random() < 0.5 ? -1 : 1; }
+    if (s.al && !b.alive) { b.spawn(s.x, s.z); }
+    if (!b.alive) { b.update(dt); return; }
+    const f = Math.min(1, dt * 12), ox = b.x, oz = b.z;
+    b.x += (s.x - b.x) * f; b.z += (s.z - b.z) * f; b.y += (s.y - b.y) * f; b.yaw += U.angDiff(b.yaw, s.yw) * f;
+    if (s.w && W[s.w]) b.wid = s.w;
+    const mv = Math.hypot(b.x - ox, b.z - oz); b.walkPh = (b.walkPh || 0) + mv * 4; const sw = mv > 0.002 ? Math.sin(b.walkPh) * 0.6 : 0;
+    b.mesh.position.set(b.x, b.y, b.z); b.mesh.rotation.y = b.yaw; ud.legL.rotation.x = sw; ud.legR.rotation.x = -sw;
+  }
+  function netKill(M, e, by, wid, head) {
+    if (!e) return; const from = by === M.net.me ? M.player : M.bots.find((b) => b.uid === by);
+    if (e === M.player) { if (M.player.alive) M.player.hp = 0; M.player.alive = false; }
+    else if (e.alive) { e.alive = false; e.deathT = 0; e.fallDir = 1; }
+    e.deaths++; if (from && from !== e) from.kills++;
+    UI.feed(from ? from.name : '?', (W[wid] || W.rifle).name, e.name, from === M.player || e === M.player, !!head);
+    M.R.onKill(M, from, e, wid, head);
+  }
+  CS3D.netHandlers = {
+    sync(M, r) {
+      const seen = {};
+      for (const p of r.players) {
+        if (p.uid === M.net.me) continue; seen[p.uid] = 1;
+        let b = M.bots.find((x) => x.uid === p.uid);
+        if (!b) { b = M.addBot('T', { name: p.name.slice(0, 14), weapon: 'rifle' }); b.net = true; b.uid = p.uid; if (p.state) { b.spawn(p.state.x, p.state.z); } else b.mesh.visible = false; }
+        if (p.state) b.netS = p.state;
+      }
+      for (let i = M.bots.length - 1; i >= 0; i--) { const b = M.bots[i]; if (b.net && !seen[b.uid]) { b.dispose(); M.bots.splice(i, 1); M.entities.splice(M.entities.indexOf(b), 1); } }
+    },
+    event(M, e) {
+      const d = e.d, me = M.net.me, pl = M.player;
+      if (d.k === 'hit' && d.to === me && pl.alive && !M.over) {
+        const from = M.bots.find((b) => b.uid === e.u); pl.hurt(Math.min(200, d.dmg | 0), from);
+        if (!pl.alive) M.net.emit({ k: 'die', by: e.u, wid: d.wid, head: d.head });
+      } else if (d.k === 'die') {
+        netKill(M, e.u === me ? pl : M.bots.find((b) => b.uid === e.u), d.by, d.wid, d.head);
+      } else if (d.k === 'sh' && e.u !== me) {
+        const b = M.bots.find((x) => x.uid === e.u); if (!b || !b.alive) return;
+        const o = b.eye(), cp = Math.cos(d.p), dx = -Math.sin(d.y) * cp, dy = Math.sin(d.p), dz = -Math.cos(d.y) * cp, wh = M.map.ray(o[0], o[1], o[2], dx, dy, dz, 120);
+        M.fx.tracer([o[0] + dx * 0.6, o[1] - 0.1, o[2] + dz * 0.6], [o[0] + dx * wh.d, o[1] + dy * wh.d, o[2] + dz * wh.d]);
+        M.fx.flash(o[0] - Math.sin(d.y) * 0.6, o[1] - 0.25, o[2] - Math.cos(d.y) * 0.6); M.sound('shot', b.x, b.z, W[d.w] ? d.w : 'rifle');
+      }
+    },
+  };
+
   // ── Spawn yordamchilari ──
   function spawnTeam(M, e, team) {
     const p = M.map.spawnPoint(team);
@@ -433,6 +487,26 @@
       timerText: (M) => U.fmtTime(M.limit - M.time),
       scoreText: (M) => { const top = M.bots.reduce((a, b) => (b.kills > (a ? a.kills : -1) ? b : a), null); return '<span class="ct">Siz ' + M.player.kills + '</span><i>' + M.target + '</i><span class="t">' + (top ? top.name + ' ' + top.kills : '') + '</span>'; },
       objText: (M) => 'O‘limlar: ' + M.player.deaths,
+    },
+    // ── 🌐 Online Deathmatch (har kim har kimga qarshi, botlarsiz) ──
+    online: {
+      init(M) {
+        M.target = 25; M.limit = 360;
+        spawnFar(M, M.player);
+        UI.msg('🌐 ONLINE DEATHMATCH<br><small>' + M.target + ' fragga birinchi yeting</small>', 2.5);
+      },
+      onKill(M, from, victim) {
+        if (victim === M.player) { M.respawns.push({ e: victim, t: 3 }); UI.msg('Siz halok bo‘ldingiz', 2.5, 'bad'); }
+        if (M.player.kills >= M.target) M.end(true, M.target + ' fragga birinchi yetdingiz!');
+        else if (from && from.net && from.kills >= M.target) M.end(false, from.name + ' ' + M.target + ' fragga yetdi');
+      },
+      respawn(M, e) { if (e === M.player) spawnFar(M, e); },
+      update(M) {
+        if (M.time >= M.limit) { const top = Math.max(0, ...M.bots.map((b) => b.kills)); M.end(M.player.kills > top, 'Vaqt tugadi'); }
+      },
+      timerText: (M) => U.fmtTime(M.limit - M.time),
+      scoreText: (M) => { const top = M.bots.reduce((a, b) => (b.kills > (a ? a.kills : -1) ? b : a), null); return '<span class="ct">Siz ' + M.player.kills + '</span><i>' + M.target + '</i><span class="t">' + (top ? top.name + ' ' + top.kills : '—') + '</span>'; },
+      objText: (M) => 'O‘yinchilar: ' + (M.bots.length + 1) + ' · O‘limlar: ' + M.player.deaths,
     },
     // ── Bomb Mission ──
     bomb: {
@@ -579,7 +653,7 @@
     this.prevOverflow = document.body.style.overflow; document.body.style.overflow = 'hidden';
     const H = (this.H = {
       play: () => this.start(), exit: () => this.exit(), menu: () => this.toMenu(), restart: () => this.start(),
-      resume: () => this.resume(), settings: (q) => { if (q && this.engine) { const s = CS3D.Save.data.settings.quality; this.engine.auto = s === 'auto'; this.engine.quality = s === 'auto' ? 'medium' : s; this.engine.prScale = 1; this.engine.applyQuality(); } },
+      resume: () => this.resume(), online: () => this.online(), settings: (q) => { if (q && this.engine) { const s = CS3D.Save.data.settings.quality; this.engine.auto = s === 'auto'; this.engine.quality = s === 'auto' ? 'medium' : s; this.engine.prScale = 1; this.engine.applyQuality(); } },
     });
     UI.mount(root, H);
     if (!window.THREE || !hasWebGL()) { UI.error('Bu qurilma yoki brauzer WebGL’ni qo‘llab-quvvatlamaydi. Chrome’ning yangi versiyasida oching.'); root.querySelector('button').onclick = () => this.exit(); return; }
@@ -603,7 +677,37 @@
     catch (e) { console.error(e); UI.toast('⚠️ O‘yin ishga tushmadi: ' + e.message); UI.showMenu('main'); return; }
     UI.pause(false); this.input.release();
   };
-  GP.pause = function () { if (!this.match || this.match.over) return; this.match.paused = true; this.input.release(); UI.pause(true, this.H); A.music(false); };
+  GP.online = function () {
+    if (!window.MPNET) { UI.toast('⚠️ Online yuklanmadi'); return; }
+    const MAPN = CS3D.MapSystem.MAPS;
+    window.MPNET.lobby({ game: 'cstrike', title: 'CLASSIC STRIKE', icon: '🎯', min: 2, modes: Object.keys(MAPN).map((k) => [k, '🗺 ' + MAPN[k].name]),
+      maxNote: 'Deathmatch, 8 kishigacha. Ketayotgan o‘yinga ham qo‘shilish mumkin.', onStart: (s) => this.startNet(s), onClose: () => UI.showMenu('main') });
+  };
+  GP.startNet = function (s) {
+    if (this.sess !== s) {
+      this.sess = s;
+      s.on('sync', (r) => { if (this.sess === s && this.match && this.match.net) CS3D.netHandlers.sync(this.match, r); });
+      s.on('event', (e) => {
+        if (this.sess !== s) return;
+        if (e.d.k === 'start') return this.startNet(s);
+        if (e.d.k === 'kicked') return this.leaveNet();
+        if (this.match && this.match.net) CS3D.netHandlers.event(this.match, e);
+      });
+      this.H.restart = () => { if (!this.sess) return this.start(); if (this.sess.isHost()) this.sess.start(); else UI.toast('⏳ Xona egasi qayta boshlaydi'); };
+      this.H.menu = () => { this.leaveNet(); this.toMenu(); };
+    }
+    A.init(); A.resume();
+    if (this.match) { this.match.dispose(); this.match = null; }
+    const MAPN = CS3D.MapSystem.MAPS, map = MAPN[s.room.mode] ? s.room.mode : 'desert';
+    try { this.match = new Match(this, { mode: 'online', map, diff: 'normal', net: { me: s.me, emit: (e) => s.emit(e), send: (st) => s.send(st) } }); }
+    catch (e) { console.error(e); UI.toast('⚠️ O‘yin ishga tushmadi: ' + e.message); UI.showMenu('main'); return; }
+    UI.pause(false); this.input.release();
+  };
+  GP.leaveNet = function () {
+    if (!this.sess) return; this.sess.leave(); this.sess = null;
+    this.H.restart = () => this.start(); this.H.menu = () => this.toMenu();
+  };
+  GP.pause = function () { if (!this.match || this.match.over) return; if (this.match.net) { UI.toast('🌐 Online o‘yinda pauza yo‘q'); return; } this.match.paused = true; this.input.release(); UI.pause(true, this.H); A.music(false); };
   GP.resume = function () { if (!this.match) return; this.match.paused = false; UI.pause(false); this.last = performance.now(); A.music(true); };
   GP.toMenu = function () { if (this.match) { this.match.dispose(); this.match = null; } A.music(false); UI.pause(false); UI.showMenu('main'); };
   GP.result = function (res) { try { this.opts.onResult && this.opts.onResult(res); } catch (e) { /* */ } };
@@ -632,7 +736,7 @@
   };
   GP.exit = function () {
     if (!this.alive && this.engine === undefined) { /* */ }
-    this.alive = false; cancelAnimationFrame(this.raf);
+    this.leaveNet(); this.alive = false; cancelAnimationFrame(this.raf);
     if (this.match) { this.match.dispose(); this.match = null; }
     if (this.input) this.input.dispose();
     if (this.engine) this.engine.dispose();

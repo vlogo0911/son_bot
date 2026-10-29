@@ -331,6 +331,21 @@
     this.v = 12; this.vx = Math.sin(this.h) * 12; this.vz = Math.cos(this.h) * 12; this.ghost = Math.max(this.ghost, 1.5); this.wrongT = this.slowT = 0; this.stun = 0;
     if (!this.bot) this.race.event('reset', this);
   };
+  // Online: boshqa o'yinchining mashinasi — holat tarmoqdan keladi (silliq interpolyatsiya)
+  CP.netStep = function (dt) {
+    const s = this.net; if (!s) { this.draw(dt); return; }
+    const f = Math.min(1, dt * 10); this.x += (s.x - this.x) * f; this.z += (s.z - this.z) * f; this.y += (s.y - this.y) * f; this.h += U.angDiff(this.h, s.h) * f;
+    this.v = s.v; this.vx = Math.sin(this.h) * s.v; this.vz = Math.cos(this.h) * s.v; this.total = s.t; this.lap = s.l; this.hp = s.hp;
+    this.wreck = s.w ? Math.max(this.wreck, 0.3) : 0; this.nitro = s.n ? 0.3 : 0; this.shield = s.s ? 0.3 : 0; this.air = s.a || 0; this.ghost = s.w ? 0.3 : 0;
+    if (s.f && !this.finished) { this.finished = true; this.finishT = this.race.time; this.race.onFinish(this); }
+    this.race.track.locate(this.x, this.z, this.loc.i, this.loc);
+    this.draw(dt);
+  };
+  CP.netState = function () {
+    const r = (v) => Math.round(v * 100) / 100;
+    return { x: r(this.x), y: r(this.y), z: r(this.z), h: r(this.h), v: r(this.v), t: r(this.total), l: this.lap, hp: Math.round(this.hp), w: this.wreck > 0 ? 1 : 0,
+      n: this.nitro > 0 ? 1 : 0, s: this.shield > 0 ? 1 : 0, a: r(this.air), f: this.finished ? 1 : 0 };
+  };
   CP.crossLine = function () {
     const R = this.race; this.lap++;
     if (this.lap >= 1) {
@@ -434,7 +449,7 @@
     this.scene = opt.scene; this.quality = opt.quality; this.diff = opt.diff || 'normal'; this.mode = opt.mode || 'race';
     this.track = opt.track; this.laps = opt.laps || this.track.laps; this.onEvent = opt.onEvent || (() => {}); this.shake = opt.shake || (() => {});
     this.fx = new FX(this.scene, this.quality); this.cars = []; this.projs = []; this.mines = []; this.domes = []; this.time = 0; this.state = 'count'; this.count = 3.6; this.finishers = [];
-    const S = shared(), n = opt.cars || 8;
+    const S = shared(), net = (this.net = opt.net || null), n = net ? net.players.length : opt.cars || 8;
     if (MODELS.hi && opt.renderer && this.quality !== 'low') { this.env = envFor(opt.renderer, this.track); this.scene.environment = this.env.texture; }
     // Power-up belgilari
     this.icons = {};
@@ -456,17 +471,18 @@
     // Mashinalar: o'yinchi oxirida (orqadan boshlaydi — quvib o'tish qiziqroq)
     const names = BOT_NAMES.slice().sort(() => Math.random() - 0.5), kinds = Object.keys(CARS);
     for (let i = 0; i < n; i++) {
-      const me = i === n - 1;
-      const c = new Car(this, { id: i, name: me ? (opt.playerName || 'Siz') : names[i % names.length], bot: !me, kind: me ? opt.car : kinds[(i + 1) % kinds.length], color: me ? null : BOT_COLORS[i % BOT_COLORS.length] });
+      const me = net ? net.players[i].uid === net.me : i === n - 1;
+      const c = new Car(this, { id: i, name: me ? (opt.playerName || 'Siz') : net ? net.players[i].name : names[i % names.length], bot: !me && !net, kind: me ? opt.car : kinds[(i + 1) % kinds.length], color: me ? null : BOT_COLORS[i % BOT_COLORS.length] });
+      if (net) { c.uid = net.players[i].uid; c.remote = !me; }
       const row = Math.floor(i / 2), lat = (i % 2 ? 1 : -1) * this.track.W * 0.22;
       c.place0(this.track.length - 12 - row * 9, lat); c.lap = -1;
       this.cars.push(c);
     }
-    this.player = this.cars[n - 1];
+    this.player = net ? this.cars.find((c) => !c.remote) : this.cars[n - 1];
   }
   const RP = Race.prototype;
   RP.event = function (k, car, a, b) { this.onEvent(k, car, a, b); };
-  RP.onFinish = function (c) { this.finishers.push(c); c.place = this.finishers.length; if (!c.bot) this.event('finish', c); };
+  RP.onFinish = function (c) { this.finishers.push(c); c.place = this.finishers.length; if (c === this.player) this.event('finish', c); };
   RP.use = function (c, back) {
     if (!c.items.length || this.state !== 'race' || c.wreck > 0) return;
     const k = c.items.splice(c.sel, 1)[0]; c.sel = Math.min(c.sel, Math.max(0, c.items.length - 1));
@@ -496,7 +512,7 @@
       for (const o of lead) { const p = this.track.at(o.loc.d + 45 + o.v * 0.6, o.loc.lat); this.domes.push(this.mk('dome', p.x, p.y, p.z, c)); }
       snd(() => A.storm());
     }
-    if (me) this.event('use', c, k);
+    if (me) { this.event('use', c, k); if (this.net) this.net.emit({ k: 'use', it: k, b: back ? 1 : 0 }); }
   };
   RP.proj = function (c, kind, dir, speed, target, dmg, life) {
     const fx = Math.sin(c.h) * dir, fz = Math.cos(c.h) * dir, s = new THREE.Sprite(this.projMat[kind]);
@@ -522,7 +538,7 @@
       if (now !== before && now > 0) this.event('count', null, now);
       if (this.count <= 0) { this.state = 'race'; this.time = 0; for (const c of this.cars) c.lapT = 0; this.event('go'); }
     }
-    for (const c of this.cars) c.update(dt, this.state === 'count' ? { steer: 0, throttle: 0, brake: true } : (c.bot || c.finished) ? aiInput(c, this, dt) : pin);
+    for (const c of this.cars) if (c.remote) c.netStep(dt); else c.update(dt, this.state === 'count' ? { steer: 0, throttle: 0, brake: true } : (c.bot || c.finished) ? aiInput(c, this, dt) : pin);
     // Mashinalar to'qnashuvi (ikki doira — old/orqa)
     const cs = this.cars;
     for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) {
@@ -545,7 +561,7 @@
       if (!p.kind) { if (this.mode !== 'clean' && (p.t -= dt) <= 0) { p.kind = rollPU(4, 8); p.spr.material = this.icons[p.kind]; p.spr.visible = p.glow.visible = true; } continue; }
       p.spr.position.y = p.y + 1.4 + Math.sin(this.time * 3 + p.d) * 0.25;
       for (const c of cs) {
-        if (c.wreck > 0) continue; const dx = c.x - p.x, dz = c.z - p.z;
+        if (c.wreck > 0 || c.remote) continue; const dx = c.x - p.x, dz = c.z - p.z;
         if (dx * dx + dz * dz < 2.6 * 2.6 && c.items.length < 3) {
           const k = c === this.player ? p.kind : rollPU(c.place || 4, cs.length); c.give(k);
           if (c === this.player) { A.pickup(); this.event('pickup', c, k); }
@@ -602,7 +618,7 @@
       if (pl.prevPlace && pl.place < pl.prevPlace && !pl.finished) { pl.fans += 10; this.event('fans', pl, '+10 quvib o‘tish'); }
       pl.prevPlace = pl.place;
       if (pl.finished && !this.doneT) this.doneT = this.time;
-      if (this.doneT && (this.time - this.doneT > 4 || this.finishers.length === cs.length)) { this.state = 'done'; this.event('done', pl, order); }
+      if (this.doneT && (this.time - this.doneT > (this.net ? 45 : 4) || this.finishers.length === cs.length)) { this.state = 'done'; this.event('done', pl, order); }
       // xavfsizlik: o'yinchi tugatmasa ham juda uzoq poyga to'xtaydi
       if (this.time > 60 * 8) { this.state = 'done'; this.event('done', pl, order); }
     }

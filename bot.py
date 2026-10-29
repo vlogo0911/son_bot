@@ -23011,6 +23011,24 @@ WEBAPP_HTML = r"""<!doctype html>
     box-shadow:0 8px 20px rgba(200,140,30,.45),inset 0 1px 0 rgba(255,255,255,.6)}
   .tab.on .ti{transform:scale(1.12)}
   .tab:active .ti{transform:scale(.9)}
+  /* ✨ jonli tablar v2: har bir ikon o'z ritmida tebranadi, faol tab nur sochadi */
+  .tabs{border-radius:22px 22px 0 0}
+  .tabs::after{content:"";position:absolute;inset:0;pointer-events:none;
+    background:linear-gradient(110deg,transparent 30%,rgba(255,230,160,.08) 45%,transparent 60%);background-size:250% 100%;animation:tabSheen 6s linear infinite}
+  .tab{position:relative}
+  .tab .ti{display:inline-block;animation:tabBob 2.8s ease-in-out infinite;will-change:transform}
+  .tab:nth-child(2) .ti{animation-delay:-.35s}.tab:nth-child(3) .ti{animation-delay:-.7s}.tab:nth-child(4) .ti{animation-delay:-1.05s}
+  .tab:nth-child(5) .ti{animation-delay:-1.4s}.tab:nth-child(6) .ti{animation-delay:-1.75s}.tab:nth-child(7) .ti{animation-delay:-2.1s}
+  .tab:nth-child(8) .ti{animation-delay:-2.45s}.tab:nth-child(9) .ti{animation-delay:-2.8s}
+  .tab.on{background:linear-gradient(160deg,#fff1b8,#f3c445 45%,#b8801a);animation:tabGlow 2.2s ease-in-out infinite}
+  .tab.on .ti{animation:tabPop 1.6s ease-in-out infinite}
+  .tab.on::after{content:"";position:absolute;left:50%;bottom:3px;width:16px;height:3px;margin-left:-8px;border-radius:2px;background:#2b1b02;opacity:.55}
+  .tab:active{transform:scale(.92)}
+  @keyframes tabBob{0%,100%{transform:translateY(0) rotate(0)}30%{transform:translateY(-3px) rotate(-5deg)}60%{transform:translateY(0) rotate(4deg)}}
+  @keyframes tabPop{0%,100%{transform:translateY(-2px) scale(1.12)}50%{transform:translateY(-5px) scale(1.2)}}
+  @keyframes tabGlow{0%,100%{box-shadow:0 8px 20px rgba(200,140,30,.45),inset 0 1px 0 rgba(255,255,255,.6)}50%{box-shadow:0 10px 28px rgba(255,200,60,.75),inset 0 1px 0 rgba(255,255,255,.85)}}
+  @keyframes tabSheen{0%{background-position:150% 0}100%{background-position:-100% 0}}
+  @media (prefers-reduced-motion:reduce){.tab .ti,.tab.on,.tabs::after{animation:none!important}}
   /* tegilganda oltin uchqunlar */
   .spark{position:fixed;width:6px;height:6px;border-radius:50%;pointer-events:none;z-index:200;
     background:radial-gradient(circle,#fff8d6,#ffd24a 50%,rgba(255,180,30,0) 70%);animation:spark .6s ease-out forwards}

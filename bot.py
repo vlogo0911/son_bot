@@ -17337,6 +17337,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_chat_history(uid, body.get("with"), body.get("after"))
         elif path == "/app/api/chat/send":
             coro = web_chat_send(uid, body.get("to"), body.get("text"), body.get("kind") or "text", body.get("data"))
+        elif path.startswith("/app/api/market/") and path.rsplit("/", 1)[1] in MARKET_ACTS:
+            coro = web_market(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/emp/invoice":
             coro = web_emp_invoice(uid, body.get("pack"))
         elif path == "/app/api/transfer":
@@ -17505,11 +17507,17 @@ def _vip_in_http(self, raw):
     try:
         d = json.loads(raw.decode())
         user_id, until, ts = int(d["user_id"]), int(d["until"]), int(d["ts"])
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        src = str(d.get("src") or "")
+    except (ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError):
         self._send(400, {"ok": False, "error": "bad_json"})
         return
     if abs(time.time() - ts) > EXCHANGE_TS_WINDOW:
         self._send(401, {"ok": False, "error": "stale"})
+        return
+    if src != "buy" or until <= time.time() or user_id <= 0:
+        # faqat Empire'dagi YANGI xaridlar qabul qilinadi; boshqasi (eski sinxron, olib qo'yish) — e'tiborsiz,
+        # 200 qaytaramiz — hamkor qayta urinmasin
+        self._send(200, {"ok": True, "result": "ignored"})
         return
     if _EXCHANGE_LOOP is None:
         self._send(503, {"ok": False, "error": "starting"})
@@ -17527,7 +17535,8 @@ _ExchangeHandler._vip_in = _vip_in_http
 
 
 # ── 👑 VIP ↔ Empire Mafia (ikki tomonlama) ──
-# Bu yerda VIP berilsa/o'zgarsa/olinsa → Empire'ga {user_id, until (0 = yo'q), ts}. Kiruvchi faqat lokal yoziladi (qayta push yo'q).
+# Bu yerda VIP berilsa/o'zgarsa/olinsa → Empire'ga {user_id, until (0 = yo'q), ts}. Kiruvchi faqat src="buy" (Empire'da yangi xarid):
+# muddat max(joriy, kelgan) gacha uzaytiriladi, hech qachon olinmaydi; qayta push yo'q.
 
 async def vip_sync_push(uid, until_ts):
     if not EXCHANGE_SECRET or not EXCHANGE_PARTNER_URL:
@@ -17559,16 +17568,20 @@ def vip_sync_bg(uid, until_ts):
 
 
 async def vip_apply_incoming(user_id, until):
-    """Empire'dan kelgan VIP holati — faqat lokal (qayta push qilinmaydi: aylanma bo'lmasin)."""
-    if user_id <= 0:
-        return False, {"error": "bad"}
+    """Empire'da VIP SOTIB OLINGANDA kelgan muddat — faqat berish/uzaytirish (max(joriy, kelgan)).
+    Bu yerdagi VIP hech qachon kiruvchi so'rov bilan olinmaydi/qisqartirilmaydi; qayta push qilinmaydi (aylanma yo'q)."""
     now = int(time.time())
+    if user_id <= 0 or until <= now:
+        return True, {"result": "ignored"}
     with db() as c:
-        if until <= now:
-            c.execute("DELETE FROM vip_users WHERE user_id=?", (user_id,))
-            return True, {"result": "removed"}
-        c.execute("INSERT INTO vip_users(user_id, until, granted_by, created_at) VALUES (?,?,0,?) "
-                  "ON CONFLICT(user_id) DO UPDATE SET until=excluded.until, granted_by=0", (user_id, until, now))
+        row = c.execute("SELECT until FROM vip_users WHERE user_id=?", (user_id,)).fetchone()
+        cur = int(row[0] or 0) if row else 0
+        if cur >= until:
+            return True, {"result": "ignored", "until": cur}
+        if row:
+            c.execute("UPDATE vip_users SET until=? WHERE user_id=?", (until, user_id))
+        else:
+            c.execute("INSERT INTO vip_users(user_id, until, granted_by, created_at) VALUES (?,?,0,?)", (user_id, until, now))
     return True, {"result": "set", "until": until}
 
 
@@ -18833,6 +18846,8 @@ def init_webapp():
         c.execute("""CREATE TABLE IF NOT EXISTS media_lists (id INTEGER PRIMARY KEY AUTOINCREMENT, cat TEXT NOT NULL, vid TEXT NOT NULL,
             title TEXT NOT NULL, channel TEXT NOT NULL DEFAULT '', added_by INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
             UNIQUE(cat, vid))""")
+        # 🏪 Empire Market: sozlamalar, NFT ro'yxati, buyurtmalar
+        init_market(c)
 
 
 # ── 🧍 Realistik 3D avatar (web app) — test: standart faqat ownerlar ──
@@ -19334,6 +19349,10 @@ def _emp_check_payload(payload, user_id, amount, currency):
 
 async def on_pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.pre_checkout_query
+    if str(q.invoice_payload).startswith("mk:"):      # 🏪 Empire Market
+        o, err = market_check_payload(q.invoice_payload, q.from_user.id, q.total_amount, q.currency)
+        await q.answer(ok=True) if o else await q.answer(ok=False, error_message=err)
+        return
     if not str(q.invoice_payload).startswith("emp:"):
         await q.answer(ok=False, error_message="Noma’lum to‘lov")
         return
@@ -19344,6 +19363,9 @@ async def on_pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg, user = update.effective_message, update.effective_user
     sp = msg.successful_payment if msg else None
+    if sp and str(sp.invoice_payload).startswith("mk:"):      # 🏪 Empire Market
+        await market_on_payment(context.bot, user.id, sp)
+        return
     if not sp or not str(sp.invoice_payload).startswith("emp:"):
         return
     parts = sp.invoice_payload.split(":")
@@ -19410,6 +19432,569 @@ async def web_emp_admin(uid, act, body):
     else:
         return {"error": "act"}
     return {"result": "ok", "emp": emp_payload(uid)}
+
+
+# ── 🏪 EMPIRE MARKET: Telegram mahsulotlari ⭐ Stars (XTR) yoki 🪙 EMP evaziga (Fragment uslubi) ──
+# Avtomatik: ⭐ Premium (giftPremiumSubscription) va 🎁 Gifts (sendGift) — botning o'z Stars balansidan to'lanadi.
+# Qo'lda: 🌟 Stars paketlari va 💎 NFT — Bot API yetkaza olmaydi → navbat, ownerlar Fragment orqali yetkazib "✅ Yetkazildi" bosadi.
+# To'lov payload: mk:<order_id>:<uid>:<stars>. Avtomatik yetkazish xato bo'lsa — refundStarPayment (yoki EMP qaytadi).
+MARKET_PREMIUM = {3: 1000, 6: 1500, 12: 2500}       # oy → Telegram narxi (⭐)
+MARKET_STARS_PACKS = (50, 100, 250, 500, 1000)       # qo'lda yetkaziladigan Stars paketlari
+MARKET_KINDS = ("premium", "gift", "stars", "nft")
+MARKET_AUTO = ("premium", "gift")
+MARKET_CFG_DEFAULT = {"markup": 15.0, "premium": 1, "gift": 1, "stars": 1, "nft": 1, "emp_per_star": 0.0}
+MARKET_ORDER_TTL = 3600          # s — to'lanmagan buyurtma shuncha vaqtdan keyin eskiradi
+MARKET_PENDING_MAX = 5           # bir vaqtda ochiq (to'lanmagan) buyurtmalar
+MARKET_GIFTS_TTL = 600           # getAvailableGifts keshi
+MARKET_BAL_TTL = 30              # getMyStarBalance keshi
+MARKET_MAX_STARS = 100_000
+MARKET_TEXT_MAX = 120
+MARKET_ACTS = ("catalog", "order", "state", "config", "nft_add", "nft_update", "nft_toggle", "nft_delete", "deliver", "refund",
+               "balance")
+_MARKET_GIFTS = {"at": 0.0, "items": []}
+_MARKET_BAL = {"at": 0.0, "v": None}
+
+
+def init_market(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS market_config (key TEXT PRIMARY KEY, value REAL NOT NULL)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS market_nft (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+        img TEXT NOT NULL DEFAULT '', price_stars INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '',
+        active INTEGER NOT NULL DEFAULT 1, sold INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS market_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+        target_id INTEGER NOT NULL, kind TEXT NOT NULL, item TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+        price_stars INTEGER NOT NULL, cost_stars INTEGER NOT NULL DEFAULT 0, pay_method TEXT NOT NULL DEFAULT 'stars',
+        emp_amount INTEGER NOT NULL DEFAULT 0, charge_id TEXT UNIQUE, status TEXT NOT NULL DEFAULT 'pending',
+        msg TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""")
+    c.execute("CREATE INDEX IF NOT EXISTS market_orders_user ON market_orders(user_id, id)")
+    c.execute("CREATE INDEX IF NOT EXISTS market_orders_status ON market_orders(status)")
+
+
+def market_enabled_for(uid):
+    return web_enabled_for(uid) and (bool(webapp_flags().get("market", 0)) or can_test(uid))
+
+
+def market_cfg():
+    d = dict(MARKET_CFG_DEFAULT)
+    for k, v in db().execute("SELECT key, value FROM market_config"):
+        if k in d:
+            d[k] = float(v) if k in ("markup", "emp_per_star") else int(v)
+    return d
+
+
+def market_price(cost, markup):
+    """Foydalanuvchi narxi = Telegram narxi × (1 + ustama%), yuqoriga yaxlitlanadi."""
+    cost = int(cost)
+    if cost <= 0:
+        return 0
+    return int(math.ceil(cost * (100.0 + float(markup)) / 100.0 - 1e-9))
+
+
+def market_emp_price(stars, cfg=None):
+    rate = (cfg or market_cfg())["emp_per_star"]
+    return int(math.ceil(stars * rate - 1e-9)) if rate > 0 else 0
+
+
+async def market_star_balance(force=False):
+    """Botning ⭐ balansi (kesh 30 s). Xato bo'lsa None."""
+    now = time.time()
+    if not force and now - _MARKET_BAL["at"] < MARKET_BAL_TTL:
+        return _MARKET_BAL["v"]
+    bot = _EXCHANGE_LOOP_BOT
+    if bot is None:
+        return None
+    try:
+        sa = await bot.get_my_star_balance()
+        v = int(getattr(sa, "amount", 0) or 0)
+    except TelegramError as e:
+        logger.warning("Market: Stars balansi olinmadi: %s", e)
+        v = None
+    _MARKET_BAL.update(at=now, v=v)
+    return v
+
+
+async def market_gifts(force=False):
+    """getAvailableGifts (kesh 10 daq) → [{id, cost, emoji, thumb{u,f}, anim{u,f}, left, total}]."""
+    now = time.time()
+    if not force and _MARKET_GIFTS["items"] and now - _MARKET_GIFTS["at"] < MARKET_GIFTS_TTL:
+        return _MARKET_GIFTS["items"]
+    bot = _EXCHANGE_LOOP_BOT
+    if bot is None:
+        return _MARKET_GIFTS["items"]
+    try:
+        res = await bot.get_available_gifts()
+    except TelegramError as e:
+        logger.warning("Market: sovg'alar ro'yxati olinmadi: %s", e)
+        _MARKET_GIFTS["at"] = now - MARKET_GIFTS_TTL + 60     # 1 daqiqadan keyin qayta urinish
+        return _MARKET_GIFTS["items"]
+    items, files = [], []
+    for g in getattr(res, "gifts", None) or ():
+        if g.remaining_count == 0:
+            continue
+        st = g.sticker
+        fmt = "tgs" if getattr(st, "is_animated", False) else "webm" if getattr(st, "is_video", False) else "webp"
+        it = {"id": str(g.id), "cost": int(g.star_count), "emoji": getattr(st, "emoji", None) or "🎁",
+              "left": g.remaining_count, "total": g.total_count, "anim": {"u": st.file_unique_id, "f": fmt}, "thumb": None}
+        files.append((st.file_unique_id, st.file_id, fmt))
+        th = getattr(st, "thumbnail", None)
+        if th:
+            it["thumb"] = {"u": th.file_unique_id, "f": "thumb"}
+            files.append((th.file_unique_id, th.file_id, "thumb"))
+        items.append(it)
+    if files:
+        with db() as c:
+            c.executemany("INSERT INTO tg_sticker_files(uid, file_id, fmt) VALUES (?,?,?) "
+                          "ON CONFLICT(uid) DO UPDATE SET file_id=excluded.file_id", files)
+    items.sort(key=lambda x: (x["cost"], x["id"]))
+    _MARKET_GIFTS.update(at=now, items=items)
+    return items
+
+
+def market_nft_list(all_=False):
+    rows = db().execute("SELECT id, title, img, price_stars, note, active, sold FROM market_nft"
+                        + ("" if all_ else " WHERE active=1 AND sold=0") + " ORDER BY sold, id DESC").fetchall()
+    return [{"id": r[0], "title": r[1], "img": (f"/app/newsimg/{r[2]}.jpg" if re.fullmatch(r"[0-9a-f]{32}", r[2] or "")
+                                                 else r[2]),
+             "price": r[3], "note": r[4], "active": bool(r[5]), "sold": bool(r[6])} for r in rows]
+
+
+def market_nft_get(nid):
+    r = db().execute("SELECT id, title, img, price_stars, note, active, sold FROM market_nft WHERE id=?", (nid,)).fetchone()
+    return {"id": r[0], "title": r[1], "price": r[3], "active": bool(r[5]), "sold": bool(r[6])} if r else None
+
+
+_MARKET_COLS = ("id, user_id, target_id, kind, item, title, price_stars, cost_stars, pay_method, emp_amount, charge_id, "
+                "status, msg, note, created_at, updated_at")
+
+
+def market_order(oid):
+    r = db().execute(f"SELECT {_MARKET_COLS} FROM market_orders WHERE id=?", (oid,)).fetchone()
+    return dict(zip([x.strip() for x in _MARKET_COLS.split(",")], r)) if r else None
+
+
+def market_order_json(o, owner=False):
+    st = o["status"]
+    if st == "pending" and time.time() - o["created_at"] > MARKET_ORDER_TTL:
+        st = "expired"
+    out = {"id": o["id"], "kind": o["kind"], "title": o["title"], "price": o["price_stars"], "pay": o["pay_method"],
+           "emp": o["emp_amount"], "status": st, "at": tashkent_dt(o["created_at"]), "self": o["target_id"] == o["user_id"],
+           "to": _plain_person(o["target_id"]), "note": o["note"]}
+    if owner:
+        un = db().execute("SELECT username FROM users WHERE user_id=?", (o["target_id"],)).fetchone()
+        out.update(buyer=_plain_person(o["user_id"]), buyer_id=o["user_id"], target_id=o["target_id"],
+                   target_un=(un[0] if un else None), cost=o["cost_stars"], msg=o["msg"], item=o["item"])
+    return out
+
+
+def _market_item(kind, item, cfg, gifts):
+    """(title, cost, price) yoki None. cost — bot to'laydigan Telegram narxi (qo'lda bo'lsa — taxminiy/0)."""
+    if kind == "premium":
+        try:
+            m = int(item)
+        except (TypeError, ValueError):
+            return None
+        if m not in MARKET_PREMIUM:
+            return None
+        cost = MARKET_PREMIUM[m]
+        return f"⭐ Telegram Premium · {m} oy", cost, market_price(cost, cfg["markup"])
+    if kind == "gift":
+        g = next((x for x in gifts if x["id"] == str(item)), None)
+        if not g:
+            return None
+        return f"🎁 Sovg‘a {g['emoji']}", g["cost"], market_price(g["cost"], cfg["markup"])
+    if kind == "stars":
+        try:
+            n = int(item)
+        except (TypeError, ValueError):
+            return None
+        if n not in MARKET_STARS_PACKS:
+            return None
+        return f"🌟 {n} Stars", n, market_price(n, cfg["markup"])
+    if kind == "nft":
+        try:
+            n = market_nft_get(int(item))
+        except (TypeError, ValueError):
+            n = None
+        if not n or not n["active"] or n["sold"]:
+            return None
+        return f"💎 {n['title']}"[:80], 0, int(n["price"])
+    return None
+
+
+def market_payload(uid, balance=None):
+    """Payload `market` (DB'dan; tarmoq so'rovisiz — sovg'alar/balans keshdan)."""
+    if not market_enabled_for(uid):
+        return None
+    cfg = market_cfg()
+    bal = _MARKET_BAL["v"] if balance is None else balance
+    known = bal is not None
+    avail = lambda cost: (not known) or cost <= bal        # balans noma'lum bo'lsa ko'rsatamiz; buyurtmada qayta tekshiriladi
+    emp_on = cfg["emp_per_star"] > 0 and emp_enabled_for(uid)
+    mk = lambda price: market_emp_price(price, cfg) if emp_on else 0
+    c = db()
+    out = {
+        "test": not webapp_flags().get("market", 0),
+        "on": {k: bool(cfg[k]) for k in MARKET_KINDS},
+        "markup": cfg["markup"], "emp_pay": emp_on, "emp_balance": emp_balance(uid) if emp_on else 0,
+        "premium": [{"m": m, "cost": cst, "price": market_price(cst, cfg["markup"]), "emp": mk(market_price(cst, cfg["markup"])),
+                     "ok": avail(cst)} for m, cst in MARKET_PREMIUM.items()] if cfg["premium"] else [],
+        "gifts": [dict(g, price=market_price(g["cost"], cfg["markup"]), emp=mk(market_price(g["cost"], cfg["markup"])),
+                       ok=avail(g["cost"])) for g in _MARKET_GIFTS["items"]] if cfg["gift"] else [],
+        "gifts_loaded": bool(_MARKET_GIFTS["items"]),
+        "stars": [{"n": n, "price": market_price(n, cfg["markup"]), "emp": mk(market_price(n, cfg["markup"]))}
+                  for n in MARKET_STARS_PACKS] if cfg["stars"] else [],
+        "nft": [dict(x, emp=mk(x["price"])) for x in market_nft_list()] if cfg["nft"] else [],
+        "orders": [market_order_json(market_order(r[0])) for r in c.execute(
+            "SELECT id FROM market_orders WHERE user_id=? AND (status<>'pending' OR created_at>?) ORDER BY id DESC LIMIT 20",
+            (uid, int(time.time()) - MARKET_ORDER_TTL))],
+    }
+    if uid in CAREER_OWNER_IDS:
+        st = c.execute("SELECT COUNT(*), COALESCE(SUM(price_stars),0), COALESCE(SUM(cost_stars),0) FROM market_orders "
+                       "WHERE status='delivered' AND pay_method='stars'").fetchone()
+        out["admin"] = {
+            "cfg": cfg, "balance": bal, "nft_all": market_nft_list(True),
+            "queue": [market_order_json(market_order(r[0]), True) for r in c.execute(
+                "SELECT id FROM market_orders WHERE status IN ('paid','failed') ORDER BY id LIMIT 50")],
+            "recent": [market_order_json(market_order(r[0]), True) for r in c.execute(
+                "SELECT id FROM market_orders WHERE status IN ('delivered','refunded') ORDER BY updated_at DESC LIMIT 15")],
+            "stats": {"delivered": st[0], "revenue": st[1], "cost": st[2]},
+        }
+    return out
+
+
+async def market_catalog(uid):
+    if not market_enabled_for(uid):
+        return {"error": "disabled"}
+    await market_gifts()
+    bal = await market_star_balance()
+    return {"result": "ok", "market": market_payload(uid, bal)}
+
+
+async def web_market_order(uid, body):
+    """Buyurtma yaratish → ⭐ invoys havolasi yoki EMP bilan darhol to'lash."""
+    if not market_enabled_for(uid):
+        return {"error": "disabled"}
+    kind = str(body.get("kind") or "")
+    cfg = market_cfg()
+    if kind not in MARKET_KINDS or not cfg[kind]:
+        return {"error": "kind"}
+    to = str(body.get("to") or "").strip()
+    target = uid if not to or to.lower() in ("me", "men") else chat_resolve(to)
+    if not target:
+        return {"error": "not_found"}
+    msg = re.sub(r"[\x00-\x1f]", " ", str(body.get("text") or "")).strip()[:MARKET_TEXT_MAX]
+    gifts = await market_gifts() if kind == "gift" else []
+    it = _market_item(kind, body.get("item"), cfg, gifts)
+    if not it:
+        return {"error": "item"}
+    title, cost, price = it
+    if not 1 <= price <= MARKET_MAX_STARS:
+        return {"error": "item"}
+    if kind in MARKET_AUTO:
+        bal = await market_star_balance(force=True)
+        if bal is None or bal < cost:
+            return {"error": "unavailable"}
+    now = int(time.time())
+    c = db()
+    if c.execute("SELECT COUNT(*) FROM market_orders WHERE user_id=? AND status='pending' AND created_at>?",
+                 (uid, now - MARKET_ORDER_TTL)).fetchone()[0] >= MARKET_PENDING_MAX:
+        return {"error": "too_many"}
+    pay = "emp" if body.get("pay") == "emp" else "stars"
+    emp_amt = 0
+    if pay == "emp":
+        emp_amt = market_emp_price(price, cfg)
+        if emp_amt <= 0 or not emp_enabled_for(uid):
+            return {"error": "emp_off"}
+    with c:
+        oid = c.execute("""INSERT INTO market_orders(user_id, target_id, kind, item, title, price_stars, cost_stars, pay_method,
+                           emp_amount, status, msg, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?, 'pending', ?, ?, ?)""",
+                        (uid, target, kind, str(body.get("item")), title, price, cost, pay, emp_amt, msg, now, now)).lastrowid
+        if pay == "emp":
+            if not c.execute("UPDATE emp_wallet SET emp=emp-? WHERE user_id=? AND emp>=?", (emp_amt, uid, emp_amt)).rowcount:
+                c.execute("UPDATE market_orders SET status='cancelled', note='emp_funds' WHERE id=?", (oid,))
+                oid = None
+            else:
+                c.execute("UPDATE market_orders SET status='paid', charge_id=? WHERE id=?", (f"emp:{oid}", oid))
+                if kind == "nft" and not c.execute("UPDATE market_nft SET sold=1 WHERE id=? AND sold=0",
+                                                    (int(body.get("item")),)).rowcount:
+                    c.execute("UPDATE market_orders SET note='nft_sold' WHERE id=?", (oid,))
+    if pay == "emp":
+        if not oid:
+            return {"error": "emp_funds"}
+        if market_order(oid)["note"] == "nft_sold":
+            await market_refund(_EXCHANGE_LOOP_BOT, oid, "NFT allaqachon sotilgan")
+            return {"error": "item", "market": market_payload(uid)}
+        await market_fulfil(_EXCHANGE_LOOP_BOT, oid)
+        return {"result": "paid", "order": market_order_json(market_order(oid)), "market": market_payload(uid)}
+    bot = _EXCHANGE_LOOP_BOT
+    if bot is None:
+        return {"error": "bot"}
+    try:
+        link = await bot.create_invoice_link(
+            title=title[:32], description=(f"Empire Market · {title}" + ("" if target == uid else f" → {_plain_person(target)}"))[:255],
+            payload=f"mk:{oid}:{uid}:{price}", currency="XTR", prices=[LabeledPrice(title[:32], price)])
+    except TelegramError as e:
+        logger.warning("Market invoys yaratilmadi: %s", e)
+        with c:
+            c.execute("UPDATE market_orders SET status='cancelled', note='invoice' WHERE id=?", (oid,))
+        return {"error": "invoice"}
+    return {"result": "ok", "link": link, "order": market_order_json(market_order(oid))}
+
+
+def market_check_payload(payload, user_id, amount, currency):
+    """Pre-checkout: buyurtma bor, shu foydalanuvchiniki, kutilmoqda, narx mos. → (order, xato)."""
+    parts = str(payload or "").split(":")
+    if len(parts) != 4 or parts[0] != "mk" or currency != "XTR":
+        return None, "Noto‘g‘ri to‘lov"
+    try:
+        oid, uid, stars = int(parts[1]), int(parts[2]), int(parts[3])
+    except ValueError:
+        return None, "Noto‘g‘ri to‘lov"
+    o = market_order(oid)
+    if not o or uid != user_id or o["user_id"] != uid:
+        return None, "Buyurtma topilmadi"
+    if o["status"] != "pending" or o["pay_method"] != "stars":
+        return None, "Bu buyurtma allaqachon yopilgan"
+    if time.time() - o["created_at"] > MARKET_ORDER_TTL:
+        return None, "Buyurtma eskirgan — qaytadan oching"
+    if stars != o["price_stars"] or amount != o["price_stars"]:
+        return None, "Narx o‘zgargan — qaytadan oching"
+    if not market_enabled_for(uid) or not market_cfg()[o["kind"]]:
+        return None, "Market hozircha yopiq"
+    if o["kind"] == "nft":
+        n = market_nft_get(int(o["item"]))
+        if not n or not n["active"] or n["sold"]:
+            return None, "Bu NFT allaqachon sotilgan"
+    if o["kind"] in MARKET_AUTO and _MARKET_BAL["v"] is not None and _MARKET_BAL["v"] < o["cost_stars"]:
+        return None, "Vaqtincha mavjud emas — keyinroq urinib ko‘ring"
+    return o, None
+
+
+async def market_notify(bot, uid, text):
+    if bot is None:
+        return
+    try:
+        await bot.send_message(uid, text)
+    except TelegramError:
+        pass
+
+
+async def market_notify_owners(bot, text):
+    for oid in CAREER_OWNER_IDS:
+        await market_notify(bot, oid, text)
+
+
+async def market_on_payment(bot, user_id, sp):
+    """successful_payment (mk:...). Idempotent: charge_id UNIQUE; yopilgan buyurtmaga 2-to'lov → avtomatik qaytariladi."""
+    charge = sp.telegram_payment_charge_id
+    parts = str(sp.invoice_payload).split(":")
+    try:
+        oid, uid, stars = int(parts[1]), int(parts[2]), int(parts[3])
+    except (IndexError, ValueError):
+        oid = uid = stars = None
+    c = db()
+    if c.execute("SELECT 1 FROM market_orders WHERE charge_id=?", (charge,)).fetchone():
+        return "duplicate"                    # takroriy update — bir marta
+    o = market_order(oid) if oid else None
+    ok = (o and uid == user_id == o["user_id"] and stars == o["price_stars"] == sp.total_amount and sp.currency == "XTR"
+          and o["pay_method"] == "stars")
+    upd = 0
+    if ok:
+        with c:
+            upd = c.execute("UPDATE market_orders SET status='paid', charge_id=?, updated_at=? WHERE id=? AND status='pending'",
+                            (charge, int(time.time()), oid)).rowcount
+            if upd and o["kind"] == "nft":
+                if not c.execute("UPDATE market_nft SET sold=1 WHERE id=? AND sold=0", (int(o["item"]),)).rowcount:
+                    c.execute("UPDATE market_orders SET note='nft_sold' WHERE id=?", (oid,))
+    if not upd:
+        # mos kelmadi yoki buyurtma allaqachon to'langan (invoys havolasi qayta to'langan) → pulni qaytaramiz
+        try:
+            await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge)
+            await market_notify(bot, user_id, f"↩️ Empire Market: {sp.total_amount}⭐ qaytarildi (buyurtma yopilgan yoki mos emas).")
+            return "refunded_extra"
+        except TelegramError as e:
+            logger.warning("Market: ortiqcha to'lov qaytarilmadi: %s", e)
+            await market_notify_owners(bot, f"⚠️ Market: mos kelmagan to‘lov qaytarilmadi — {person_name(user_id)} · "
+                                            f"{sp.total_amount}⭐ · <code>{escape(charge)}</code>")
+            return "unmatched"
+    if market_order(oid)["note"] == "nft_sold":
+        await market_refund(bot, oid, "NFT allaqachon sotilgan")
+        return "refunded"
+    return await market_fulfil(bot, oid)
+
+
+async def market_refund(bot, oid, reason=""):
+    """⭐ → refundStarPayment, 🪙 → EMP qaytadi. status: refunded (yoki failed — qaytarib bo'lmadi)."""
+    o = market_order(oid)
+    if not o or o["status"] not in ("paid", "failed"):
+        return False
+    c = db()
+    if o["pay_method"] == "emp":
+        with c:
+            if not c.execute("UPDATE market_orders SET status='refunded', note=?, updated_at=? WHERE id=? AND status IN ('paid','failed')",
+                             (reason[:200], int(time.time()), oid)).rowcount:
+                return False
+            emp_change(c, o["user_id"], o["emp_amount"])
+        done = True
+    else:
+        try:
+            if bot is None:
+                raise TelegramError("bot yo'q")
+            await bot.refund_star_payment(user_id=o["user_id"], telegram_payment_charge_id=o["charge_id"])
+            done = True
+        except TelegramError as e:
+            logger.warning("Market: #%s qaytarilmadi: %s", oid, e)
+            done = False
+        with c:
+            c.execute("UPDATE market_orders SET status=?, note=?, updated_at=? WHERE id=?",
+                      ("refunded" if done else "failed", (reason if done else f"{reason} · refund xato")[:200], int(time.time()), oid))
+    if done and o["kind"] == "nft" and o["note"] != "nft_sold":
+        with c:
+            c.execute("UPDATE market_nft SET sold=0 WHERE id=?", (int(o["item"]),))
+    if done:
+        amt = f"{fmt_money(o['emp_amount'])} EMP 🪙" if o["pay_method"] == "emp" else f"{o['price_stars']}⭐"
+        await market_notify(bot, o["user_id"], f"↩️ <b>Empire Market</b> #{oid}: {escape(o['title'])}\n"
+                                               f"{escape(reason) + chr(10) if reason else ''}{amt} qaytarildi.")
+    else:
+        await market_notify_owners(bot, f"⚠️ Market #{oid}: qaytarib bo‘lmadi — {person_name(o['user_id'])} · "
+                                        f"{o['price_stars']}⭐ ({escape(reason)}). Qo‘lda hal qiling.")
+    return done
+
+
+async def market_fulfil(bot, oid):
+    """To'langan buyurtma: avtomatik — darhol yetkazish; qo'lda — navbat + ownerlarga xabar."""
+    o = market_order(oid)
+    if not o or o["status"] != "paid" or bot is None:
+        return "skip"            # bot yo'q bo'lsa — buyurtma "paid" holatida owner navbatida qoladi
+    c = db()
+    if o["kind"] in MARKET_AUTO:
+        try:
+            if o["kind"] == "premium":
+                ok = await bot.gift_premium_subscription(user_id=o["target_id"], month_count=int(o["item"]),
+                                                         star_count=o["cost_stars"], text=o["msg"] or None)
+            else:
+                ok = await bot.send_gift(gift_id=o["item"], user_id=o["target_id"], text=o["msg"] or None)
+            err = None if ok else "Telegram rad etdi"
+        except TelegramError as e:
+            err = str(e)[:160]
+        _MARKET_BAL["at"] = 0.0           # balans o'zgardi
+        if err:
+            logger.warning("Market: #%s yetkazilmadi: %s", oid, err)
+            await market_refund(bot, oid, "Yetkazib bo‘lmadi: " + err)
+            return "refunded"
+        with c:
+            c.execute("UPDATE market_orders SET status='delivered', updated_at=? WHERE id=?", (int(time.time()), oid))
+        await market_notify(bot, o["user_id"], f"✅ <b>Empire Market</b> #{oid}: {escape(o['title'])} yetkazildi"
+                                               + ("" if o["target_id"] == o["user_id"] else f" → {person_name(o['target_id'])}") + ".")
+        if o["target_id"] != o["user_id"]:
+            await market_notify(bot, o["target_id"], f"🎁 {person_name(o['user_id'])} sizga Empire Market orqali "
+                                                     f"<b>{escape(o['title'])}</b> sovg‘a qildi!")
+        return "delivered"
+    await market_notify(bot, o["user_id"], f"🧾 <b>Empire Market</b> #{oid}: {escape(o['title'])} to‘landi.\n"
+                                           "⏳ Ownerlar qo‘lda yetkazadi (odatda 24 soat ichida) — holati web app'da.")
+    un = db().execute("SELECT username FROM users WHERE user_id=?", (o["target_id"],)).fetchone()
+    await market_notify_owners(bot, f"🏪 <b>Yangi Market buyurtmasi</b> #{oid}\n{escape(o['title'])} · "
+                                    f"{o['price_stars'] if o['pay_method'] == 'stars' else fmt_money(o['emp_amount'])}"
+                                    f"{'⭐' if o['pay_method'] == 'stars' else ' EMP'}\n"
+                                    f"Xaridor: {person_name(o['user_id'])}\nQabul qiluvchi: {person_name(o['target_id'])}"
+                                    f"{' (@' + escape(un[0]) + ')' if un and un[0] else ''} · <code>{o['target_id']}</code>\n"
+                                    "Fragment orqali yetkazing → web app Owner → 🏪 Market → ✅ Yetkazildi.")
+    return "queued"
+
+
+async def web_market(uid, act, body):
+    if act == "catalog":
+        return await market_catalog(uid)
+    if act == "order":
+        return await web_market_order(uid, body)
+    if act == "state":
+        try:
+            o = market_order(int(body.get("id")))
+        except (TypeError, ValueError):
+            o = None
+        if not o or (o["user_id"] != uid and uid not in CAREER_OWNER_IDS):
+            return {"error": "order"}
+        return {"result": "ok", "order": market_order_json(o)}
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner"}
+    bot = _EXCHANGE_LOOP_BOT
+    c = db()
+    if act == "config":
+        cfg = market_cfg()
+        try:
+            if body.get("markup") is not None:
+                cfg["markup"] = max(0.0, min(500.0, float(body.get("markup"))))
+            if body.get("emp_per_star") is not None:
+                cfg["emp_per_star"] = max(0.0, min(10000.0, float(body.get("emp_per_star"))))
+        except (TypeError, ValueError):
+            return {"error": "values"}
+        for k in MARKET_KINDS:
+            if body.get(k) is not None:
+                cfg[k] = 1 if body.get(k) else 0
+        with c:
+            c.executemany("INSERT INTO market_config(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                          list(cfg.items()))
+    elif act in ("nft_add", "nft_update"):
+        title = str(body.get("title") or "").strip()[:60]
+        note = str(body.get("note") or "").strip()[:300]
+        try:
+            price = int(body.get("price"))
+        except (TypeError, ValueError):
+            price = 0
+        if len(title) < 2 or not 1 <= price <= MARKET_MAX_STARS:
+            return {"error": "values"}
+        img = None
+        if body.get("img_data"):
+            img = _chat_save_image(body.get("img_data"), NEWS_MEDIA_DIR, 800)
+            if not img:
+                return {"error": "image"}
+        elif body.get("img_url") is not None:
+            u = str(body.get("img_url") or "").strip()[:500]
+            if u and not re.fullmatch(r"https://[^\s\"'<>]+", u):
+                return {"error": "image"}
+            img = u
+        with c:
+            if act == "nft_add":
+                c.execute("INSERT INTO market_nft(title, img, price_stars, note, created_at) VALUES (?,?,?,?,?)",
+                          (title, img or "", price, note, int(time.time())))
+            else:
+                nid = int(body.get("id") or 0)
+                if not market_nft_get(nid):
+                    return {"error": "nft"}
+                c.execute("UPDATE market_nft SET title=?, price_stars=?, note=?" + (", img=?" if img is not None else "")
+                          + " WHERE id=?", (title, price, note) + ((img,) if img is not None else ()) + (nid,))
+    elif act in ("nft_toggle", "nft_delete"):
+        try:
+            nid = int(body.get("id"))
+        except (TypeError, ValueError):
+            nid = 0
+        if not market_nft_get(nid):
+            return {"error": "nft"}
+        with c:
+            if act == "nft_toggle":
+                c.execute("UPDATE market_nft SET active=1-active WHERE id=?", (nid,))
+            else:
+                c.execute("DELETE FROM market_nft WHERE id=?", (nid,))
+    elif act in ("deliver", "refund"):
+        try:
+            o = market_order(int(body.get("id")))
+        except (TypeError, ValueError):
+            o = None
+        if not o or o["status"] not in ("paid", "failed"):
+            return {"error": "order"}
+        if act == "deliver":
+            with c:
+                c.execute("UPDATE market_orders SET status='delivered', note=?, updated_at=? WHERE id=? AND status IN ('paid','failed')",
+                          (str(body.get("note") or "")[:200], int(time.time()), o["id"]))
+            await market_notify(bot, o["user_id"], f"✅ <b>Empire Market</b> #{o['id']}: {escape(o['title'])} yetkazildi"
+                                                   + ("" if o["target_id"] == o["user_id"] else f" → {person_name(o['target_id'])}") + ".")
+        elif not await market_refund(bot, o["id"], str(body.get("note") or "Owner tomonidan bekor qilindi")[:200]):
+            return {"error": "refund"}
+    elif act == "balance":
+        await market_star_balance(force=True)
+    else:
+        return {"error": "act"}
+    return {"result": "ok", "market": market_payload(uid)}
+# ── 🏪 /EMPIRE MARKET ──
 
 
 # ── 👛 O'tkazmalar: $ va 🪙 EMP — web (ID/@username), guruhda /pul va /coin (reply), ownerlar /coins ──
@@ -19806,7 +20391,7 @@ async def web_avatar_save(uid, data):
 
 
 def webapp_flags():
-    d = {"all": 1, "owner": 1, "emp": 1, "kami": 1, "vip": 1, "voice": 1, "media": 0}   # 🧍 avatar, 🎬 media — test (0)
+    d = {"all": 1, "owner": 1, "emp": 1, "kami": 1, "vip": 1, "voice": 1, "media": 0, "market": 0}   # 🧍 avatar, 🎬 media, 🏪 market — test (0)
     for k, v in db().execute("SELECT key, value FROM webapp_config"):
         d[k] = v
     return d
@@ -20594,7 +21179,7 @@ async def web_news_admin(uid, act, body):
 
 
 # ⚙️ Owner panel (web): xususiyatlarni hamma uchun ochish/yopish — bot panelidagi bilan bir xil flaglar
-OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip", "voice", "media")
+OWNER_FLAG_KEYS = ("all", "emp", "kami", "avatar", "vip", "voice", "media", "market")
 
 
 def owner_flags_payload():
@@ -20794,6 +21379,7 @@ async def webapp_payload(user_id):
         "voice_test": not webapp_flags().get("voice", 0),
         "media": media_enabled_for(user_id),
         "media_test": not webapp_flags().get("media", 0),
+        "market": market_payload(user_id),
         "kid_premium": [{"key": k, "min": v[0], "max": v[1], "price": v[2], "happy": v[3], "name": v[4], "desc": v[5]}
                         for k, v in KID_PREMIUM.items()],
         "edu_all": edu_list(False) if is_owner else [],
@@ -23338,6 +23924,58 @@ WEBAPP_HTML = r"""<!doctype html>
   .vcbar .btn{flex:1}
   .vcbar #vcMic.off{background:#3a1f1f;color:#ffb4b4}
   .vcbar .vcleave{background:linear-gradient(180deg,#e0484d,#a11c22);color:#fff}
+  /* ───── 🏪 EMPIRE MARKET (Fragment uslubi: to'q ko'k, toza kartalar) ───── */
+  .gcc.mkt{background:linear-gradient(135deg,rgba(46,166,255,.22),rgba(0,0,0,.4));box-shadow:inset 0 0 0 1.5px rgba(90,180,255,.55),0 10px 24px rgba(0,0,0,.45)}
+  #s-market{--mk-bg:#0f1b2a;--mk-card:#15263a;--mk-line:rgba(120,180,255,.16);--mk-blue:#2ea6ff;--mk-dim:#8aa4c2}
+  #s-market h2{font-family:inherit}
+  .mkhead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:-2px 0 12px}
+  .mkhead .hsub{color:var(--mk-dim)}
+  .mktabs{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;margin-bottom:10px;scrollbar-width:none}
+  .mktabs::-webkit-scrollbar{display:none}
+  .mktabs span{flex:none;padding:8px 13px;border-radius:12px;font-size:13px;font-weight:800;background:var(--mk-card);color:#cfe3ff;
+    box-shadow:inset 0 0 0 1px var(--mk-line);cursor:pointer;white-space:nowrap}
+  .mktabs span.on{background:var(--mk-blue);color:#fff;box-shadow:0 4px 14px rgba(46,166,255,.35)}
+  .mkgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+  .mkc{position:relative;background:linear-gradient(180deg,#182b42,#111f31);border-radius:16px;padding:14px 12px;text-align:center;cursor:pointer;
+    box-shadow:inset 0 0 0 1px var(--mk-line),0 6px 18px rgba(0,0,0,.35);transition:transform .12s}
+  .mkc:active{transform:scale(.97)}
+  .mkc.off{opacity:.45;cursor:default}
+  .mkc .mkv{font-size:40px;line-height:56px;height:56px;display:flex;align-items:center;justify-content:center}
+  .mkc .mkv img,.mkc .mkv video,.mkc .mkv .lot{width:56px;height:56px;object-fit:contain}
+  .mkc b{display:block;font-size:14px;margin-top:6px;color:#eaf4ff}
+  .mkc .mkp{display:inline-flex;align-items:center;gap:4px;margin-top:8px;padding:5px 11px;border-radius:999px;background:rgba(46,166,255,.16);
+    color:#7cc8ff;font-weight:900;font-size:13px}
+  .mkc .mkl{position:absolute;top:8px;right:8px;font-size:10px;font-weight:800;color:var(--mk-dim)}
+  .mkc .mkna{display:block;font-size:11px;color:#ffb37a;margin-top:6px}
+  .mkprem{display:flex;flex-direction:column;gap:10px}
+  .mkprem .mkc{display:flex;align-items:center;gap:12px;text-align:left;padding:14px}
+  .mkprem .mkc .mkv{font-size:30px;width:52px;height:52px;line-height:52px;border-radius:14px;background:linear-gradient(135deg,#6a5cff,#2ea6ff);flex:none}
+  .mkprem .mkc .mkp{margin:0 0 0 auto}
+  .mknft img.mki{width:100%;aspect-ratio:1;object-fit:cover;border-radius:12px;background:#0b1522}
+  .mknft .mkno{font-size:11px;color:var(--mk-dim);margin-top:4px;max-height:30px;overflow:hidden}
+  .mkord{display:flex;align-items:center;gap:10px;padding:12px;border-radius:14px;background:var(--mk-card);box-shadow:inset 0 0 0 1px var(--mk-line);margin-bottom:8px}
+  .mkord .mkoi{flex:1;min-width:0}
+  .mkord .mkoi b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mkord .mkoi small{color:var(--mk-dim);font-size:11px}
+  .mkst{flex:none;font-size:11px;font-weight:800;padding:4px 9px;border-radius:999px;background:rgba(255,255,255,.08)}
+  .mkst.delivered{background:rgba(70,210,120,.18);color:#7dffae}.mkst.refunded,.mkst.failed{background:rgba(255,120,90,.16);color:#ffb39a}
+  .mkst.paid{background:rgba(46,166,255,.18);color:#8fd0ff}
+  .mknote{font-size:12px;color:var(--mk-dim);margin-top:12px;text-align:center}
+  .mksheet .sheet{background:linear-gradient(180deg,#152536,#0d1826)!important;border-color:rgba(90,170,255,.35)!important}
+  .mksheet .mkbv{text-align:center;font-size:54px;line-height:80px;height:80px;display:flex;justify-content:center;align-items:center}
+  .mksheet .mkbv img,.mksheet .mkbv .lot,.mksheet .mkbv video{width:80px;height:80px;object-fit:contain}
+  .mksheet input{width:100%;box-sizing:border-box;padding:11px 14px;border-radius:12px;border:0;outline:0;background:#0b1522;color:#eaf4ff;font-size:14px;
+    box-shadow:inset 0 0 0 1px rgba(120,180,255,.2);margin-top:8px}
+  .mksheet .mkpay{display:flex;flex-direction:column;gap:8px;margin-top:14px}
+  .mksheet .mkpay .btn{background:var(--mk-blue,#2ea6ff);color:#fff}
+  .mksheet .mkpay .btn.emp{background:linear-gradient(180deg,#f3c75a,#b8862a);color:#2b1b02}
+  .mkadm .mkrow{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+  .mkadm .mkrow input{flex:1;min-width:80px;padding:9px 11px;border-radius:10px;border:0;background:var(--card);color:var(--txt);box-shadow:inset 0 0 0 1px var(--line)}
+  .mkadm .mkq{padding:10px;border-radius:12px;background:rgba(255,255,255,.04);box-shadow:inset 0 0 0 1px var(--line);margin-top:8px;font-size:13px}
+  .mkadm .mkq .chbtns{margin-top:8px}
+  .mkadm .mkn{display:flex;gap:8px;align-items:center;margin-top:8px}
+  .mkadm .mkn img{width:42px;height:42px;border-radius:8px;object-fit:cover;background:#111}
+  .mkadm .mkn.off{opacity:.5}
   /* ───── 🎬 Media (YouTube) ───── */
   .gcc.media{background:linear-gradient(135deg,rgba(255,60,60,.2),rgba(0,0,0,.35));box-shadow:inset 0 0 0 1.5px rgba(255,120,120,.5),0 10px 24px rgba(0,0,0,.45)}
   .mdq{display:flex;gap:8px;margin-bottom:10px}
@@ -23828,6 +24466,7 @@ function render(res){
   app.appendChild(gamesPage(d));
   if((d.vip||{}).open) app.appendChild(vipPage(d));
   if(d.media) app.appendChild(mediaPage(d));
+  if(d.market) app.appendChild(marketPage(d));
 
   // KAZINO — o'yinlar lobbisi
   const cz=$('<div class="sec" id="s-casino"></div>');
@@ -23915,7 +24554,7 @@ function render(res){
   if(d.is_owner && d.owner){
     const o=$('<div class="sec" id="s-owner"></div>');
     o.appendChild($('<h2>👑 Owner panel</h2>'));
-    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['vip','👑','VIP'],['test','🧪','Testerlar'],['judge','⚖️','Ajrimchilar'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
+    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['vip','👑','VIP'],['test','🧪','Testerlar'],['judge','⚖️','Ajrimchilar'],['market','🏪','Market'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
     const oseg=$('<div class="oseg">'+OG.map(([k,i,l])=>'<span data-g="'+k+'"><i>'+i+'</i>'+l+'</span>').join('')+'</div>');
     o.appendChild(oseg);
     const G={}; OG.forEach(([k])=>{ G[k]=$('<div class="ogrp" data-g="'+k+'"></div>'); o.appendChild(G[k]); });
@@ -23958,6 +24597,7 @@ function render(res){
     G.vip.appendChild(vipAdmin(d));
     G.test.appendChild(testerAdmin(d));
     G.judge.appendChild(judgeAdmin(d));
+    G.market.appendChild(marketAdmin(d));
     G.set.appendChild(ownerFlags(d));
     G.set.appendChild(amnestyCard(d));
     if(d.emp&&d.emp.admin){ // 🪙 EMP paketlari — narxlarni ownerlar boshqaradi
@@ -25325,6 +25965,8 @@ function gamesPage(d){
       '<span class="glk">'+(v.test?'🧪 TEST':v.vip?'✅ VIP':'🔒 VIP')+'</span></div>':'')+
     (d.media?'<div class="gcc media" data-go="media" data-tap="1"><div class="gci">🎬</div><div><b>MEDIA</b><div class="hsub">YouTube: musiqa · kino · multfilm · trend — ovozli xonada birga ko‘rish</div></div>'+
       (d.media_test?'<span class="glk">🧪 TEST</span>':'')+'</div>':'')+
+    (d.market?'<div class="gcc mkt" data-go="market" data-tap="1"><div class="gci">🏪</div><div><b>EMPIRE MARKET</b><div class="hsub">⭐ Telegram Premium · 🎁 Gifts · 🌟 Stars · 💎 NFT — Stars bilan</div></div>'+
+      (d.market.test?'<span class="glk">🧪 TEST</span>':'')+'</div>':'')+
   '</div><div class="gnote">🎮 Kategoriya tanlang</div>';
   sec.querySelectorAll('.gcc').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
   return sec;
@@ -25767,7 +26409,7 @@ function amnestyCard(d){
   draw(d.amnesty); return box;
 }
 function ownerFlags(d){
-  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun'],['voice','🎙','Ovozli xona — hamma uchun'],['media','🎬','Media (YouTube) — hamma uchun']];
+  const F=[['all','🌐','Web app — hamma uchun'],['emp','🪙','EMP Coin — hamma uchun'],['kami','🛩','Kamikaze — hamma uchun'],['avatar','🧍','3D avatar — hamma uchun'],['vip','👑','VIP o‘yinlar — hamma uchun'],['voice','🎙','Ovozli xona — hamma uchun'],['media','🎬','Media (YouTube) — hamma uchun'],['market','🏪','Market — hamma uchun']];
   const box=$('<div class="card full"></div>');
   const draw=f=>{ box.innerHTML='<div class="lbl">⚙️ Xususiyatlar</div>'+F.map(([k,i,l])=>'<div class="oflag" data-k="'+k+'"><span>'+i+' '+l+'</span>'+
       '<span class="otg'+(f[k]?' on':'')+'"><i></i></span></div>').join('')+
@@ -26572,14 +27214,163 @@ function kidErr(e,wait){
   if(e==='funds') return '💸 Pul yetarli emas';
   return errText(e);
 }
+// ---- 🏪 EMPIRE MARKET: Telegram Premium / Gifts (avtomatik) · Stars / NFT (qo'lda) — ⭐ Stars yoki 🪙 EMP ----
+const MKST={pending:'⏳ To‘lov kutilmoqda',paid:'🧾 Navbatda',delivered:'✅ Yetkazildi',refunded:'↩️ Qaytarildi',failed:'⚠️ Muammo',expired:'⌛ Eskirgan',cancelled:'✖ Bekor'};
+const MKERR={disabled:'🏪 Market hozircha yopiq',kind:'🏪 Bu bo‘lim yopiq',not_found:'🔎 Qabul qiluvchi topilmadi (u botni ishlatgan bo‘lishi kerak)',
+  item:'⚠️ Mahsulot mavjud emas',unavailable:'⏳ Vaqtincha mavjud emas — keyinroq urinib ko‘ring',too_many:'⚠️ To‘lanmagan buyurtmalar ko‘p — birozdan keyin',
+  emp_off:'🪙 EMP bilan to‘lash yopiq',emp_funds:'💸 EMP yetarli emas',invoice:'⚠️ Invoys yaratilmadi',bot:'⚠️ Bot band',values:'⚠️ Qiymatlar noto‘g‘ri',
+  image:'⚠️ Rasm noto‘g‘ri (fayl yoki https havola)',order:'⚠️ Buyurtma topilmadi',refund:'⚠️ Qaytarib bo‘lmadi',owner:'👑 Faqat ownerlar'};
+const MARKET=(()=>{
+  let tab='premium', loading=false;
+  const D=()=>window.DD||{}, M=()=>D().market||{};
+  const star=n=>'⭐ '+fmtMoney(n);
+  function setM(m){ if(m&&window.DD){ window.DD.market=m; } }
+  function body(){ return document.getElementById('mkBody'); }
+  function show(){ draw(); if(loading) return; loading=true;
+    api('/app/api/market/catalog',{}).then(r=>{ loading=false; if(r.market){ setM(r.market); draw(); if(window.MKADM) window.MKADM(); } }).catch(()=>{ loading=false; }); }
+  function tabs(){ const m=M(), on=m.on||{};
+    const T=[['premium','⭐ Premium',on.premium],['gifts','🎁 Gifts',on.gift],['stars','🌟 Stars',on.stars],['nft','💎 NFT',on.nft],['orders','🧾 Buyurtmalarim',1]].filter(x=>x[2]);
+    if(!T.some(x=>x[0]===tab)) tab=T[0][0];
+    const el=document.getElementById('mkTabs'); if(!el) return;
+    el.innerHTML=T.map(([k,l])=>'<span data-k="'+k+'" class="'+(k===tab?'on':'')+'">'+l+'</span>').join('');
+    el.querySelectorAll('span').forEach(s=>s.onclick=()=>{ tab=s.dataset.k; draw(); }); }
+  function draw(){ const b=body(); if(!b) return; const m=M(); tabs(); let h='';
+    const na='<span class="mkna">Vaqtincha mavjud emas</span>';
+    if(tab==='premium'){
+      h='<div class="mkprem">'+(m.premium||[]).map(p=>'<div class="mkc'+(p.ok?'':' off')+'" data-k="premium" data-i="'+p.m+'"><div class="mkv">⭐</div>'+
+        '<div><b>Telegram Premium</b><small class="hsub">'+p.m+' oy · darhol, avtomatik</small>'+(p.ok?'':na)+'</div><span class="mkp">'+star(p.price)+'</span></div>').join('')+'</div>'+
+        '<div class="mknote">Premium qabul qiluvchining Telegram hisobiga darhol faollashadi. O‘zingizga yoki do‘stingizga.</div>';
+    } else if(tab==='gifts'){
+      const g=m.gifts||[];
+      h=g.length?'<div class="mkgrid">'+g.map(x=>'<div class="mkc'+(x.ok?'':' off')+'" data-k="gift" data-i="'+esc(x.id)+'">'+
+          (x.total?'<span class="mkl">'+fmtMoney(x.left||0)+' / '+fmtMoney(x.total)+'</span>':'')+
+          '<div class="mkv">'+(x.thumb?tgStickerHtml(x.thumb,''):esc(x.emoji))+'</div><span class="mkp">'+star(x.price)+'</span>'+(x.ok?'':na)+'</div>').join('')+'</div>'
+        :'<div class="mknote">'+(m.gifts_loaded===false&&loading?'⏳ Yuklanmoqda…':'🎁 Hozircha sovg‘alar yo‘q')+'</div>';
+      h+='<div class="mknote">Telegram sovg‘alari qabul qiluvchi profiliga darhol yuboriladi.</div>';
+    } else if(tab==='stars'){
+      h='<div class="mkgrid">'+(m.stars||[]).map(x=>'<div class="mkc" data-k="stars" data-i="'+x.n+'"><div class="mkv">🌟</div><b>'+fmtMoney(x.n)+' Stars</b>'+
+        '<span class="mkp">'+star(x.price)+'</span></div>').join('')+'</div><div class="mknote">🌟 Stars Fragment orqali qo‘lda yetkaziladi (odatda 24 soat ichida). Yetkazilmasa — to‘liq qaytariladi.</div>';
+    } else if(tab==='nft'){
+      const n=m.nft||[];
+      h=n.length?'<div class="mkgrid mknft">'+n.map(x=>'<div class="mkc" data-k="nft" data-i="'+x.id+'">'+(x.img?'<img class="mki" loading="lazy" alt="" src="'+esc(x.img)+'">':'<div class="mkv">💎</div>')+
+          '<b>'+esc(x.title)+'</b>'+(x.note?'<div class="mkno">'+esc(x.note)+'</div>':'')+'<span class="mkp">'+star(x.price)+'</span></div>').join('')+'</div>'
+        :'<div class="mknote">💎 Hozircha NFT sovg‘alar yo‘q — tez orada!</div>';
+      h+='<div class="mknote">NFT (unikal) sovg‘alar Fragment orqali qo‘lda o‘tkaziladi.</div>';
+    } else {
+      const o=m.orders||[];
+      h=o.length?o.map(x=>'<div class="mkord"><div class="mkoi"><b>#'+x.id+' · '+esc(x.title)+'</b><small>'+esc(x.at)+(x.self?'':' · → '+esc(x.to))+' · '+
+          (x.pay==='emp'?fmtMoney(x.emp)+' EMP':star(x.price))+(x.note&&x.status==='refunded'?' · '+esc(x.note):'')+'</small></div>'+
+          '<span class="mkst '+x.status+'">'+(MKST[x.status]||x.status)+'</span></div>').join('')
+        :'<div class="mknote">🧾 Hali buyurtmalar yo‘q</div>';
+    }
+    b.innerHTML=h; tgLottieIn(b);
+    b.querySelectorAll('.mkc:not(.off)').forEach(c=>c.onclick=()=>buy(c.dataset.k,c.dataset.i));
+  }
+  function find(k,i){ const m=M();
+    if(k==='premium'){ const p=(m.premium||[]).find(x=>String(x.m)===i); return p&&{title:'Telegram Premium · '+p.m+' oy',price:p.price,emp:p.emp,vis:'⭐',msg:1}; }
+    if(k==='gift'){ const g=(m.gifts||[]).find(x=>x.id===i); return g&&{title:'Telegram sovg‘asi '+g.emoji,price:g.price,emp:g.emp,vis:g.anim&&g.anim.f!=='webm'?tgStickerHtml(g.anim,''):esc(g.emoji),msg:1}; }
+    if(k==='stars'){ const s=(m.stars||[]).find(x=>String(x.n)===i); return s&&{title:fmtMoney(s.n)+' Stars',price:s.price,emp:s.emp,vis:'🌟'}; }
+    const n=(m.nft||[]).find(x=>String(x.id)===i); return n&&{title:n.title,price:n.price,emp:n.emp,vis:n.img?'<img alt="" src="'+esc(n.img)+'" style="border-radius:12px;object-fit:cover">':'💎'}; }
+  function buy(k,i){ const it=find(k,i); if(!it) return; const m=M();
+    let ov=document.getElementById('mkov'); if(!ov){ ov=document.createElement('div'); ov.id='mkov'; ov.className='ov mksheet'; document.body.appendChild(ov); }
+    ov.innerHTML='<div class="sheet"><div class="mkbv">'+it.vis+'</div><div style="font-weight:900;font-size:17px;text-align:center">'+esc(it.title)+'</div>'+
+      '<div class="hsub" style="text-align:center;margin-top:2px">'+star(it.price)+(m.emp_pay&&it.emp?' · yoki '+fmtMoney(it.emp)+' EMP':'')+'</div>'+
+      '<input id="mkTo" maxlength="40" placeholder="Kimga: bo‘sh — o‘zimga · yoki ID / @username">'+
+      (it.msg?'<input id="mkMsg" maxlength="120" placeholder="Xabar (ixtiyoriy)">':'')+
+      '<div class="mkpay"><button class="btn full" id="mkPS">⭐ '+fmtMoney(it.price)+' Stars bilan to‘lash</button>'+
+      (m.emp_pay&&it.emp?'<button class="btn full emp" id="mkPE">🪙 '+fmtMoney(it.emp)+' EMP bilan to‘lash <small>(balans '+fmtMoney(m.emp_balance||0)+')</small></button>':'')+
+      '<button class="btn full" id="mkX" style="background:#1c2a3c;color:#cfe3ff">Yopish</button></div></div>';
+    ov.className='ov mksheet show'; tgLottieIn(ov);
+    const close=()=>{ ov.className='ov mksheet'; };
+    ov.onclick=e=>{ if(e.target===ov) close(); }; ov.querySelector('#mkX').onclick=close;
+    const go=(pay,btn)=>{ btn.disabled=true;
+      const req={kind:k,item:i,to:ov.querySelector('#mkTo').value.trim(),text:(ov.querySelector('#mkMsg')||{}).value||'',pay:pay};
+      api('/app/api/market/order',req).then(r=>{ btn.disabled=false;
+        if(r.market) setM(r.market);
+        if(r.result==='paid'){ close(); done(r.order); return; }
+        if(r.result!=='ok'){ toast(MKERR[r.error]||'⚠️ Xatolik'); return; }
+        close(); const id=r.order.id;
+        if(tg&&tg.openInvoice){ tg.openInvoice(r.link,st=>{ if(st==='paid'){ toast('⏳ To‘lov tasdiqlanmoqda…'); poll(id,16); } else if(st==='failed') toast('❌ To‘lov amalga oshmadi'); }); }
+        else if(tg&&tg.openTelegramLink){ tg.openTelegramLink(r.link); setTimeout(()=>poll(id,30),4000); }
+        else window.open(r.link,'_blank');
+      }).catch(()=>{ btn.disabled=false; toast('⚠️ Aloqa xatosi'); }); };
+    ov.querySelector('#mkPS').onclick=e=>go('stars',e.currentTarget);
+    const pe=ov.querySelector('#mkPE'); if(pe) pe.onclick=e=>go('emp',e.currentTarget);
+  }
+  function done(o){ if(!o) return;
+    if(o.status==='delivered'){ toast('🎉 Yetkazildi: '+o.title); haptic('success'); }
+    else if(o.status==='paid'){ toast('✅ To‘landi — ownerlar tez orada yetkazadi'); haptic('success'); }
+    else if(o.status==='refunded') toast('↩️ Yetkazib bo‘lmadi — to‘lov qaytarildi');
+    else if(o.status==='failed') toast('⚠️ Muammo — ownerlar hal qiladi');
+    tab='orders'; show(); }
+  function poll(id,n){ api('/app/api/market/state',{id:id}).then(r=>{ const o=r.order;
+      if(o&&o.status!=='pending'&&!(o.status==='paid'&&n>8&&/^(premium|gift)$/.test(o.kind))) done(o);
+      else if(n>0) setTimeout(()=>poll(id,n-1),1500); else { tab='orders'; show(); } }).catch(()=>{ if(n>0) setTimeout(()=>poll(id,n-1),2000); }); }
+  return {show, draw};
+})();
+function marketPage(d){
+  const sec=$('<div class="sec" id="s-market"></div>'), m=d.market||{};
+  sec.innerHTML='<div class="gback" data-back="games">‹ Games</div><h2>🏪 EMPIRE MARKET'+(m.test?' <span class="avtest">TEST</span>':'')+'</h2>'+
+    '<div class="mkhead"><div class="hsub">Telegram Premium, sovg‘alar, Stars va NFT — ⭐ Telegram Stars bilan xavfsiz to‘lov</div></div>'+
+    '<div class="mktabs" id="mkTabs"></div><div id="mkBody"></div>';
+  return sec;
+}
+function marketAdmin(d){
+  const box=$('<div class="card full mkadm"></div>');
+  const save=p=>api('/app/api/market/'+p.act,p).then(r=>{ if(r.market){ d.market=r.market; if(window.DD) window.DD.market=r.market; draw(); MARKET.draw(); toast('✅ Saqlandi'); }
+    else toast(MKERR[r.error]||'⚠️ Xatolik'); }).catch(()=>toast('⚠️ Aloqa xatosi'));
+  function draw(){ const m=d.market||{}, A=m.admin; if(!A){ box.innerHTML='<div class="hsub">🏪 Market ma’lumoti yo‘q</div>'; return; }
+    const c=A.cfg, K=[['premium','⭐ Premium (avto)'],['gift','🎁 Gifts (avto)'],['stars','🌟 Stars (qo‘lda)'],['nft','💎 NFT (qo‘lda)']];
+    const q=o=>'<div class="mkq"><b>#'+o.id+' · '+esc(o.title)+'</b> · '+(o.pay==='emp'?fmtMoney(o.emp)+' EMP':'⭐ '+fmtMoney(o.price))+
+      ' <span class="mkst '+o.status+'">'+(MKST[o.status]||o.status)+'</span><div class="hsub">Xaridor: '+esc(o.buyer)+' ('+o.buyer_id+') → '+esc(o.to)+
+      (o.target_un?' @'+esc(o.target_un):'')+' · <code>'+o.target_id+'</code> · '+esc(o.at)+(o.msg?'<br>✉️ '+esc(o.msg):'')+(o.note?'<br>📝 '+esc(o.note):'')+'</div>'+
+      (o.status==='paid'||o.status==='failed'?'<div class="chbtns"><button class="btn go" data-dl="'+o.id+'">✅ Yetkazildi</button><button class="btn" data-rf="'+o.id+'">↩️ Qaytarish</button></div>':'')+'</div>';
+    box.innerHTML='<div class="lbl">🏪 Empire Market</div>'+
+      '<div class="chips"><span class="chip">⭐ Bot balansi: '+(A.balance==null?'?':fmtMoney(A.balance))+'</span><span class="chip">✅ Yetkazilgan: '+A.stats.delivered+'</span>'+
+      '<span class="chip">💰 Tushum: ⭐ '+fmtMoney(A.stats.revenue)+'</span><span class="chip">📦 Tannarx: ⭐ '+fmtMoney(A.stats.cost)+'</span>'+
+      '<span class="chip" id="mkBal" style="cursor:pointer">🔄 Balans</span></div>'+
+      '<div class="mkrow"><label class="hsub">Ustama %</label><input id="mkMu" type="number" step="0.5" value="'+c.markup+'">'+
+      '<label class="hsub">1⭐ = EMP</label><input id="mkEr" type="number" step="0.01" value="'+c.emp_per_star+'"></div>'+
+      K.map(([k,l])=>'<div class="oflag" data-k="'+k+'"><span>'+l+'</span><span class="otg'+(c[k]?' on':'')+'"><i></i></span></div>').join('')+
+      '<button class="btn go full" id="mkCfg" style="margin-top:8px">💾 Sozlamalarni saqlash</button>'+
+      '<div class="hsub" style="margin-top:6px">Narx = Telegram narxi × (1 + ustama%). 1⭐ = EMP: 0 — EMP bilan to‘lash o‘chiq. Avto mahsulotlar bot ⭐ balansidan to‘lanadi.</div>'+
+      '<div class="lbl" style="margin-top:16px">🧾 Navbat (qo‘lda yetkazish) — '+A.queue.length+'</div>'+(A.queue.length?A.queue.map(q).join(''):'<div class="hsub">Navbat bo‘sh ✨</div>')+
+      '<div class="lbl" style="margin-top:16px">💎 NFT ro‘yxati</div>'+
+      '<div class="mkrow"><input id="mkNt" maxlength="60" placeholder="Nomi (masalan: Plush Pepe #123)"><input id="mkNp" type="number" placeholder="⭐ narx" style="max-width:110px"></div>'+
+      '<div class="mkrow"><input id="mkNn" maxlength="300" placeholder="Izoh (ixtiyoriy)"></div>'+
+      '<div class="mkrow"><input id="mkNu" maxlength="500" placeholder="Rasm havolasi (https://…) yoki fayl →"><input id="mkNf" type="file" accept="image/*" style="max-width:120px"></div>'+
+      '<button class="btn go full" id="mkNa" style="margin-top:8px">➕ NFT qo‘shish</button>'+
+      A.nft_all.map(n=>'<div class="mkn'+(n.active&&!n.sold?'':' off')+'" data-id="'+n.id+'">'+(n.img?'<img alt="" src="'+esc(n.img)+'">':'<span>💎</span>')+
+        '<input class="nt" value="'+esc(n.title)+'" maxlength="60" style="flex:1;min-width:0"><input class="np" type="number" value="'+n.price+'" style="width:80px">'+
+        (n.sold?'<span title="Sotilgan">🏷</span>':'')+'<span class="ns" title="Saqlash">💾</span><span class="ntg" title="Ko‘rsatish/yashirish">'+(n.active?'👁':'🚫')+'</span><span class="nd" title="O‘chirish">🗑</span></div>').join('')+
+      (A.recent.length?'<div class="lbl" style="margin-top:16px">📜 Oxirgilar</div>'+A.recent.map(q).join(''):'');
+    box.querySelector('#mkBal').onclick=()=>save({act:'balance'});
+    box.querySelectorAll('.oflag').forEach(r=>r.onclick=()=>{ r.querySelector('.otg').classList.toggle('on'); });
+    box.querySelector('#mkCfg').onclick=()=>{ const p={act:'config',markup:box.querySelector('#mkMu').value,emp_per_star:box.querySelector('#mkEr').value};
+      box.querySelectorAll('.oflag').forEach(r=>{ p[r.dataset.k]=r.querySelector('.otg').classList.contains('on')?1:0; }); save(p); };
+    box.querySelectorAll('[data-dl]').forEach(b=>b.onclick=()=>{ const note=prompt('Izoh (ixtiyoriy, masalan Fragment tranzaksiyasi):','')||''; save({act:'deliver',id:+b.dataset.dl,note:note}); });
+    box.querySelectorAll('[data-rf]').forEach(b=>b.onclick=()=>{ if(confirm('Buyurtma #'+b.dataset.rf+' bekor qilinib, to‘lov qaytarilsinmi?')) save({act:'refund',id:+b.dataset.rf}); });
+    box.querySelector('#mkNa').onclick=()=>{ const f=box.querySelector('#mkNf').files[0];
+      const p={act:'nft_add',title:box.querySelector('#mkNt').value,price:box.querySelector('#mkNp').value,note:box.querySelector('#mkNn').value,img_url:box.querySelector('#mkNu').value};
+      if(f) chatShrink(f).then(u=>{ p.img_data=u; delete p.img_url; save(p); }).catch(()=>toast(MKERR.image)); else save(p); };
+    box.querySelectorAll('.mkn').forEach(r=>{ const id=+r.dataset.id;
+      r.querySelector('.ns').onclick=()=>{ const n=(d.market.admin.nft_all||[]).find(x=>x.id===id)||{};
+        save({act:'nft_update',id:id,title:r.querySelector('.nt').value,price:r.querySelector('.np').value,note:n.note||''}); };
+      r.querySelector('.ntg').onclick=()=>save({act:'nft_toggle',id:id});
+      r.querySelector('.nd').onclick=()=>{ if(confirm('NFT o‘chirilsinmi?')) save({act:'nft_delete',id:id}); }; });
+  }
+  window.MKADM=()=>{ d.market=(window.DD||d).market; draw(); };
+  draw(); return box;
+}
 function setTab(k){
   TAB=k;
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==='s-'+k));
-  const tk=(k==='crash'||k==='frog'||k==='kami'||k==='casino'||k==='vip'||k==='media')?'games':(k==='bank'||k==='birja')?'moliya':k;
+  const tk=(k==='crash'||k==='frog'||k==='kami'||k==='casino'||k==='vip'||k==='media'||k==='market')?'games':(k==='bank'||k==='birja')?'moliya':k;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===tk));
   if(k==='crash' && window.CR) window.CR.poke();
   if(k==='news' && window.DD) newsSeen(window.DD);
   if(k==='media') MEDIA.show();
+  if(k==='market') MARKET.show();
   SND.music(k==='crash'||k==='frog'||k==='kami'?k:null);
   window.scrollTo(0,0);
 }

@@ -476,3 +476,11 @@
   avtomatik `refund_star_payment`) → `market_fulfil`; avto yetkazish xatosi → `market_refund` (⭐ refund yoki EMP qaytadi). API
   `/app/api/market/{catalog,order,state}` + ownerlar `{config,nft_add,nft_update,nft_toggle,nft_delete,deliver,refund,balance}` → `web_market`.
   Payload `market` (`market_payload`; ownerga `admin`: cfg, balans, navbat, NFT, statistika). Kod bloki `# ── 🏪 EMPIRE MARKET` … `/EMPIRE MARKET`.
+  🎞 Rasmiy animatsiyalar: klient `MKA` (IntersectionObserver — faqat ko'rinayotganlar, bir vaqtda ≤ `MK_ANIM_MAX` 8, `lottieLoad`,
+  bo'lim/tab almashganda `MKA.clear`, eskiz/emoji — joy egasi; xarid oynasida `data-pri` katta). Gifts — to'liq `gift.sticker`
+  (tgs/webm) `/app/tgs/`. Premium — `market_premium_stickers`: `MARKET_PREMIUM_STICKER_SETS` (PremiumGifts → GiftsPremium →
+  AnimatedEmojies ⭐/🎁) `get_sticker_set`, oy moslik `_premium_pick`, kesh `market_cache` 1 kun (topilmasa 1 soatda qayta; ⭐ emoji).
+  NFT — owner `t.me/nft/<Name-N>` yoki slug (`nft_slug_norm`, `^[a-z0-9]+-[0-9]{1,7}$`; `market_nft.slug/meta`) → proksi
+  `GET /app/nft/<slug>.{tgs,webp,json}` (`nft_asset`: faqat nft.fragment.com, redirect yo'q, 2 MB, volume `nft_cache/`, 1 kun kesh;
+  .tgs → ochilgan Lottie (to'liq karta: model+fon+naqsh), .json → nom/#raqam/Model·Backdrop·Symbol + fon ranglari `_nft_bg`
+  (webp'dan); `original_details` olinmaydi). Fragment rarity % bermaydi. Havolasiz NFT — eski rasm yuklash.

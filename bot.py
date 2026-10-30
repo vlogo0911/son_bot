@@ -17185,6 +17185,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             self._chatimg(path.rsplit("/", 1)[1], NEWS_MEDIA_DIR, public=True)
         elif re.fullmatch(r"/app/tgs/[A-Za-z0-9_-]{6,64}", path):
             self._tgsticker(path.rsplit("/", 1)[1])
+        elif re.fullmatch(r"/app/nft/[a-z0-9]+-[0-9]{1,7}\.(?:tgs|webp|json)", path):
+            self._nft(*path.rsplit("/", 1)[1].rsplit(".", 1))
         else:
             self._send(404, {"ok": False})
 
@@ -17202,6 +17204,23 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "public, max-age=2592000, immutable")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _nft(self, slug, ext):
+        """💎 Fragment NFT fayllari (nft.fragment.com proksisi, volume keshi). .tgs → ochilgan Lottie JSON."""
+        try:
+            data, ctype = nft_asset(slug, ext)
+        except Exception:  # noqa: BLE001
+            data, ctype = b"", None
+        if not data:
+            self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -19454,6 +19473,240 @@ MARKET_ACTS = ("catalog", "order", "state", "config", "nft_add", "nft_update", "
 _MARKET_GIFTS = {"at": 0.0, "items": []}
 _MARKET_BAL = {"at": 0.0, "v": None}
 
+# ⭐ Premium uchun rasmiy Telegram animatsiyasi: shu to'plamlar tartib bilan sinab ko'riladi (get_sticker_set), birinchi
+# muvaffaqiyatlisi 1 kun keshlanadi (market_cache). mode "gift" — Premium sovg'a to'plami (oy → keycap emoji / tartib),
+# "emoji" — rasmiy animatsiyali emoji to'plami (⭐/🎁). Hech biri topilmasa — klientda oddiy ⭐ emoji.
+MARKET_PREMIUM_STICKER_SETS = (("PremiumGifts", "gift"), ("GiftsPremium", "gift"), ("AnimatedEmojies", "emoji"))
+MARKET_PREMIUM_GIFT_EMOJI = {3: ("2️⃣", "3️⃣"), 6: ("3️⃣", "6️⃣"), 12: ("4️⃣", "1️⃣")}   # tdesktop: 1→1️⃣ 3→2️⃣ 6→3️⃣ 12→4️⃣
+MARKET_PREMIUM_GIFT_INDEX = {3: 1, 6: 2, 12: 3}      # emoji bo'yicha topilmasa — to'plamdagi tartib (4+ stiker bo'lsa)
+MARKET_PREMIUM_EMOJI = {3: ("⭐", "🌟"), 6: ("🌟", "⭐"), 12: ("🎁", "🌟", "⭐")}
+MARKET_PREMIUM_ST_TTL = 86400    # topilgan moslik keshi
+MARKET_PREMIUM_ST_RETRY = 3600   # hech narsa topilmasa — qayta urinish oralig'i
+_MARKET_PREM_ST = {"at": 0.0, "set": None, "map": {}, "loaded": False}
+
+# 💎 NFT (unikal sovg'alar) — Fragment rasmiy fayllari: https://nft.fragment.com/gift/<slug>.{tgs,webp,json}
+# Proksi /app/nft/<slug>.<ext>: faqat shu host, qat'iy slug, redirect yo'q, hajm chegarasi, volume keshi.
+MARKET_NFT_HOST = "https://nft.fragment.com/gift/"
+MARKET_NFT_EXT = {"tgs": "application/json", "webp": "image/webp", "json": "application/json"}  # .tgs → ochilgan Lottie JSON
+MARKET_NFT_MAX = 2_000_000       # yuklab olinadigan fayl chegarasi (bayt)
+MARKET_NFT_LOTTIE_MAX = 4_000_000   # ochilgan Lottie JSON chegarasi
+MARKET_NFT_TIMEOUT = 12
+MARKET_NFT_MISS_TTL = 600        # topilmagan slug qayta so'ralmaydi (s)
+MARKET_NFT_DIR = os.path.join(VOLUME_PATH or BASE_DIR, "nft_cache")
+MARKET_NFT_SLUG_RE = re.compile(r"[a-z0-9]+-[0-9]{1,7}")
+MARKET_NFT_ATTRS = ("Model", "Backdrop", "Symbol")
+_NFT_MISS = {}
+
+
+def nft_slug_norm(s):
+    """t.me/nft/PlushPepe-1 · fragment.com/gift/plushpepe-1 · PlushPepe-1 → 'plushpepe-1' (aks holda None)."""
+    s = str(s or "").strip()
+    if not s or len(s) > 200:
+        return None
+    m = re.fullmatch(r"(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|fragment\.com)/(?:nft|gift)/([A-Za-z0-9]+-[0-9]{1,7})/?"
+                     r"(?:[?#][^\s]*)?", s, re.I)
+    if m:
+        s = m.group(1)
+    s = s.lower()
+    return s if MARKET_NFT_SLUG_RE.fullmatch(s) else None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):     # boshqa hostga yo'naltirish (SSRF) — yo'q
+        return None
+
+
+_NFT_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _nft_http_get(url, cap=MARKET_NFT_MAX):
+    """Faqat 200 va ≤ cap bayt; aks holda None."""
+    if not url.startswith(MARKET_NFT_HOST):
+        return None
+    req = urllib.request.Request(url, headers={"User-Agent": "EmpireMarket/1.0"})
+    try:
+        with _NFT_OPENER.open(req, timeout=MARKET_NFT_TIMEOUT) as r:
+            if getattr(r, "status", 200) != 200:
+                return None
+            cl = r.headers.get("Content-Length")
+            if cl and cl.isdigit() and int(cl) > cap:
+                return None
+            data = r.read(cap + 1)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    return data if len(data) <= cap else None
+
+
+def _nft_bg(webp):
+    """Fragment rasmidan fon ranglari (markaz atrofi, chekka) — mediana (naqsh belgilarini chetlab)."""
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(webp)).convert("RGB")
+        im.thumbnail((96, 96))
+    except Exception:  # noqa: BLE001
+        return None
+    w, h = im.size
+
+    def med(pts):
+        px = sorted((im.getpixel((min(w - 1, max(0, int(w * x))), min(h - 1, max(0, int(h * y))))) for x, y in pts), key=sum)
+        return "#%02x%02x%02x" % px[len(px) // 2][:3]
+    edge = [(a, b) for a in (0.03, 0.97) for b in (0.03, 0.25, 0.5, 0.75, 0.97)] + \
+           [(a, b) for a in (0.25, 0.5, 0.75) for b in (0.03, 0.97)]
+    ring = [(0.5 + 0.36 * math.cos(i * math.pi / 8), 0.5 + 0.36 * math.sin(i * math.pi / 8)) for i in range(16)]
+    return [med(ring), med(edge)]
+
+
+def _nft_process(slug, ext, raw):
+    """Yuklangan faylni tekshirib keshlanadigan ko'rinishga keltiradi; yaroqsiz bo'lsa None."""
+    import gzip
+    import zlib
+    if ext == "webp":
+        return raw if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP" else None
+    if ext == "tgs":
+        if raw[:2] != b"\x1f\x8b":
+            return None
+        try:
+            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            data = d.decompress(raw, MARKET_NFT_LOTTIE_MAX + 1)
+            if len(data) > MARKET_NFT_LOTTIE_MAX or d.unconsumed_tail:
+                return None
+            j = json.loads(data)
+        except (zlib.error, OSError, ValueError, gzip.BadGzipFile):
+            return None
+        return data if isinstance(j, dict) and isinstance(j.get("layers"), list) else None
+    try:
+        j = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(j, dict):
+        return None
+    name = str(j.get("name") or "")[:80]
+    m = re.fullmatch(r"(.+?)\s*#([0-9]{1,7})", name)
+    attrs = []
+    for a in j.get("attributes") or ():
+        if isinstance(a, dict) and a.get("trait_type") in MARKET_NFT_ATTRS:
+            attrs.append({"t": a["trait_type"], "v": str(a.get("value") or "")[:40]})
+    meta = {"slug": slug, "title": (m.group(1) if m else name)[:60], "num": int(m.group(2)) if m else int(slug.rsplit("-", 1)[1]),
+            "attrs": attrs}      # original_details (egasi ismi/ID) ataylab olinmaydi
+    wb, _ = nft_asset(slug, "webp")
+    if wb:
+        meta["bg"] = _nft_bg(wb)
+    return json.dumps(meta, ensure_ascii=False).encode()
+
+
+def nft_asset(slug, ext):
+    """(bytes, content-type) — volume keshidan yoki nft.fragment.com dan (bloklovchi; HTTP ipida / to_thread)."""
+    slug = str(slug or "")
+    if ext not in MARKET_NFT_EXT or not MARKET_NFT_SLUG_RE.fullmatch(slug):
+        return b"", None
+    path = os.path.join(MARKET_NFT_DIR, f"{slug}.{ext}")
+    try:
+        with open(path, "rb") as f:
+            return f.read(), MARKET_NFT_EXT[ext]
+    except OSError:
+        pass
+    key = f"{slug}.{ext}"
+    if time.time() - _NFT_MISS.get(key, 0) < MARKET_NFT_MISS_TTL:
+        return b"", None
+    raw = _nft_http_get(MARKET_NFT_HOST + key)
+    data = _nft_process(slug, ext, raw) if raw else None
+    if not data:
+        _NFT_MISS[key] = time.time()
+        return b"", None
+    try:
+        os.makedirs(MARKET_NFT_DIR, exist_ok=True)
+        tmp = f"{path}.{secrets.token_hex(4)}.tmp"
+        with open(tmp, "wb") as fo:
+            fo.write(data)
+        os.replace(tmp, path)
+    except OSError as e:
+        logger.warning("NFT keshga yozilmadi: %s", e)
+    return data, MARKET_NFT_EXT[ext]
+
+
+def nft_meta(slug):
+    data, _ = nft_asset(slug, "json")
+    try:
+        return json.loads(data) if data else None
+    except ValueError:
+        return None
+
+
+def _premium_pick(stickers, mode):
+    """stickers: [(emoji, file_unique_id, file_id, fmt)] → {oy: (...)}; faqat animatsiyali (tgs/webm). Topilmasa {}."""
+    anim = [s for s in stickers if s[3] in ("tgs", "webm")]
+    if not anim:
+        return {}
+    norm = lambda e: (e or "").replace("️", "")
+    table = MARKET_PREMIUM_GIFT_EMOJI if mode == "gift" else MARKET_PREMIUM_EMOJI
+    out = {}
+    for m in MARKET_PREMIUM:
+        for e in table.get(m, ()):
+            hit = next((s for s in anim if norm(s[0]) == norm(e)), None)
+            if hit:
+                out[m] = hit
+                break
+        if m not in out and mode == "gift":
+            i = MARKET_PREMIUM_GIFT_INDEX.get(m, 0)
+            out[m] = anim[i] if len(anim) >= 4 and i < len(anim) else anim[min(len(anim) - 1, list(MARKET_PREMIUM).index(m))]
+    if out:
+        first = next(iter(out.values()))
+        for m in MARKET_PREMIUM:
+            out.setdefault(m, first)
+    return out
+
+
+def _premium_st_load():
+    st = _MARKET_PREM_ST
+    if st["loaded"]:
+        return
+    st["loaded"] = True
+    try:
+        r = db().execute("SELECT value, at FROM market_cache WHERE key='premium_stickers'").fetchone()
+        if r:
+            v = json.loads(r[0])
+            st.update(at=float(r[1]), set=v.get("set"), map=v.get("map") or {})
+    except (sqlite3.Error, ValueError):
+        pass
+
+
+async def market_premium_stickers(force=False):
+    """⭐ Premium 3/6/12 oy → {"3": {u, f}, ...} (rasmiy Telegram animatsiyasi). Kesh: xotira + market_cache, 1 kun."""
+    _premium_st_load()
+    st, now = _MARKET_PREM_ST, time.time()
+    ttl = MARKET_PREMIUM_ST_TTL if st["map"] else MARKET_PREMIUM_ST_RETRY
+    if not force and st["at"] and now - st["at"] < ttl:
+        return st["map"]
+    bot = _EXCHANGE_LOOP_BOT
+    if bot is None:
+        return st["map"]
+    found = None
+    for name, mode in MARKET_PREMIUM_STICKER_SETS:
+        try:
+            ss = await bot.get_sticker_set(name)
+        except TelegramError as e:
+            logger.info("Market: %s stiker to'plami yo'q: %s", name, e)
+            continue
+        sts = [(getattr(s, "emoji", None), s.file_unique_id, s.file_id,
+                "tgs" if getattr(s, "is_animated", False) else "webm" if getattr(s, "is_video", False) else "webp")
+               for s in (getattr(ss, "stickers", None) or ())]
+        pick = _premium_pick(sts, mode)
+        if pick:
+            found = (name, pick)
+            break
+    c = db()
+    with c:
+        if found:
+            name, pick = found
+            c.executemany("INSERT INTO tg_sticker_files(uid, file_id, fmt) VALUES (?,?,?) "
+                          "ON CONFLICT(uid) DO UPDATE SET file_id=excluded.file_id", [(v[1], v[2], v[3]) for v in pick.values()])
+            st.update(set=name, map={str(m): {"u": v[1], "f": v[3]} for m, v in pick.items()})
+        st["at"] = now          # topilmasa eski moslik (bo'lsa) saqlanadi
+        c.execute("INSERT INTO market_cache(key, value, at) VALUES ('premium_stickers', ?, ?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value, at=excluded.at",
+                  (json.dumps({"set": st["set"], "map": st["map"]}), int(now)))
+    return st["map"]
+
 
 def init_market(c):
     c.execute("""CREATE TABLE IF NOT EXISTS market_config (key TEXT PRIMARY KEY, value REAL NOT NULL)""")
@@ -19467,6 +19720,12 @@ def init_market(c):
         msg TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""")
     c.execute("CREATE INDEX IF NOT EXISTS market_orders_user ON market_orders(user_id, id)")
     c.execute("CREATE INDEX IF NOT EXISTS market_orders_status ON market_orders(status)")
+    c.execute("CREATE TABLE IF NOT EXISTS market_cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, at INTEGER NOT NULL)")
+    cols = {r[1] for r in c.execute("PRAGMA table_info(market_nft)")}
+    if "slug" not in cols:      # 💎 Fragment slug (plushpepe-1) va keshlangan atributlar (JSON)
+        c.execute("ALTER TABLE market_nft ADD COLUMN slug TEXT NOT NULL DEFAULT ''")
+    if "meta" not in cols:
+        c.execute("ALTER TABLE market_nft ADD COLUMN meta TEXT NOT NULL DEFAULT ''")
 
 
 def market_enabled_for(uid):
@@ -19550,11 +19809,22 @@ async def market_gifts(force=False):
 
 
 def market_nft_list(all_=False):
-    rows = db().execute("SELECT id, title, img, price_stars, note, active, sold FROM market_nft"
+    rows = db().execute("SELECT id, title, img, price_stars, note, active, sold, slug, meta FROM market_nft"
                         + ("" if all_ else " WHERE active=1 AND sold=0") + " ORDER BY sold, id DESC").fetchall()
-    return [{"id": r[0], "title": r[1], "img": (f"/app/newsimg/{r[2]}.jpg" if re.fullmatch(r"[0-9a-f]{32}", r[2] or "")
-                                                 else r[2]),
-             "price": r[3], "note": r[4], "active": bool(r[5]), "sold": bool(r[6])} for r in rows]
+    out = []
+    for r in rows:
+        slug = r[7] if MARKET_NFT_SLUG_RE.fullmatch(r[7] or "") else ""
+        img = f"/app/newsimg/{r[2]}.jpg" if re.fullmatch(r"[0-9a-f]{32}", r[2] or "") else r[2]
+        it = {"id": r[0], "title": r[1], "img": img or (f"/app/nft/{slug}.webp" if slug else ""),
+              "price": r[3], "note": r[4], "active": bool(r[5]), "sold": bool(r[6]), "slug": slug}
+        if slug:
+            try:
+                mt = json.loads(r[8]) if r[8] else {}
+            except ValueError:
+                mt = {}
+            it.update(num=mt.get("num"), name=mt.get("title"), attrs=mt.get("attrs") or [], bg=mt.get("bg"))
+        out.append(it)
+    return out
 
 
 def market_nft_get(nid):
@@ -19636,7 +19906,8 @@ def market_payload(uid, balance=None):
         "on": {k: bool(cfg[k]) for k in MARKET_KINDS},
         "markup": cfg["markup"], "emp_pay": emp_on, "emp_balance": emp_balance(uid) if emp_on else 0,
         "premium": [{"m": m, "cost": cst, "price": market_price(cst, cfg["markup"]), "emp": mk(market_price(cst, cfg["markup"])),
-                     "ok": avail(cst)} for m, cst in MARKET_PREMIUM.items()] if cfg["premium"] else [],
+                     "ok": avail(cst), "anim": _MARKET_PREM_ST["map"].get(str(m))}
+                    for m, cst in MARKET_PREMIUM.items()] if cfg["premium"] else [],
         "gifts": [dict(g, price=market_price(g["cost"], cfg["markup"]), emp=mk(market_price(g["cost"], cfg["markup"])),
                        ok=avail(g["cost"])) for g in _MARKET_GIFTS["items"]] if cfg["gift"] else [],
         "gifts_loaded": bool(_MARKET_GIFTS["items"]),
@@ -19665,6 +19936,11 @@ async def market_catalog(uid):
     if not market_enabled_for(uid):
         return {"error": "disabled"}
     await market_gifts()
+    if market_cfg()["premium"]:
+        try:
+            await market_premium_stickers()
+        except Exception as e:  # noqa: BLE001 — animatsiya ixtiyoriy, katalogni buzmasin
+            logger.warning("Market: Premium animatsiyasi aniqlanmadi: %s", e)
     bal = await market_star_balance()
     return {"result": "ok", "market": market_payload(uid, bal)}
 
@@ -19940,6 +20216,22 @@ async def web_market(uid, act, body):
             price = int(body.get("price"))
         except (TypeError, ValueError):
             price = 0
+        slug = meta = None           # None — o'zgarmaydi; "" — olib tashlanadi
+        if body.get("slug") is not None:
+            slug = ""
+            if str(body.get("slug")).strip():
+                slug = nft_slug_norm(body.get("slug"))
+                if not slug:
+                    return {"error": "nft_slug"}
+                mt = await asyncio.to_thread(nft_meta, slug)
+                if not mt:
+                    return {"error": "nft_fetch"}
+                await asyncio.to_thread(nft_asset, slug, "tgs")      # animatsiyani oldindan keshlash (xato — muhim emas)
+                meta = json.dumps(mt, ensure_ascii=False)
+                if len(title) < 2:
+                    title = f"{mt.get('title') or slug} #{mt.get('num')}"[:60]
+            else:
+                meta = ""
         if len(title) < 2 or not 1 <= price <= MARKET_MAX_STARS:
             return {"error": "values"}
         img = None
@@ -19954,14 +20246,16 @@ async def web_market(uid, act, body):
             img = u
         with c:
             if act == "nft_add":
-                c.execute("INSERT INTO market_nft(title, img, price_stars, note, created_at) VALUES (?,?,?,?,?)",
-                          (title, img or "", price, note, int(time.time())))
+                c.execute("INSERT INTO market_nft(title, img, price_stars, note, created_at, slug, meta) VALUES (?,?,?,?,?,?,?)",
+                          (title, img or "", price, note, int(time.time()), slug or "", meta or ""))
             else:
                 nid = int(body.get("id") or 0)
                 if not market_nft_get(nid):
                     return {"error": "nft"}
                 c.execute("UPDATE market_nft SET title=?, price_stars=?, note=?" + (", img=?" if img is not None else "")
-                          + " WHERE id=?", (title, price, note) + ((img,) if img is not None else ()) + (nid,))
+                          + (", slug=?, meta=?" if slug is not None else "") + " WHERE id=?",
+                          (title, price, note) + ((img,) if img is not None else ())
+                          + ((slug, meta or "") if slug is not None else ()) + (nid,))
     elif act in ("nft_toggle", "nft_delete"):
         try:
             nid = int(body.get("id"))
@@ -23962,8 +24256,26 @@ WEBAPP_HTML = r"""<!doctype html>
   .mkst.paid{background:rgba(46,166,255,.18);color:#8fd0ff}
   .mknote{font-size:12px;color:var(--mk-dim);margin-top:12px;text-align:center}
   .mksheet .sheet{background:linear-gradient(180deg,#152536,#0d1826)!important;border-color:rgba(90,170,255,.35)!important}
-  .mksheet .mkbv{text-align:center;font-size:54px;line-height:80px;height:80px;display:flex;justify-content:center;align-items:center}
-  .mksheet .mkbv img,.mksheet .mkbv .lot,.mksheet .mkbv video{width:80px;height:80px;object-fit:contain}
+  .mksheet .mkbv{text-align:center;font-size:64px;line-height:120px;height:120px;display:flex;justify-content:center;align-items:center}
+  .mksheet .mkbv>.mka{width:120px;height:120px;font-size:64px}
+  .mksheet .mkbv.big{height:auto;line-height:normal}
+  .mksheet .mkbv.big .mknart{width:min(220px,62vw);margin:0 auto}
+  /* 🎞 rasmiy animatsiyalar: joy egasi → animatsiya (opacity bilan almashadi) */
+  .mka{position:relative;display:flex;align-items:center;justify-content:center;width:56px;height:56px;line-height:1}
+  .mka .mkph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;transition:opacity .25s}
+  .mka .mkph img,.mka img.mkan{width:100%;height:100%;object-fit:contain}
+  .mka .mkan{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .25s}
+  .mka.on .mkan{opacity:1}.mka.on .mkph{opacity:0}
+  .mkprem .mkc .mkv.anim{background:radial-gradient(circle at 50% 40%,rgba(140,120,255,.45),rgba(46,166,255,.12))}
+  .mkprem .mkc .mkv .mka{width:48px;height:48px;font-size:30px}
+  .mknart{position:relative;width:100%;aspect-ratio:1;border-radius:12px;overflow:hidden;background:#0b1522}
+  .mknart .mka{position:absolute;inset:0;width:100%;height:100%}
+  .mknart .mka .mkph img{object-fit:cover}
+  .mknart img.mki{width:100%;height:100%;object-fit:cover}
+  .mknum{color:var(--mk-dim,#8aa4c2);font-weight:800}
+  .mkattr{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin-top:6px}
+  .mkattr span{font-size:10.5px;padding:3px 7px;border-radius:8px;background:rgba(46,166,255,.10);color:#cfe3ff;box-shadow:inset 0 0 0 1px rgba(120,180,255,.14)}
+  .mkattr span i{font-style:normal;color:#8aa4c2;margin-right:4px}
   .mksheet input{width:100%;box-sizing:border-box;padding:11px 14px;border-radius:12px;border:0;outline:0;background:#0b1522;color:#eaf4ff;font-size:14px;
     box-shadow:inset 0 0 0 1px rgba(120,180,255,.2);margin-top:8px}
   .mksheet .mkpay{display:flex;flex-direction:column;gap:8px;margin-top:14px}
@@ -27219,7 +27531,58 @@ const MKST={pending:'⏳ To‘lov kutilmoqda',paid:'🧾 Navbatda',delivered:'�
 const MKERR={disabled:'🏪 Market hozircha yopiq',kind:'🏪 Bu bo‘lim yopiq',not_found:'🔎 Qabul qiluvchi topilmadi (u botni ishlatgan bo‘lishi kerak)',
   item:'⚠️ Mahsulot mavjud emas',unavailable:'⏳ Vaqtincha mavjud emas — keyinroq urinib ko‘ring',too_many:'⚠️ To‘lanmagan buyurtmalar ko‘p — birozdan keyin',
   emp_off:'🪙 EMP bilan to‘lash yopiq',emp_funds:'💸 EMP yetarli emas',invoice:'⚠️ Invoys yaratilmadi',bot:'⚠️ Bot band',values:'⚠️ Qiymatlar noto‘g‘ri',
-  image:'⚠️ Rasm noto‘g‘ri (fayl yoki https havola)',order:'⚠️ Buyurtma topilmadi',refund:'⚠️ Qaytarib bo‘lmadi',owner:'👑 Faqat ownerlar'};
+  image:'⚠️ Rasm noto‘g‘ri (fayl yoki https havola)',nft_slug:'⚠️ NFT havolasi noto‘g‘ri — masalan t.me/nft/PlushPepe-1',nft_fetch:'⚠️ Fragment’da bu NFT topilmadi',order:'⚠️ Buyurtma topilmadi',refund:'⚠️ Qaytarib bo‘lmadi',owner:'👑 Faqat ownerlar'};
+// 🎞 Market animatsiyalari (rasmiy TGS/WEBM): faqat ko'rinayotganlar o'ynaydi, bir vaqtda ≤ MK_ANIM_MAX; lottie-web kerak bo'lganda yuklanadi.
+// Joy egasi (eskiz/emoji) darhol ko'rinadi, animatsiya tayyor bo'lgach ustiga chiqadi. data-pri — limitdan tashqari (xarid oynasi).
+const MK_ANIM_MAX=8;
+const MKA=(()=>{
+  const live=new Map(), want=new Set(); let io=null, paused=false;
+  function html(src,f,ph,cls,pri){
+    if(f!=='tgs'&&f!=='webm') return '<div class="mka on '+(cls||'')+'"><img class="mkan" alt="" src="'+esc(src)+'"></div>';
+    return '<div class="mka '+(cls||'')+'" data-src="'+esc(src)+'" data-f="'+f+'"'+(pri?' data-pri="1"':'')+'><div class="mkph">'+(ph||'')+'</div></div>'; }
+  function start(el){ if(paused||live.has(el)||!el.isConnected) return; if(live.size>=MK_ANIM_MAX&&!el.dataset.pri) return;
+    const f=el.dataset.f, src=el.dataset.src;
+    if(f==='webm'){ const v=document.createElement('video'); v.className='mkan'; v.muted=true; v.loop=true; v.autoplay=true; v.playsInline=true;
+      v.setAttribute('playsinline',''); v.onloadeddata=()=>el.classList.add('on'); v.onerror=()=>stop(el); v.src=src; el.appendChild(v);
+      live.set(el,{v}); const pp=v.play&&v.play(); if(pp&&pp.catch) pp.catch(()=>{}); return; }
+    if(f!=='tgs') return;
+    live.set(el,{});
+    lottieLoad().then(()=>{ const x=live.get(el); if(!x||!el.isConnected){ live.delete(el); pump(); return; }
+      const box=document.createElement('div'); box.className='mkan'; el.appendChild(box);
+      try{ const a=lottie.loadAnimation({container:box,renderer:'svg',loop:true,autoplay:true,path:src,rendererSettings:{progressiveLoad:true}});
+        a.addEventListener('DOMLoaded',()=>el.classList.add('on')); a.addEventListener('data_failed',()=>{ el.dataset.bad=1; stop(el); });
+        x.a=a; x.box=box; }catch(e){ box.remove(); live.delete(el); el.dataset.bad=1; } })
+      .catch(()=>{ live.delete(el); el.dataset.bad=1; }); }
+  function stop(el){ const x=live.get(el); if(!x) return; live.delete(el); el.classList.remove('on');
+    try{ if(x.a) x.a.destroy(); if(x.box) x.box.remove(); if(x.v){ x.v.pause(); x.v.removeAttribute('src'); x.v.load(); x.v.remove(); } }catch(e){}
+    pump(); }
+  function pump(){ for(const el of [...want]){ if(!el.isConnected){ want.delete(el); continue; } if(live.size>=MK_ANIM_MAX) break;
+      if(!live.has(el)&&!el.dataset.bad) start(el); } }
+  function observe(root){ const els=[...root.querySelectorAll('.mka[data-src]')];
+    els.filter(el=>el.dataset.pri).forEach(start);
+    const rest=els.filter(el=>!el.dataset.pri);
+    if(!('IntersectionObserver' in window)){ rest.slice(0,MK_ANIM_MAX).forEach(start); return; }
+    if(!io) io=new IntersectionObserver(es=>es.forEach(e=>{ const el=e.target;
+      if(e.isIntersecting){ want.add(el); if(!el.dataset.bad) start(el); } else { want.delete(el); stop(el); } }),{rootMargin:'60px'});
+    rest.forEach(el=>io.observe(el)); }
+  function clear(root){ for(const el of [...want]) if(!root||root.contains(el)||!el.isConnected){ want.delete(el); }
+    if(io) (root?[...root.querySelectorAll('.mka[data-src]')]:[]).forEach(el=>io.unobserve(el));
+    if(!root&&io){ io.disconnect(); io=null; }
+    for(const el of [...live.keys()]) if(!root||root.contains(el)||!el.isConnected) stop(el); }
+  document.addEventListener('visibilitychange',()=>{ paused=document.hidden;
+    live.forEach(x=>{ try{ if(x.a) paused?x.a.pause():x.a.play(); if(x.v) paused?x.v.pause():x.v.play().catch(()=>{}); }catch(e){} }); if(!paused) pump(); });
+  return {html,observe,clear,count:()=>live.size};
+})();
+function mkGiftVis(g,cls,pri){ const ph=g.thumb?'<img alt="" src="/app/tgs/'+encodeURIComponent(g.thumb.u)+'">':esc(g.emoji||'🎁');
+  return g.anim?MKA.html('/app/tgs/'+encodeURIComponent(g.anim.u),g.anim.f,ph,cls,pri):'<div class="mka on '+(cls||'')+'">'+ph+'</div>'; }
+function mkPremVis(p,cls,pri){ return p.anim?MKA.html('/app/tgs/'+encodeURIComponent(p.anim.u),p.anim.f,'⭐',cls,pri):'⭐'; }
+const MKATTR={Model:'Model',Backdrop:'Fon',Symbol:'Belgi'};
+function mkNftArt(x,pri){ const bg=x.bg&&x.bg.length===2&&x.bg.every(c=>/^#[0-9a-f]{6}$/.test(c))?' style="background:radial-gradient(circle at 50% 42%,'+x.bg[0]+','+x.bg[1]+')"':'';
+  if(x.slug) return '<div class="mknart"'+bg+'>'+MKA.html('/app/nft/'+x.slug+'.tgs','tgs','<img alt="" loading="lazy" src="/app/nft/'+x.slug+'.webp">','',pri)+'</div>';
+  return x.img?'<div class="mknart"><img class="mki" loading="lazy" alt="" src="'+esc(x.img)+'"></div>':'<div class="mkv">💎</div>'; }
+function mkNftName(x){ const t=x.name||x.title, n=x.num&&String(t).indexOf('#'+x.num)<0?' <span class="mknum">#'+x.num+'</span>':'';
+  return '<b>'+esc(t)+n+'</b>'; }
+function mkAttrs(x){ return (x.attrs||[]).length?'<div class="mkattr">'+x.attrs.map(a=>'<span><i>'+esc(MKATTR[a.t]||a.t)+'</i>'+esc(a.v)+'</span>').join('')+'</div>':''; }
 const MARKET=(()=>{
   let tab='premium', loading=false;
   const D=()=>window.DD||{}, M=()=>D().market||{};
@@ -27237,14 +27600,14 @@ const MARKET=(()=>{
   function draw(){ const b=body(); if(!b) return; const m=M(); tabs(); let h='';
     const na='<span class="mkna">Vaqtincha mavjud emas</span>';
     if(tab==='premium'){
-      h='<div class="mkprem">'+(m.premium||[]).map(p=>'<div class="mkc'+(p.ok?'':' off')+'" data-k="premium" data-i="'+p.m+'"><div class="mkv">⭐</div>'+
+      h='<div class="mkprem">'+(m.premium||[]).map(p=>'<div class="mkc'+(p.ok?'':' off')+'" data-k="premium" data-i="'+p.m+'"><div class="mkv'+(p.anim?' anim':'')+'">'+mkPremVis(p)+'</div>'+
         '<div><b>Telegram Premium</b><small class="hsub">'+p.m+' oy · darhol, avtomatik</small>'+(p.ok?'':na)+'</div><span class="mkp">'+star(p.price)+'</span></div>').join('')+'</div>'+
         '<div class="mknote">Premium qabul qiluvchining Telegram hisobiga darhol faollashadi. O‘zingizga yoki do‘stingizga.</div>';
     } else if(tab==='gifts'){
       const g=m.gifts||[];
       h=g.length?'<div class="mkgrid">'+g.map(x=>'<div class="mkc'+(x.ok?'':' off')+'" data-k="gift" data-i="'+esc(x.id)+'">'+
           (x.total?'<span class="mkl">'+fmtMoney(x.left||0)+' / '+fmtMoney(x.total)+'</span>':'')+
-          '<div class="mkv">'+(x.thumb?tgStickerHtml(x.thumb,''):esc(x.emoji))+'</div><span class="mkp">'+star(x.price)+'</span>'+(x.ok?'':na)+'</div>').join('')+'</div>'
+          '<div class="mkv">'+mkGiftVis(x)+'</div><span class="mkp">'+star(x.price)+'</span>'+(x.ok?'':na)+'</div>').join('')+'</div>'
         :'<div class="mknote">'+(m.gifts_loaded===false&&loading?'⏳ Yuklanmoqda…':'🎁 Hozircha sovg‘alar yo‘q')+'</div>';
       h+='<div class="mknote">Telegram sovg‘alari qabul qiluvchi profiliga darhol yuboriladi.</div>';
     } else if(tab==='stars'){
@@ -27252,8 +27615,8 @@ const MARKET=(()=>{
         '<span class="mkp">'+star(x.price)+'</span></div>').join('')+'</div><div class="mknote">🌟 Stars Fragment orqali qo‘lda yetkaziladi (odatda 24 soat ichida). Yetkazilmasa — to‘liq qaytariladi.</div>';
     } else if(tab==='nft'){
       const n=m.nft||[];
-      h=n.length?'<div class="mkgrid mknft">'+n.map(x=>'<div class="mkc" data-k="nft" data-i="'+x.id+'">'+(x.img?'<img class="mki" loading="lazy" alt="" src="'+esc(x.img)+'">':'<div class="mkv">💎</div>')+
-          '<b>'+esc(x.title)+'</b>'+(x.note?'<div class="mkno">'+esc(x.note)+'</div>':'')+'<span class="mkp">'+star(x.price)+'</span></div>').join('')+'</div>'
+      h=n.length?'<div class="mkgrid mknft">'+n.map(x=>'<div class="mkc" data-k="nft" data-i="'+x.id+'">'+mkNftArt(x)+
+          mkNftName(x)+mkAttrs(x)+(x.note?'<div class="mkno">'+esc(x.note)+'</div>':'')+'<span class="mkp">'+star(x.price)+'</span></div>').join('')+'</div>'
         :'<div class="mknote">💎 Hozircha NFT sovg‘alar yo‘q — tez orada!</div>';
       h+='<div class="mknote">NFT (unikal) sovg‘alar Fragment orqali qo‘lda o‘tkaziladi.</div>';
     } else {
@@ -27263,25 +27626,26 @@ const MARKET=(()=>{
           '<span class="mkst '+x.status+'">'+(MKST[x.status]||x.status)+'</span></div>').join('')
         :'<div class="mknote">🧾 Hali buyurtmalar yo‘q</div>';
     }
-    b.innerHTML=h; tgLottieIn(b);
+    MKA.clear(b); b.innerHTML=h; MKA.observe(b);
     b.querySelectorAll('.mkc:not(.off)').forEach(c=>c.onclick=()=>buy(c.dataset.k,c.dataset.i));
   }
   function find(k,i){ const m=M();
-    if(k==='premium'){ const p=(m.premium||[]).find(x=>String(x.m)===i); return p&&{title:'Telegram Premium · '+p.m+' oy',price:p.price,emp:p.emp,vis:'⭐',msg:1}; }
-    if(k==='gift'){ const g=(m.gifts||[]).find(x=>x.id===i); return g&&{title:'Telegram sovg‘asi '+g.emoji,price:g.price,emp:g.emp,vis:g.anim&&g.anim.f!=='webm'?tgStickerHtml(g.anim,''):esc(g.emoji),msg:1}; }
+    if(k==='premium'){ const p=(m.premium||[]).find(x=>String(x.m)===i); return p&&{title:'Telegram Premium · '+p.m+' oy',price:p.price,emp:p.emp,vis:mkPremVis(p,'',1),msg:1}; }
+    if(k==='gift'){ const g=(m.gifts||[]).find(x=>x.id===i); return g&&{title:'Telegram sovg‘asi '+g.emoji,price:g.price,emp:g.emp,vis:mkGiftVis(g,'',1),msg:1}; }
     if(k==='stars'){ const s=(m.stars||[]).find(x=>String(x.n)===i); return s&&{title:fmtMoney(s.n)+' Stars',price:s.price,emp:s.emp,vis:'🌟'}; }
-    const n=(m.nft||[]).find(x=>String(x.id)===i); return n&&{title:n.title,price:n.price,emp:n.emp,vis:n.img?'<img alt="" src="'+esc(n.img)+'" style="border-radius:12px;object-fit:cover">':'💎'}; }
+    const n=(m.nft||[]).find(x=>String(x.id)===i); return n&&{title:(n.name?n.name+(n.num?' #'+n.num:''):n.title),price:n.price,emp:n.emp,big:1,vis:mkNftArt(n,1),attrs:mkAttrs(n)}; }
   function buy(k,i){ const it=find(k,i); if(!it) return; const m=M();
     let ov=document.getElementById('mkov'); if(!ov){ ov=document.createElement('div'); ov.id='mkov'; ov.className='ov mksheet'; document.body.appendChild(ov); }
-    ov.innerHTML='<div class="sheet"><div class="mkbv">'+it.vis+'</div><div style="font-weight:900;font-size:17px;text-align:center">'+esc(it.title)+'</div>'+
+    MKA.clear(ov);
+    ov.innerHTML='<div class="sheet"><div class="mkbv'+(it.big?' big':'')+'">'+it.vis+'</div><div style="font-weight:900;font-size:17px;text-align:center">'+esc(it.title)+'</div>'+(it.attrs||'')+
       '<div class="hsub" style="text-align:center;margin-top:2px">'+star(it.price)+(m.emp_pay&&it.emp?' · yoki '+fmtMoney(it.emp)+' EMP':'')+'</div>'+
       '<input id="mkTo" maxlength="40" placeholder="Kimga: bo‘sh — o‘zimga · yoki ID / @username">'+
       (it.msg?'<input id="mkMsg" maxlength="120" placeholder="Xabar (ixtiyoriy)">':'')+
       '<div class="mkpay"><button class="btn full" id="mkPS">⭐ '+fmtMoney(it.price)+' Stars bilan to‘lash</button>'+
       (m.emp_pay&&it.emp?'<button class="btn full emp" id="mkPE">🪙 '+fmtMoney(it.emp)+' EMP bilan to‘lash <small>(balans '+fmtMoney(m.emp_balance||0)+')</small></button>':'')+
       '<button class="btn full" id="mkX" style="background:#1c2a3c;color:#cfe3ff">Yopish</button></div></div>';
-    ov.className='ov mksheet show'; tgLottieIn(ov);
-    const close=()=>{ ov.className='ov mksheet'; };
+    ov.className='ov mksheet show'; MKA.observe(ov);
+    const close=()=>{ ov.className='ov mksheet'; MKA.clear(ov); };
     ov.onclick=e=>{ if(e.target===ov) close(); }; ov.querySelector('#mkX').onclick=close;
     const go=(pay,btn)=>{ btn.disabled=true;
       const req={kind:k,item:i,to:ov.querySelector('#mkTo').value.trim(),text:(ov.querySelector('#mkMsg')||{}).value||'',pay:pay};
@@ -27336,11 +27700,12 @@ function marketAdmin(d){
       '<div class="hsub" style="margin-top:6px">Narx = Telegram narxi × (1 + ustama%). 1⭐ = EMP: 0 — EMP bilan to‘lash o‘chiq. Avto mahsulotlar bot ⭐ balansidan to‘lanadi.</div>'+
       '<div class="lbl" style="margin-top:16px">🧾 Navbat (qo‘lda yetkazish) — '+A.queue.length+'</div>'+(A.queue.length?A.queue.map(q).join(''):'<div class="hsub">Navbat bo‘sh ✨</div>')+
       '<div class="lbl" style="margin-top:16px">💎 NFT ro‘yxati</div>'+
-      '<div class="mkrow"><input id="mkNt" maxlength="60" placeholder="Nomi (masalan: Plush Pepe #123)"><input id="mkNp" type="number" placeholder="⭐ narx" style="max-width:110px"></div>'+
+      '<div class="mkrow"><input id="mkNs" maxlength="200" placeholder="t.me/nft/PlushPepe-1 yoki slug (animatsiya + atributlar)"></div>'+
+      '<div class="mkrow"><input id="mkNt" maxlength="60" placeholder="Nomi (havola bo‘lsa — avtomatik)"><input id="mkNp" type="number" placeholder="⭐ narx" style="max-width:110px"></div>'+
       '<div class="mkrow"><input id="mkNn" maxlength="300" placeholder="Izoh (ixtiyoriy)"></div>'+
-      '<div class="mkrow"><input id="mkNu" maxlength="500" placeholder="Rasm havolasi (https://…) yoki fayl →"><input id="mkNf" type="file" accept="image/*" style="max-width:120px"></div>'+
+      '<div class="mkrow"><input id="mkNu" maxlength="500" placeholder="Rasm (havolasiz NFT uchun): https://… yoki fayl →"><input id="mkNf" type="file" accept="image/*" style="max-width:120px"></div>'+
       '<button class="btn go full" id="mkNa" style="margin-top:8px">➕ NFT qo‘shish</button>'+
-      A.nft_all.map(n=>'<div class="mkn'+(n.active&&!n.sold?'':' off')+'" data-id="'+n.id+'">'+(n.img?'<img alt="" src="'+esc(n.img)+'">':'<span>💎</span>')+
+      A.nft_all.map(n=>'<div class="mkn'+(n.active&&!n.sold?'':' off')+'" data-id="'+n.id+'">'+(n.img?'<img alt="" src="'+esc(n.img)+'">':'<span>💎</span>')+(n.slug?'<span title="'+esc(n.slug)+'">🎞</span>':'')+
         '<input class="nt" value="'+esc(n.title)+'" maxlength="60" style="flex:1;min-width:0"><input class="np" type="number" value="'+n.price+'" style="width:80px">'+
         (n.sold?'<span title="Sotilgan">🏷</span>':'')+'<span class="ns" title="Saqlash">💾</span><span class="ntg" title="Ko‘rsatish/yashirish">'+(n.active?'👁':'🚫')+'</span><span class="nd" title="O‘chirish">🗑</span></div>').join('')+
       (A.recent.length?'<div class="lbl" style="margin-top:16px">📜 Oxirgilar</div>'+A.recent.map(q).join(''):'');
@@ -27351,7 +27716,7 @@ function marketAdmin(d){
     box.querySelectorAll('[data-dl]').forEach(b=>b.onclick=()=>{ const note=prompt('Izoh (ixtiyoriy, masalan Fragment tranzaksiyasi):','')||''; save({act:'deliver',id:+b.dataset.dl,note:note}); });
     box.querySelectorAll('[data-rf]').forEach(b=>b.onclick=()=>{ if(confirm('Buyurtma #'+b.dataset.rf+' bekor qilinib, to‘lov qaytarilsinmi?')) save({act:'refund',id:+b.dataset.rf}); });
     box.querySelector('#mkNa').onclick=()=>{ const f=box.querySelector('#mkNf').files[0];
-      const p={act:'nft_add',title:box.querySelector('#mkNt').value,price:box.querySelector('#mkNp').value,note:box.querySelector('#mkNn').value,img_url:box.querySelector('#mkNu').value};
+      const p={act:'nft_add',slug:box.querySelector('#mkNs').value.trim(),title:box.querySelector('#mkNt').value,price:box.querySelector('#mkNp').value,note:box.querySelector('#mkNn').value,img_url:box.querySelector('#mkNu').value};
       if(f) chatShrink(f).then(u=>{ p.img_data=u; delete p.img_url; save(p); }).catch(()=>toast(MKERR.image)); else save(p); };
     box.querySelectorAll('.mkn').forEach(r=>{ const id=+r.dataset.id;
       r.querySelector('.ns').onclick=()=>{ const n=(d.market.admin.nft_all||[]).find(x=>x.id===id)||{};
@@ -27370,7 +27735,7 @@ function setTab(k){
   if(k==='crash' && window.CR) window.CR.poke();
   if(k==='news' && window.DD) newsSeen(window.DD);
   if(k==='media') MEDIA.show();
-  if(k==='market') MARKET.show();
+  if(k==='market') MARKET.show(); else MKA.clear();
   SND.music(k==='crash'||k==='frog'||k==='kami'?k:null);
   window.scrollTo(0,0);
 }

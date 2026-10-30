@@ -443,8 +443,9 @@
   juftlik yo'q, ikkalasi botni ishlatgan, jinslar qarama-qarshi bo'lsa juftlik (pair_merge_kids); unpair — shu juftlik bo'lsa ajrashish
   (`divorce_settle(c, pair, 0)` — vasiylik standart qoida, `divorce_notify`). Bir martalik `para_sync_v1` (`para_sync_initial`) — mavjud juftliklar Empire'ga.
 - 👑 VIP ↔ Empire Mafia: `web_vip_grant` (berish/uzaytirish/olish) → `vip_sync_bg(uid, until)` → `POST {EXCHANGE_PARTNER_URL}/exchange/vip`
-  ({user_id, until (0 = yo'q), ts}, o'sha HMAC). Kiruvchi `/exchange/vip` (`_vip_in` → `vip_apply_incoming`): `vip_users.until` yoziladi
-  (until ≤ hozir → o'chadi), qayta push QILINMAYDI (aylanma yo'q). Ownerlar `is_vip` orqali doim VIP — push yo'q. Bir martalik `vip_sync_v1`
+  ({user_id, until (0 = yo'q), ts}, o'sha HMAC). Kiruvchi `/exchange/vip` (`_vip_in` → `vip_apply_incoming`): faqat `src=="buy"`
+  (Empire'da YANGI xarid) qabul qilinadi — muddat `max(joriy, kelgan)` gacha uzaytiriladi; `src` yo'q / boshqa yoki until ≤ hozir →
+  200 `{"result":"ignored"}` (hamkor qayta urinmaydi). Kiruvchi so'rov bu yerdagi VIP'ni hech qachon olmaydi/qisqartirmaydi; qayta push QILINMAYDI. Ownerlar `is_vip` orqali doim VIP — push yo'q. Bir martalik `vip_sync_v1`
   (`vip_sync_initial`) — faol VIP'lar Empire'ga.
 - 🚀 Test rejimdan chiqarildi (`init_webapp` bir martalik `tests_open_v1`, `webapp_flags` standartlari): Kamikaze, VIP o'yinlar, ovozli xona, EMP — hamma uchun. 🧍 3D avatar va 🎬 Media (`media_test_v1`) test rejimida qoladi (owner panelda yoqiladi).
 - 👑 VIP: `/vips` (ownerlar, `cmd_vips`) va web Owner → 👑 VIP ro'yxati — olgan sana, tugash, qolgan vaqt, kim bergan (`vip_list`: since/left/by). Web app'da VIP sotib olish `/app/api/vip/buy` → `web_vip_buy`: `VIP_EMP_PRICE` 11 EMP → `VIP_BUY_DAYS` 30 kun (faol bo'lsa uzaytiriladi, EMP atomik, `vip_sync_bg` → Empire); VIP sahifasi tepasida `.vipbuy` karta.
@@ -461,3 +462,17 @@
   NEON RUSH online: menyu "🌐 ONLINE" (`GP.online/startNet`), `Race({net})` — boshqa o'yinchilar `c.remote` (`netStep`, `netState`), power-up
   `use` hodisasi, trassa = xona `mode`, pauza yo'q. CLASSIC STRIKE online: `RoundManager.online` (DM 25 frag, botlarsiz), boshqa o'yinchilar
   bot modeli (`netBot`, `CS3D.netHandlers`), zarar `hit` → qurbon `die`, o'q izi `sh`; xarita = xona `mode`.
+- 🏪 EMPIRE MARKET (web app → Games → `.gcc.mkt` → `#s-market`, `marketPage`/`MARKET`, "‹ Games"; Fragment uslubi; test — `market_enabled_for`:
+  webapp_config "market" (standart 0) yoki `can_test`; Owner → ⚙️ "Market — hamma uchun", `OWNER_FLAG_KEYS`). Tablar ⭐ Premium / 🎁 Gifts /
+  🌟 Stars / 💎 NFT / 🧾 Buyurtmalarim. Avtomatik (botning ⭐ balansidan): Premium 3/6/12 oy (`MARKET_PREMIUM` 1000/1500/2500 ⭐ →
+  `gift_premium_subscription`), Gifts (`get_available_gifts` 10 daq kesh `_MARKET_GIFTS`, eskizlar `tg_sticker_files` → `/app/tgs/`, `send_gift`);
+  sotishdan oldin `get_my_star_balance` (30 s kesh) ≥ tannarx, aks holda "Vaqtincha mavjud emas". Qo'lda (Bot API yetkaza olmaydi): Stars paketlari
+  (`MARKET_STARS_PACKS`) va NFT (`market_nft`, ownerlar qo'shadi; rasm `_chat_save_image` → `/app/newsimg/` yoki https havola) — to'langach
+  navbat + ownerlarga bot xabari, web Owner → 🏪 Market'da "✅ Yetkazildi" / "↩️ Qaytarish". Narx = tannarx × (1+ustama%) yuqoriga
+  (`market_price`); `market_config` (markup, premium/gift/stars/nft yoqish, `emp_per_star` — 0 bo'lsa EMP bilan to'lash yo'q). Buyurtma
+  `market_orders` (status pending→paid→delivered | refunded | failed; `charge_id` UNIQUE, EMP to'lovda `emp:<id>`); qabul qiluvchi o'zi yoki
+  `chat_resolve`. To'lov: `create_invoice_link` payload `mk:<order>:<uid>:<stars>` → `on_pre_checkout` (`market_check_payload`: egasi, pending,
+  1 soat TTL, narx, NFT sotilmagan) → `on_successful_payment` (`market_on_payment`: takror update e'tiborsiz, yopilgan buyurtmaga 2-to'lov
+  avtomatik `refund_star_payment`) → `market_fulfil`; avto yetkazish xatosi → `market_refund` (⭐ refund yoki EMP qaytadi). API
+  `/app/api/market/{catalog,order,state}` + ownerlar `{config,nft_add,nft_update,nft_toggle,nft_delete,deliver,refund,balance}` → `web_market`.
+  Payload `market` (`market_payload`; ownerga `admin`: cfg, balans, navbat, NFT, statistika). Kod bloki `# ── 🏪 EMPIRE MARKET` … `/EMPIRE MARKET`.

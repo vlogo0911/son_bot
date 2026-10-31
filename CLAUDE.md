@@ -525,7 +525,8 @@
   StreamEnded → `music_on_end`, ChatUpdate kicked/left/closed → `music_clear`). Guruhda `/play nomi|havola` yoki audio/ovozli xabarga reply:
   manba `_music_fetch_sync` (yt-dlp: ytsearch1 → zaxira scsearch1; havola faqat `MUSIC_URL_HOSTS` youtube/soundcloud; YouTube havolasi
   yiqilsa oEmbed sarlavhasi bilan SoundCloud — `_music_targets`), Telegram audio `music_from_tg` (≤20 MB); fayllar `MUSIC_DIR`
-  (volume/music_cache, `music_cache_trim` 800 MB). `music_join`: yordamchi guruhda bo'lmasa — public → JoinChannel, yopiq → bot
+  (`_music_pick_dir`: env `MUSIC_DIR` yoki /tmp/empire_music va volume'dan bo'sh joyi ko'progi — baza volume'i to'lmasin; eski volume keshi
+  `music_cleanup_videos` da o'chadi; `music_cache_trim` 800 MB va diskda ≥2×`VIDEO_DISK_RESERVE` (150 MB) bo'sh; `music_disk_ok`/`music_disk_text` — aniq MB). `music_join`: yordamchi guruhda bo'lmasa — public → JoinChannel, yopiq → bot
   `create_chat_invite_link(member_limit=1)` → ImportChatInvite (join-request → `approve_chat_join_request`). Ovozli chat yo'q/huquq yo'q →
   bot yordamchiga `can_manage_video_chats` beradi va qayta uriniladi. Navbat `MUSIC_Q` (xotirada, `MUSIC_QUEUE_MAX` 25), trek ≤
   `MUSIC_MAX_DURATION` (env, 1800 s), /play `MUSIC_USER_RATE` 30 s da 3 ta. Boshqaruv `/skip /next /pause /resume /end /mstop /queue /navbat`

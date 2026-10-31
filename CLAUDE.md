@@ -484,3 +484,18 @@
   `GET /app/nft/<slug>.{tgs,webp,json}` (`nft_asset`: faqat nft.fragment.com, redirect yo'q, 2 MB, volume `nft_cache/`, 1 kun kesh;
   .tgs → ochilgan Lottie (to'liq karta: model+fon+naqsh), .json → nom/#raqam/Model·Backdrop·Symbol + fon ranglari `_nft_bg`
   (webp'dan); `original_details` olinmaydi). Fragment rarity % bermaydi. Havolasiz NFT — eski rasm yuklash.
+  🤖 NFT AVTOMATIK (Telethon userbot, `telethon==1.45.0`, kerak bo'lganda import): umumiy qatlam `ub_*` (keyingi per-user userbotlar
+  uchun ham): `ub_tl` (TL klasslari), `ub_make_client`, `ub_connect(session, expect_id)`, `ub_err`, `ub_session_encrypt/decrypt`
+  (Fernet `f1:`, kalit env `USERBOT_SESSION_KEY`; kalit bo'lmasa login/saqlash rad — `ub_key`, owner'ga ogohlantirish). Faqat
+  `NFT_USERBOT_ID` (1150777456): owner web Owner → 🏪 Market → 🤖 Userbot: telefon → kod → 2FA (`ub_send_code/ub_code/ub_password`,
+  10 urinish/10 daq), `get_me().id` boshqa bo'lsa `log_out` + rad. Sessiya `nft_userbot` (shifrlangan; env `NFT_USERBOT_SESSION` ustun),
+  payload/logga chiqmaydi. Env: `TG_API_ID`, `TG_API_HASH`, `USERBOT_SESSION_KEY`. Resale: `nft_collections` (follow / `rs_all`),
+  `nft_rs_sync` (getStarGifts + getResaleStarGifts stars_only, ko'rinmagan narxlanganlar getUniqueStarGift; `nft_rs_worker` ~10 daq,
+  "🔄 Sync" fonda) → `nft_resale` (slug kichik harf — `/app/nft/` proksi, `tg_slug`, cost, approved_cost, price, enabled, available,
+  sold, reserved). Narxsiz listing sotilmaydi; `rs_price` = narx + joriy tannarxni tasdiqlash, `rs_bulk` (cost×(1+%) — narxsiz/qayta
+  tasdiq/hammasi); Telegram narxi > approved → `reapprove`. Buyurtma item `r<id>` (`nft_rs_id`): invoysdan oldin `nft_rs_precheck`
+  (hali sotuvda, narx, userbot ⭐ balansi, qabul qiluvchi — ID keshda yoki @username, ID mos bo'lishi shart → `no_username`),
+  `nft_rs_reserve` (CAS). To'lov → `nft_rs_fulfil`: paid→`buying` (atomik) + `_NFT_BUY_LOCK` → qayta tekshiruv → getPaymentForm
+  (narx ≤ approved) → sendStarsForm (InputInvoiceStarGiftResale) → delivered/sold; xato → reserved=0 + `market_refund` + ownerlarga
+  xabar; tarmoq uzilishi (noaniq) → `failed`, qaytarilmaydi, owner navbatda hal qiladi. Jurnal `nft_resale_log`. Userbot ulanmagan bo'lsa
+  resale "Sotuvda yo'q" (offline), qo'lda NFT'lar ishlayveradi. Payload: `nft` ichida `rs`/`state`; ownerga `admin.ub`, `admin.rs`.

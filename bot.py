@@ -8881,6 +8881,7 @@ async def post_init(application: Application):
     application.create_task(web_crash_round_worker(application), name="web-crash-rounds")
     application.create_task(para_sync_initial(application), name="para-sync-initial")   # 💞 bir martalik: juftliklar → Empire
     application.create_task(vip_sync_initial(application), name="vip-sync-initial")     # 👑 bir martalik: VIP'lar → Empire
+    application.create_task(nft_rs_worker(application), name="nft-resale-worker")      # 🤖 NFT userbot: ulanish + resale sinxron
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -8970,6 +8971,11 @@ async def post_shutdown(application: Application):
         timer = game.get("timer")
         if timer and not timer.done():
             timer.cancel()
+    if _NFT_UB.get("client") is not None:      # 🤖 NFT userbot ulanishini yopamiz
+        try:
+            await _NFT_UB["client"].disconnect()
+        except Exception:  # noqa: BLE001
+            pass
     if _conn is not None:
         _conn.real_close()
 
@@ -19461,7 +19467,8 @@ MARKET_PREMIUM = {3: 1000, 6: 1500, 12: 2500}       # oy → Telegram narxi (⭐
 MARKET_STARS_PACKS = (50, 100, 250, 500, 1000)       # qo'lda yetkaziladigan Stars paketlari
 MARKET_KINDS = ("premium", "gift", "stars", "nft")
 MARKET_AUTO = ("premium", "gift")
-MARKET_CFG_DEFAULT = {"markup": 15.0, "premium": 1, "gift": 1, "stars": 1, "nft": 1, "emp_per_star": 0.0}
+MARKET_CFG_DEFAULT = {"markup": 15.0, "premium": 1, "gift": 1, "stars": 1, "nft": 1, "emp_per_star": 0.0,
+                      "rs_all": 0, "rs_markup": 10.0}     # 🤖 resale: barcha kolleksiyalar / ommaviy ustama (faqat tugma bilan)
 MARKET_ORDER_TTL = 3600          # s — to'lanmagan buyurtma shuncha vaqtdan keyin eskiradi
 MARKET_PENDING_MAX = 5           # bir vaqtda ochiq (to'lanmagan) buyurtmalar
 MARKET_GIFTS_TTL = 600           # getAvailableGifts keshi
@@ -19469,7 +19476,8 @@ MARKET_BAL_TTL = 30              # getMyStarBalance keshi
 MARKET_MAX_STARS = 100_000
 MARKET_TEXT_MAX = 120
 MARKET_ACTS = ("catalog", "order", "state", "config", "nft_add", "nft_update", "nft_toggle", "nft_delete", "deliver", "refund",
-               "balance")
+               "balance", "ub_status", "ub_send_code", "ub_code", "ub_password", "ub_cancel", "ub_logout",
+               "rs_sync", "rs_follow", "rs_price", "rs_bulk", "rs_toggle")
 _MARKET_GIFTS = {"at": 0.0, "items": []}
 _MARKET_BAL = {"at": 0.0, "v": None}
 
@@ -19726,6 +19734,23 @@ def init_market(c):
         c.execute("ALTER TABLE market_nft ADD COLUMN slug TEXT NOT NULL DEFAULT ''")
     if "meta" not in cols:
         c.execute("ALTER TABLE market_nft ADD COLUMN meta TEXT NOT NULL DEFAULT ''")
+    # 🤖 NFT userbot: sessiya (faqat server; payload/logga chiqmaydi), kolleksiyalar, resale ro'yxati, xarid jurnali
+    c.execute("""CREATE TABLE IF NOT EXISTS nft_userbot (id INTEGER PRIMARY KEY CHECK (id=1), session TEXT NOT NULL,
+        user_id INTEGER NOT NULL, by_owner INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS nft_collections (gift_id INTEGER PRIMARY KEY, title TEXT NOT NULL DEFAULT '',
+        follow INTEGER NOT NULL DEFAULT 0, resale INTEGER NOT NULL DEFAULT 0, min_stars INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS nft_resale (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL UNIQUE,
+        tg_slug TEXT NOT NULL, unique_id INTEGER NOT NULL DEFAULT 0, gift_id INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL,
+        num INTEGER NOT NULL DEFAULT 0, meta TEXT NOT NULL DEFAULT '', cost INTEGER NOT NULL DEFAULT 0,
+        approved_cost INTEGER NOT NULL DEFAULT 0, price INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+        available INTEGER NOT NULL DEFAULT 1, sold INTEGER NOT NULL DEFAULT 0, reserved INTEGER NOT NULL DEFAULT 0,
+        seen_at INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""")
+    c.execute("CREATE INDEX IF NOT EXISTS nft_resale_gift ON nft_resale(gift_id)")
+    c.execute("""CREATE TABLE IF NOT EXISTS nft_resale_log (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL,
+        listing_id INTEGER NOT NULL, slug TEXT NOT NULL DEFAULT '', user_id INTEGER NOT NULL, target_id INTEGER NOT NULL,
+        cost INTEGER NOT NULL DEFAULT 0, price INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
+        at INTEGER NOT NULL)""")
 
 
 def market_enabled_for(uid):
@@ -19736,7 +19761,7 @@ def market_cfg():
     d = dict(MARKET_CFG_DEFAULT)
     for k, v in db().execute("SELECT key, value FROM market_config"):
         if k in d:
-            d[k] = float(v) if k in ("markup", "emp_per_star") else int(v)
+            d[k] = float(v) if k in ("markup", "emp_per_star", "rs_markup") else int(v)
     return d
 
 
@@ -19847,7 +19872,7 @@ def market_order_json(o, owner=False):
         st = "expired"
     out = {"id": o["id"], "kind": o["kind"], "title": o["title"], "price": o["price_stars"], "pay": o["pay_method"],
            "emp": o["emp_amount"], "status": st, "at": tashkent_dt(o["created_at"]), "self": o["target_id"] == o["user_id"],
-           "to": _plain_person(o["target_id"]), "note": o["note"]}
+           "to": _plain_person(o["target_id"]), "note": o["note"], "rs": nft_rs_id(o["item"]) is not None if o["kind"] == "nft" else False}
     if owner:
         un = db().execute("SELECT username FROM users WHERE user_id=?", (o["target_id"],)).fetchone()
         out.update(buyer=_plain_person(o["user_id"]), buyer_id=o["user_id"], target_id=o["target_id"],
@@ -19880,6 +19905,12 @@ def _market_item(kind, item, cfg, gifts):
             return None
         return f"🌟 {n} Stars", n, market_price(n, cfg["markup"])
     if kind == "nft":
+        lid = nft_rs_id(item)
+        if lid is not None:          # 🤖 Telegram resale (userbot avtomatik sotib oladi)
+            L = nft_rs_get(lid)
+            if not L or nft_rs_state(L) != "ok" or not _NFT_UB["ok"]:
+                return None
+            return f"💎 {L['title']} #{L['num']}"[:80], L["cost"], L["price"]
         try:
             n = market_nft_get(int(item))
         except (TypeError, ValueError):
@@ -19913,7 +19944,7 @@ def market_payload(uid, balance=None):
         "gifts_loaded": bool(_MARKET_GIFTS["items"]),
         "stars": [{"n": n, "price": market_price(n, cfg["markup"]), "emp": mk(market_price(n, cfg["markup"]))}
                   for n in MARKET_STARS_PACKS] if cfg["stars"] else [],
-        "nft": [dict(x, emp=mk(x["price"])) for x in market_nft_list()] if cfg["nft"] else [],
+        "nft": ([dict(x, emp=mk(x["price"])) for x in market_nft_list()] + nft_rs_public(mk)) if cfg["nft"] else [],
         "orders": [market_order_json(market_order(r[0])) for r in c.execute(
             "SELECT id FROM market_orders WHERE user_id=? AND (status<>'pending' OR created_at>?) ORDER BY id DESC LIMIT 20",
             (uid, int(time.time()) - MARKET_ORDER_TTL))],
@@ -19924,10 +19955,11 @@ def market_payload(uid, balance=None):
         out["admin"] = {
             "cfg": cfg, "balance": bal, "nft_all": market_nft_list(True),
             "queue": [market_order_json(market_order(r[0]), True) for r in c.execute(
-                "SELECT id FROM market_orders WHERE status IN ('paid','failed') ORDER BY id LIMIT 50")],
+                "SELECT id FROM market_orders WHERE status IN ('paid','failed','buying') ORDER BY id LIMIT 50")],
             "recent": [market_order_json(market_order(r[0]), True) for r in c.execute(
                 "SELECT id FROM market_orders WHERE status IN ('delivered','refunded') ORDER BY updated_at DESC LIMIT 15")],
             "stats": {"delivered": st[0], "revenue": st[1], "cost": st[2]},
+            "ub": nft_ub_view(uid), "rs": nft_rs_admin(),       # 🤖 userbot holati (sessiya HECH QACHON yo'q)
         }
     return out
 
@@ -19959,6 +19991,8 @@ async def web_market_order(uid, body):
         return {"error": "not_found"}
     msg = re.sub(r"[\x00-\x1f]", " ", str(body.get("text") or "")).strip()[:MARKET_TEXT_MAX]
     gifts = await market_gifts() if kind == "gift" else []
+    if kind == "nft" and nft_rs_id(body.get("item")) is not None:
+        await nft_ub_client()        # restartdan keyin hali ulanmagan bo'lsa
     it = _market_item(kind, body.get("item"), cfg, gifts)
     if not it:
         return {"error": "item"}
@@ -19969,6 +20003,14 @@ async def web_market_order(uid, body):
         bal = await market_star_balance(force=True)
         if bal is None or bal < cost:
             return {"error": "unavailable"}
+    rs_id = nft_rs_id(body.get("item")) if kind == "nft" else None
+    if rs_id is not None:            # 🤖 hali sotuvda, narx ≤ tasdiqlangan, userbot balansi, qabul qiluvchi topiladimi
+        err = await nft_rs_precheck(rs_id, target)
+        if err:
+            return {"error": err, "market": market_payload(uid)}
+        title, cost, price = _market_item(kind, body.get("item"), cfg, gifts) or (title, cost, 0)
+        if not 1 <= price <= MARKET_MAX_STARS:
+            return {"error": "item"}
     now = int(time.time())
     c = db()
     if c.execute("SELECT COUNT(*) FROM market_orders WHERE user_id=? AND status='pending' AND created_at>?",
@@ -19984,14 +20026,17 @@ async def web_market_order(uid, body):
         oid = c.execute("""INSERT INTO market_orders(user_id, target_id, kind, item, title, price_stars, cost_stars, pay_method,
                            emp_amount, status, msg, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?, 'pending', ?, ?, ?)""",
                         (uid, target, kind, str(body.get("item")), title, price, cost, pay, emp_amt, msg, now, now)).lastrowid
+        if rs_id is not None and not nft_rs_reserve(c, rs_id, oid):
+            c.execute("UPDATE market_orders SET status='cancelled', note='nft_busy' WHERE id=?", (oid,))
+            return {"error": "item", "market": market_payload(uid)}
         if pay == "emp":
             if not c.execute("UPDATE emp_wallet SET emp=emp-? WHERE user_id=? AND emp>=?", (emp_amt, uid, emp_amt)).rowcount:
                 c.execute("UPDATE market_orders SET status='cancelled', note='emp_funds' WHERE id=?", (oid,))
                 oid = None
             else:
                 c.execute("UPDATE market_orders SET status='paid', charge_id=? WHERE id=?", (f"emp:{oid}", oid))
-                if kind == "nft" and not c.execute("UPDATE market_nft SET sold=1 WHERE id=? AND sold=0",
-                                                    (int(body.get("item")),)).rowcount:
+                if kind == "nft" and rs_id is None and not c.execute("UPDATE market_nft SET sold=1 WHERE id=? AND sold=0",
+                                                                     (int(body.get("item")),)).rowcount:
                     c.execute("UPDATE market_orders SET note='nft_sold' WHERE id=?", (oid,))
     if pay == "emp":
         if not oid:
@@ -19999,6 +20044,9 @@ async def web_market_order(uid, body):
         if market_order(oid)["note"] == "nft_sold":
             await market_refund(_EXCHANGE_LOOP_BOT, oid, "NFT allaqachon sotilgan")
             return {"error": "item", "market": market_payload(uid)}
+        if rs_id is not None:        # userbot xaridi 10 s dan uzoq bo'lishi mumkin — fonda; klient holatni so'raydi
+            asyncio.get_running_loop().create_task(market_fulfil(_EXCHANGE_LOOP_BOT, oid))
+            return {"result": "paid", "order": market_order_json(market_order(oid)), "market": market_payload(uid)}
         await market_fulfil(_EXCHANGE_LOOP_BOT, oid)
         return {"result": "paid", "order": market_order_json(market_order(oid)), "market": market_payload(uid)}
     bot = _EXCHANGE_LOOP_BOT
@@ -20036,7 +20084,13 @@ def market_check_payload(payload, user_id, amount, currency):
         return None, "Narx o‘zgargan — qaytadan oching"
     if not market_enabled_for(uid) or not market_cfg()[o["kind"]]:
         return None, "Market hozircha yopiq"
-    if o["kind"] == "nft":
+    if o["kind"] == "nft" and nft_rs_id(o["item"]) is not None:
+        L = nft_rs_get(nft_rs_id(o["item"]))
+        if not L or L["reserved"] != oid or L["sold"] or nft_rs_state(L, oid) != "ok" or L["price"] != o["price_stars"]:
+            return None, "Bu NFT endi sotuvda emas yoki narxi o‘zgargan"
+        if not _NFT_UB["ok"]:
+            return None, "Vaqtincha mavjud emas — keyinroq urinib ko‘ring"
+    elif o["kind"] == "nft":
         n = market_nft_get(int(o["item"]))
         if not n or not n["active"] or n["sold"]:
             return None, "Bu NFT allaqachon sotilgan"
@@ -20079,7 +20133,11 @@ async def market_on_payment(bot, user_id, sp):
             upd = c.execute("UPDATE market_orders SET status='paid', charge_id=?, updated_at=? WHERE id=? AND status='pending'",
                             (charge, int(time.time()), oid)).rowcount
             if upd and o["kind"] == "nft":
-                if not c.execute("UPDATE market_nft SET sold=1 WHERE id=? AND sold=0", (int(o["item"]),)).rowcount:
+                lid = nft_rs_id(o["item"])
+                if lid is not None:      # resale: zaxira shu buyurtmaniki bo'lishi shart
+                    if not c.execute("SELECT 1 FROM nft_resale WHERE id=? AND reserved=? AND sold=0", (lid, oid)).fetchone():
+                        c.execute("UPDATE market_orders SET note='nft_sold' WHERE id=?", (oid,))
+                elif not c.execute("UPDATE market_nft SET sold=1 WHERE id=? AND sold=0", (int(o["item"]),)).rowcount:
                     c.execute("UPDATE market_orders SET note='nft_sold' WHERE id=?", (oid,))
     if not upd:
         # mos kelmadi yoki buyurtma allaqachon to'langan (invoys havolasi qayta to'langan) → pulni qaytaramiz
@@ -20101,12 +20159,13 @@ async def market_on_payment(bot, user_id, sp):
 async def market_refund(bot, oid, reason=""):
     """⭐ → refundStarPayment, 🪙 → EMP qaytadi. status: refunded (yoki failed — qaytarib bo'lmadi)."""
     o = market_order(oid)
-    if not o or o["status"] not in ("paid", "failed"):
+    if not o or o["status"] not in ("paid", "failed", "buying"):
         return False
     c = db()
     if o["pay_method"] == "emp":
         with c:
-            if not c.execute("UPDATE market_orders SET status='refunded', note=?, updated_at=? WHERE id=? AND status IN ('paid','failed')",
+            if not c.execute("UPDATE market_orders SET status='refunded', note=?, updated_at=? WHERE id=? "
+                             "AND status IN ('paid','failed','buying')",
                              (reason[:200], int(time.time()), oid)).rowcount:
                 return False
             emp_change(c, o["user_id"], o["emp_amount"])
@@ -20125,7 +20184,10 @@ async def market_refund(bot, oid, reason=""):
                       ("refunded" if done else "failed", (reason if done else f"{reason} · refund xato")[:200], int(time.time()), oid))
     if done and o["kind"] == "nft" and o["note"] != "nft_sold":
         with c:
-            c.execute("UPDATE market_nft SET sold=0 WHERE id=?", (int(o["item"]),))
+            if nft_rs_id(o["item"]) is not None:     # resale: zaxira bo'shaydi (sotilgan bo'lsa — yo'q)
+                c.execute("UPDATE nft_resale SET reserved=0 WHERE id=? AND reserved=? AND sold=0", (nft_rs_id(o["item"]), oid))
+            else:
+                c.execute("UPDATE market_nft SET sold=0 WHERE id=?", (int(o["item"]),))
     if done:
         amt = f"{fmt_money(o['emp_amount'])} EMP 🪙" if o["pay_method"] == "emp" else f"{o['price_stars']}⭐"
         await market_notify(bot, o["user_id"], f"↩️ <b>Empire Market</b> #{oid}: {escape(o['title'])}\n"
@@ -20165,6 +20227,8 @@ async def market_fulfil(bot, oid):
             await market_notify(bot, o["target_id"], f"🎁 {person_name(o['user_id'])} sizga Empire Market orqali "
                                                      f"<b>{escape(o['title'])}</b> sovg‘a qildi!")
         return "delivered"
+    if o["kind"] == "nft" and nft_rs_id(o["item"]) is not None:
+        return await nft_rs_fulfil(bot, oid)          # 🤖 userbot avtomatik sotib olib yuboradi
     await market_notify(bot, o["user_id"], f"🧾 <b>Empire Market</b> #{oid}: {escape(o['title'])} to‘landi.\n"
                                            "⏳ Ownerlar qo‘lda yetkazadi (odatda 24 soat ichida) — holati web app'da.")
     un = db().execute("SELECT username FROM users WHERE user_id=?", (o["target_id"],)).fetchone()
@@ -20273,21 +20337,870 @@ async def web_market(uid, act, body):
             o = market_order(int(body.get("id")))
         except (TypeError, ValueError):
             o = None
-        if not o or o["status"] not in ("paid", "failed"):
+        if not o or o["status"] not in ("paid", "failed", "buying"):
             return {"error": "order"}
         if act == "deliver":
             with c:
-                c.execute("UPDATE market_orders SET status='delivered', note=?, updated_at=? WHERE id=? AND status IN ('paid','failed')",
+                c.execute("UPDATE market_orders SET status='delivered', note=?, updated_at=? WHERE id=? AND status IN ('paid','failed','buying')",
                           (str(body.get("note") or "")[:200], int(time.time()), o["id"]))
+                if o["kind"] == "nft" and nft_rs_id(o["item"]) is not None:
+                    c.execute("UPDATE nft_resale SET sold=1, available=0 WHERE id=? AND reserved=?", (nft_rs_id(o["item"]), o["id"]))
             await market_notify(bot, o["user_id"], f"✅ <b>Empire Market</b> #{o['id']}: {escape(o['title'])} yetkazildi"
                                                    + ("" if o["target_id"] == o["user_id"] else f" → {person_name(o['target_id'])}") + ".")
         elif not await market_refund(bot, o["id"], str(body.get("note") or "Owner tomonidan bekor qilindi")[:200]):
             return {"error": "refund"}
     elif act == "balance":
         await market_star_balance(force=True)
+    elif act.startswith(("ub_", "rs_")):
+        r = await nft_admin_action(uid, act, body)
+        if r.get("error"):
+            return r
+        return dict(r, market=market_payload(uid))
     else:
         return {"error": "act"}
     return {"result": "ok", "market": market_payload(uid)}
+# ── 🔐 USERBOT YORDAMCHI QATLAMI (Telethon StringSession) — NFT userbot va keyingi per-user userbotlar uchun umumiy ──
+# ub_tl() — Telethon klasslari (kerak bo'lganda import); ub_make_client(session) — klient; ub_connect(session, expect_id) —
+# ulanish + avtorizatsiya + get_me().id tekshiruvi; ub_session_encrypt/decrypt — sessiya DB'da FAQAT shifrlangan holda
+# (Fernet, kalit env USERBOT_SESSION_KEY; kalit bo'lmasa saqlash rad etiladi — UbKeyMissing). Sessiya klientga/logga chiqmaydi.
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name) or default)
+    except ValueError:
+        return default
+
+
+TG_API_ID = _env_int("TG_API_ID", 0)
+TG_API_HASH = (os.getenv("TG_API_HASH") or "").strip()
+USERBOT_SESSION_KEY = (os.getenv("USERBOT_SESSION_KEY") or "").strip()
+UB_ENC_PREFIX = "f1:"
+UB_ERR = {"PhoneNumberInvalidError": "phone", "PhoneNumberBannedError": "phone", "PhoneNumberUnoccupiedError": "phone",
+          "PhoneCodeInvalidError": "code", "PhoneCodeEmptyError": "code", "PhoneCodeExpiredError": "code_expired",
+          "PasswordHashInvalidError": "password", "FloodWaitError": "flood", "FloodError": "flood",
+          "SessionPasswordNeededError": "need_password"}
+_UB_TLC = []
+_UB_FERNET = []
+
+
+class UbKeyMissing(Exception):
+    """USERBOT_SESSION_KEY yo'q yoki yaroqsiz — sessiyani saqlab bo'lmaydi."""
+
+
+def ub_tl():
+    """Telethon klasslari (birinchi chaqiruvda import; o'rnatilmagan bo'lsa ImportError)."""
+    if _UB_TLC:
+        return _UB_TLC[0]
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon.tl import functions as F, types as T
+    tl = types.SimpleNamespace(
+        TelegramClient=TelegramClient, StringSession=StringSession,
+        GetStarGifts=F.payments.GetStarGiftsRequest, GetResale=F.payments.GetResaleStarGiftsRequest,
+        GetUnique=F.payments.GetUniqueStarGiftRequest, GetForm=F.payments.GetPaymentFormRequest,
+        SendStarsForm=F.payments.SendStarsFormRequest, GetStarsStatus=F.payments.GetStarsStatusRequest,
+        InvoiceResale=T.InputInvoiceStarGiftResale, InputPeerSelf=T.InputPeerSelf, StarsAmount=T.StarsAmount,
+        StarGift=T.StarGift, Unique=T.StarGiftUnique, AttrModel=T.StarGiftAttributeModel,
+        AttrBackdrop=T.StarGiftAttributeBackdrop, AttrPattern=T.StarGiftAttributePattern)
+    _UB_TLC.append(tl)
+    return tl
+
+
+def ub_api_ready():
+    return bool(TG_API_ID and TG_API_HASH)
+
+
+def _ub_fernet():
+    """Fernet USERBOT_SESSION_KEY dan: to'g'ri Fernet kaliti (44 belgi) yoki ixtiyoriy parol → SHA-256. Yo'q bo'lsa None."""
+    if _UB_FERNET:
+        return _UB_FERNET[0]
+    if not USERBOT_SESSION_KEY:
+        return None
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:
+        return None
+    import base64
+    try:
+        f = Fernet(USERBOT_SESSION_KEY.encode())
+    except (ValueError, TypeError):
+        f = Fernet(base64.urlsafe_b64encode(hashlib.sha256(USERBOT_SESSION_KEY.encode()).digest()))
+    _UB_FERNET.append(f)
+    return f
+
+
+def ub_crypto_ready():
+    return _ub_fernet() is not None
+
+
+def ub_session_encrypt(plain):
+    """StringSession → 'f1:<fernet token>'. Kalit bo'lmasa UbKeyMissing (ochiq holda HECH QACHON saqlanmaydi)."""
+    f = _ub_fernet()
+    if f is None:
+        raise UbKeyMissing("USERBOT_SESSION_KEY")
+    return UB_ENC_PREFIX + f.encrypt(str(plain).encode()).decode()
+
+
+def ub_session_decrypt(blob):
+    """'f1:...' → StringSession; kalit yo'q/o'zgargan yoki format noto'g'ri bo'lsa ''."""
+    blob = str(blob or "")
+    f = _ub_fernet()
+    if not blob.startswith(UB_ENC_PREFIX) or f is None:
+        return ""
+    try:
+        return f.decrypt(blob[len(UB_ENC_PREFIX):].encode()).decode()
+    except Exception:  # noqa: BLE001 — InvalidToken (kalit almashgan) va h.k.
+        return ""
+
+
+def ub_make_client(session="", device="Empire Market"):
+    tl = ub_tl()
+    return tl.TelegramClient(tl.StringSession(session or ""), TG_API_ID, TG_API_HASH, device_model=device,
+                             system_version="Linux", app_version="1.0", lang_code="uz", system_lang_code="uz",
+                             receive_updates=False, flood_sleep_threshold=5)
+
+
+def ub_err(e):
+    """Telethon xatosi → qisqa kod (klass nomi bo'yicha; sessiya/telefon matni qaytarilmaydi)."""
+    return UB_ERR.get(type(e).__name__, "")
+
+
+def ub_me(me):
+    name = " ".join(x for x in (getattr(me, "first_name", None), getattr(me, "last_name", None)) if x)
+    return {"id": int(getattr(me, "id", 0) or 0), "name": name[:64], "username": getattr(me, "username", None)}
+
+
+async def ub_disconnect(cl):
+    if cl is not None:
+        try:
+            await cl.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def ub_connect(session, expect_id=None):
+    """StringSession → (client, me, None) yoki (None, None, xato: api|telethon|unauthorized|connect|wrong_account)."""
+    if not ub_api_ready():
+        return None, None, "api"
+    cl = None
+    try:
+        cl = ub_make_client(session)
+        await cl.connect()
+        if not await cl.is_user_authorized():
+            await ub_disconnect(cl)
+            return None, None, "unauthorized"
+        me = await cl.get_me()
+    except ImportError:
+        return None, None, "telethon"
+    except Exception as e:  # noqa: BLE001 — faqat klass nomi logga (sessiya matni tushmasin)
+        logger.warning("Userbot ulanmadi: %s", type(e).__name__)
+        await ub_disconnect(cl)
+        return None, None, "connect"
+    if expect_id is not None and int(getattr(me, "id", 0) or 0) != int(expect_id):
+        await ub_disconnect(cl)
+        return None, None, "wrong_account"
+    return cl, me, None
+
+
+# ── 🤖 NFT USERBOT (Telethon): Telegram "Collectibles" qayta sotuv bozoridan AVTOMATIK xarid ──
+# Faqat NFT_USERBOT_ID akkaunti (standart 1150777456). Sessiya — `nft_userbot.session` (Fernet bilan shifrlangan) yoki env
+# NFT_USERBOT_SESSION. Narxni FAQAT ownerlar belgilaydi: listing narx qo'yilmaguncha sotilmaydi; Telegram narxi
+# tasdiqlangan tannarxdan oshsa — qayta tasdiq kerak.
+NFT_USERBOT_ID = _env_int("NFT_USERBOT_ID", 1150777456)
+NFT_USERBOT_SESSION_ENV = (os.getenv("NFT_USERBOT_SESSION") or "").strip()
+NFT_RS_SYNC_GAP = 600            # avtomatik sinxron oralig'i (narxlangan listing yoki kuzatilgan kolleksiya bo'lsa)
+NFT_RS_SYNC_MIN = 30             # qo'lda "🔄 Sync" oralig'i
+NFT_RS_PAGE = 30                 # har kolleksiyadan eng arzon N ta
+NFT_RS_COLL_MAX = 60             # bitta sinxronda kolleksiyalar
+NFT_RS_RECHECK_MAX = 40          # ro'yxatda ko'rinmagan narxlangan listinglar alohida tekshiriladi
+NFT_UB_BAL_TTL = 30
+NFT_UB_LOGIN_TTL = 600
+NFT_UB_RETRY = 300               # ulanmagan bo'lsa worker qayta urinish oralig'i
+NFT_UB_RATE = (10, 600)          # login urinishlari: har owner 10 daqiqada 10 ta
+_NFT_UB = {"client": None, "ok": False, "me": None, "err": "", "bal": None, "bal_at": 0.0, "src": "", "try_at": 0.0}
+_NFT_UB_LOGIN = {}               # owner_id → {client, phone, hash, at, step}
+_NFT_UB_HITS = {}
+_NFT_RS = {"at": 0.0, "running": False, "err": "", "n": 0, "manual_at": 0.0}
+_NFT_CONN_LOCK = asyncio.Lock()
+_NFT_BUY_LOCK = asyncio.Lock()   # userbot bir vaqtda bitta xarid qiladi
+
+
+def _nft_ub_session():
+    """(session, manba) — env ustun; aks holda DB (shifr ochiladi). Faqat server ichida ishlatiladi."""
+    if NFT_USERBOT_SESSION_ENV:
+        return NFT_USERBOT_SESSION_ENV, "env"
+    r = db().execute("SELECT session FROM nft_userbot WHERE id=1").fetchone()
+    if not r or not r[0]:
+        return "", ""
+    s = ub_session_decrypt(r[0])
+    return (s, "db") if s else ("", "locked")      # kalit yo'q/almashgan — owner qayta ulaydi
+
+
+def _nft_ub_forget():
+    with db() as c:
+        c.execute("DELETE FROM nft_userbot WHERE id=1")
+
+
+async def _nft_ub_drop(err):
+    cl = _NFT_UB["client"]
+    _NFT_UB.update(client=None, ok=False, err=err, bal=None, bal_at=0.0)
+    await ub_disconnect(cl)
+
+
+async def nft_ub_client():
+    """Ulangan va tekshirilgan (get_me().id == NFT_USERBOT_ID) klient yoki None (sabab `_NFT_UB['err']`)."""
+    st = _NFT_UB
+    async with _NFT_CONN_LOCK:
+        cl = st["client"]
+        if cl is not None:
+            try:
+                if not cl.is_connected():
+                    await cl.connect()
+                if await cl.is_user_authorized():
+                    return cl
+            except Exception as e:  # noqa: BLE001
+                logger.warning("NFT userbot qayta ulanmadi: %s", type(e).__name__)
+            await _nft_ub_drop("disconnected")
+        st["try_at"] = time.time()
+        sess, src = _nft_ub_session()
+        if not sess:
+            st.update(ok=False, err="ub_key" if src == "locked" else "no_session")
+            return None
+        cl, me, err = await ub_connect(sess, NFT_USERBOT_ID)
+        if err:
+            if src == "db" and err in ("unauthorized", "wrong_account"):
+                _nft_ub_forget()       # bekor qilingan / boshqa akkaunt sessiyasi — o'chiriladi, owner qayta ulaydi
+            if err == "wrong_account":
+                logger.warning("NFT userbot: boshqa akkaunt sessiyasi rad etildi")
+            st.update(ok=False, err=err)
+            return None
+        st.update(client=cl, ok=True, err="", me=ub_me(me), src=src, bal_at=0.0)
+        return cl
+
+
+async def nft_ub_balance(force=False):
+    """Userbot ⭐ balansi (payments.getStarsStatus, kesh 30 s). Xato bo'lsa None."""
+    now = time.time()
+    if not force and now - _NFT_UB["bal_at"] < NFT_UB_BAL_TTL:
+        return _NFT_UB["bal"]
+    cl = await nft_ub_client()
+    if cl is None:
+        return None
+    tl = ub_tl()
+    try:
+        r = await cl(tl.GetStarsStatus(peer=tl.InputPeerSelf()))
+        v = int(getattr(getattr(r, "balance", None), "amount", 0) or 0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("NFT userbot balansi olinmadi: %s", type(e).__name__)
+        v = None
+    _NFT_UB.update(bal=v, bal_at=now)
+    return v
+
+
+def nft_rs_id(item):
+    """'r12' → 12 (resale listing), aks holda None (qo'lda qo'shilgan NFT)."""
+    m = re.fullmatch(r"r([0-9]{1,9})", str(item or ""))
+    return int(m.group(1)) if m else None
+
+
+_RS_COLS = ("id", "slug", "tg_slug", "unique_id", "gift_id", "title", "num", "meta", "cost", "approved_cost", "price", "enabled",
+            "available", "sold", "reserved", "seen_at", "updated_at")
+
+
+def nft_rs_get(lid):
+    r = db().execute(f"SELECT {', '.join(_RS_COLS)} FROM nft_resale WHERE id=?", (lid,)).fetchone()
+    return dict(zip(_RS_COLS, r)) if r else None
+
+
+def _rs_hold_active(oid, now=None):
+    """Listing zaxirasi (buyurtma) hali kuchdami: to'lov kutilmoqda (TTL ichida) yoki to'langan/xarid/noaniq/yetkazilgan."""
+    if not oid:
+        return False
+    r = db().execute("SELECT status, created_at FROM market_orders WHERE id=?", (oid,)).fetchone()
+    if not r:
+        return False
+    if r[0] == "pending":
+        return (now or time.time()) - r[1] <= MARKET_ORDER_TTL
+    return r[0] in ("paid", "buying", "failed", "delivered")
+
+
+def nft_rs_state(L, for_order=None):
+    """ok | sold | gone | hidden | no_price | reapprove | reserved. for_order — shu buyurtmaning o'z zaxirasi bloklamaydi."""
+    if L["sold"]:
+        return "sold"
+    if not L["available"]:
+        return "gone"
+    if not L["enabled"]:
+        return "hidden"
+    if L["price"] <= 0 or L["approved_cost"] <= 0:
+        return "no_price"
+    if L["cost"] <= 0 or L["cost"] > L["approved_cost"]:
+        return "reapprove"
+    if L["reserved"] and L["reserved"] != for_order and _rs_hold_active(L["reserved"]):
+        return "reserved"
+    return "ok"
+
+
+def nft_rs_reserve(c, lid, oid):
+    """Atomik zaxira (CAS): faqat holat ok bo'lsa. True/False."""
+    L = nft_rs_get(lid)
+    if not L or nft_rs_state(L) != "ok":
+        return False
+    return bool(c.execute("UPDATE nft_resale SET reserved=? WHERE id=? AND reserved=? AND sold=0", (oid, lid, L["reserved"])).rowcount)
+
+
+def _nft_meta(L):
+    try:
+        return json.loads(L["meta"]) if L["meta"] else {}
+    except ValueError:
+        return {}
+
+
+def nft_rs_public(mk):
+    """Foydalanuvchilarga: owner narx qo'ygan va ko'rinadigan listinglar (sotilgani 1 kun ko'rinadi). Tannarx berilmaydi."""
+    now = int(time.time())
+    out = []
+    for r in db().execute(f"SELECT {', '.join(_RS_COLS)} FROM nft_resale WHERE enabled=1 AND price>0 AND approved_cost>0 "
+                          "AND (sold=0 OR updated_at>?) ORDER BY sold, price LIMIT 200", (now - 86400,)):
+        L = dict(zip(_RS_COLS, r))
+        st = nft_rs_state(L)
+        if st == "ok" and not _NFT_UB["ok"]:
+            st = "offline"
+        if st == "gone" and now - L["updated_at"] > 86400:
+            continue
+        mt = _nft_meta(L)
+        out.append({"id": f"r{L['id']}", "rs": 1, "title": f"{L['title']} #{L['num']}", "slug": L["slug"], "name": L["title"],
+                    "num": L["num"], "attrs": mt.get("attrs") or [], "bg": mt.get("bg"), "price": L["price"],
+                    "emp": mk(L["price"]), "state": st, "note": "", "img": f"/app/nft/{L['slug']}.webp"})
+    return out
+
+
+def nft_ub_view(uid):
+    sess, src = _nft_ub_session()
+    L = _NFT_UB_LOGIN.get(uid)
+    step = L["step"] if L and time.time() - L["at"] < NFT_UB_LOGIN_TTL else None
+    return {"id": NFT_USERBOT_ID, "api": ub_api_ready(), "key": ub_crypto_ready(), "session": bool(sess), "env": src == "env",
+            "ok": _NFT_UB["ok"], "me": _NFT_UB["me"] if _NFT_UB["ok"] else None, "bal": _NFT_UB["bal"] if _NFT_UB["ok"] else None,
+            "err": _NFT_UB["err"], "login": step,
+            "phone": (L["phone"][:4] + "•••" + L["phone"][-2:]) if step else None}
+
+
+def nft_rs_admin():
+    c = db()
+    lst = []
+    for r in c.execute(f"SELECT {', '.join(_RS_COLS)} FROM nft_resale WHERE sold=0 AND (available=1 OR price>0) "
+                       "ORDER BY (price>0) DESC, cost LIMIT 250"):
+        L = dict(zip(_RS_COLS, r))
+        lst.append({"id": L["id"], "slug": L["slug"], "title": L["title"], "num": L["num"], "gift_id": L["gift_id"],
+                    "cost": L["cost"], "approved": L["approved_cost"], "price": L["price"], "enabled": bool(L["enabled"]),
+                    "available": bool(L["available"]), "state": nft_rs_state(L), "reserved": L["reserved"]})
+    return {
+        "colls": [{"id": r[0], "title": r[1], "follow": bool(r[2]), "resale": r[3], "min": r[4]} for r in c.execute(
+            "SELECT gift_id, title, follow, resale, min_stars FROM nft_collections ORDER BY follow DESC, resale DESC LIMIT 150")],
+        "list": lst,
+        "log": [{"id": r[0], "order": r[1], "slug": r[2], "to": _plain_person(r[3]), "cost": r[4], "price": r[5], "status": r[6],
+                 "error": r[7], "at": tashkent_dt(r[8])} for r in c.execute(
+            "SELECT id, order_id, slug, target_id, cost, price, status, error, at FROM nft_resale_log ORDER BY id DESC LIMIT 30")],
+        "sync": {"at": tashkent_dt(int(_NFT_RS["at"])) if _NFT_RS["at"] else None, "running": _NFT_RS["running"],
+                 "err": _NFT_RS["err"], "n": _NFT_RS["n"]},
+    }
+
+
+def _nft_stars(tl, amounts):
+    for a in amounts or ():
+        if isinstance(a, tl.StarsAmount):
+            return int(a.amount)
+    return None              # faqat TON evaziga — Stars bilan sotib bo'lmaydi
+
+
+def _nft_unique_row(tl, g):
+    """StarGiftUnique → dict (slug kichik harf — /app/nft/<slug> proksisi bilan mos) yoki None."""
+    if not isinstance(g, tl.Unique):
+        return None
+    raw = str(getattr(g, "slug", "") or "")
+    slug = raw.lower()
+    if not MARKET_NFT_SLUG_RE.fullmatch(slug):
+        return None
+    attrs, bg = {}, None
+    for a in getattr(g, "attributes", None) or ():
+        if isinstance(a, tl.AttrModel):
+            attrs["Model"] = str(a.name)[:40]
+        elif isinstance(a, tl.AttrBackdrop):
+            attrs["Backdrop"] = str(a.name)[:40]
+            bg = ["#%06x" % (int(a.center_color) & 0xFFFFFF), "#%06x" % (int(a.edge_color) & 0xFFFFFF)]
+        elif isinstance(a, tl.AttrPattern):
+            attrs["Symbol"] = str(a.name)[:40]
+    cost = None if getattr(g, "resale_ton_only", False) else _nft_stars(tl, getattr(g, "resell_amount", None))
+    return {"uid": int(g.id), "gift_id": int(getattr(g, "gift_id", 0) or 0), "slug": slug, "tg_slug": raw,
+            "title": str(getattr(g, "title", "") or slug)[:60], "num": int(getattr(g, "num", 0) or 0), "cost": cost,
+            "meta": json.dumps({"attrs": [{"t": k, "v": attrs[k]} for k in MARKET_NFT_ATTRS if k in attrs], "bg": bg},
+                               ensure_ascii=False)}
+
+
+def _nft_rs_upsert(c, row, now):
+    on = 1 if row["cost"] else 0
+    ex = c.execute("SELECT id, sold FROM nft_resale WHERE slug=?", (row["slug"],)).fetchone()
+    if not ex:
+        c.execute("""INSERT INTO nft_resale(slug, tg_slug, unique_id, gift_id, title, num, meta, cost, available, seen_at,
+                     created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (row["slug"], row["tg_slug"], row["uid"], row["gift_id"], row["title"], row["num"], row["meta"],
+                   row["cost"] or 0, on, now, now, now))
+        return
+    if ex[1] and on:         # biz sotgan NFT qayta sotuvga chiqdi — yangi listing: narx qayta tasdiqlanadi
+        c.execute("UPDATE nft_resale SET sold=0, reserved=0, price=0, approved_cost=0 WHERE id=?", (ex[0],))
+    elif ex[1]:
+        return
+    c.execute("""UPDATE nft_resale SET tg_slug=?, unique_id=?, gift_id=?, title=?, num=?, meta=?, cost=?, available=?, seen_at=?,
+                 updated_at=? WHERE id=?""",
+              (row["tg_slug"], row["uid"], row["gift_id"], row["title"], row["num"], row["meta"],
+               row["cost"] or 0, on, now, now, ex[0]))
+
+
+async def nft_ub_check(cl, tl, tg_slug):
+    """Bitta NFT holati (payments.getUniqueStarGift): dict (cost None — sotuvda emas) yoki None."""
+    r = await cl(tl.GetUnique(slug=tg_slug))
+    return _nft_unique_row(tl, getattr(r, "gift", None))
+
+
+def _nft_rs_apply(lid, row):
+    now = int(time.time())
+    with db() as c:
+        if row is None:
+            c.execute("UPDATE nft_resale SET available=0, updated_at=? WHERE id=? AND sold=0", (now, lid))
+        else:
+            _nft_rs_upsert(c, row, now)
+
+
+async def nft_rs_sync():
+    """Kolleksiyalar (getStarGifts) + kuzatilganlarning resale ro'yxati (getResaleStarGifts, stars_only). Ko'rinmagan
+    narxlangan listinglar alohida tekshiriladi; qolgani 'sotuvda yo'q'."""
+    if _NFT_RS["running"]:
+        return {"error": "busy"}
+    cl = await nft_ub_client()
+    if cl is None:
+        return {"error": "ub_off"}
+    tl = ub_tl()
+    _NFT_RS["running"] = True
+    c = db()
+    seen, err = set(), ""
+    try:
+        res = await cl(tl.GetStarGifts(hash=0))
+        now = int(time.time())
+        with c:
+            for g in getattr(res, "gifts", None) or ():
+                if not isinstance(g, tl.StarGift) or not getattr(g, "limited", False):
+                    continue
+                c.execute("""INSERT INTO nft_collections(gift_id, title, resale, min_stars, updated_at) VALUES (?,?,?,?,?)
+                             ON CONFLICT(gift_id) DO UPDATE SET title=excluded.title, resale=excluded.resale,
+                             min_stars=excluded.min_stars, updated_at=excluded.updated_at""",
+                          (int(g.id), str(getattr(g, "title", None) or f"Gift {g.id}")[:60],
+                           int(getattr(g, "availability_resale", 0) or 0), int(getattr(g, "resell_min_stars", 0) or 0), now))
+        q = ("SELECT gift_id FROM nft_collections WHERE resale>0 ORDER BY resale DESC" if market_cfg()["rs_all"]
+             else "SELECT gift_id FROM nft_collections WHERE follow=1 ORDER BY resale DESC")
+        for (gid,) in c.execute(q).fetchall()[:NFT_RS_COLL_MAX]:
+            try:
+                r = await cl(tl.GetResale(gift_id=gid, offset="", limit=NFT_RS_PAGE, sort_by_price=True, stars_only=True))
+            except Exception as e:  # noqa: BLE001
+                err = f"{type(e).__name__}"
+                if ub_err(e) == "flood":
+                    break
+                continue
+            now = int(time.time())
+            with c:
+                for g in getattr(r, "gifts", None) or ():
+                    row = _nft_unique_row(tl, g)
+                    if row and row["cost"]:
+                        _nft_rs_upsert(c, row, now)
+                        seen.add(row["slug"])
+            await asyncio.sleep(0.35)
+        checks = 0
+        for lid, slug, tg_slug, price in c.execute("SELECT id, slug, tg_slug, price FROM nft_resale WHERE available=1 AND sold=0"
+                                                   ).fetchall():
+            if slug in seen:
+                continue
+            if price > 0 and checks < NFT_RS_RECHECK_MAX:
+                checks += 1
+                try:
+                    _nft_rs_apply(lid, await nft_ub_check(cl, tl, tg_slug))
+                except Exception as e:  # noqa: BLE001 — aniq bilmasak holat o'zgarmaydi
+                    err = f"{type(e).__name__}"
+                await asyncio.sleep(0.25)
+            else:
+                with c:
+                    c.execute("UPDATE nft_resale SET available=0, updated_at=? WHERE id=?", (int(time.time()), lid))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("NFT resale sinxroni xato: %s", type(e).__name__)
+        err = f"{type(e).__name__}"
+    finally:
+        _NFT_RS.update(running=False, at=time.time(), err=err, n=len(seen))
+    return {"result": "synced", "n": len(seen)}
+
+
+async def nft_rs_worker(application):
+    """Fon: sessiya bo'lsa ulanadi; narxlangan listing yoki kuzatilgan kolleksiya bo'lsa ~10 daqiqada sinxron."""
+    await asyncio.sleep(15)
+    while True:
+        try:
+            sess, _ = _nft_ub_session()
+            if sess and ub_api_ready():
+                if not _NFT_UB["ok"] and time.time() - _NFT_UB["try_at"] >= NFT_UB_RETRY:
+                    await nft_ub_client()
+                need = db().execute("SELECT 1 FROM nft_resale WHERE enabled=1 AND price>0 AND sold=0 LIMIT 1").fetchone() or \
+                    db().execute("SELECT 1 FROM nft_collections WHERE follow=1 LIMIT 1").fetchone() or market_cfg()["rs_all"]
+                if _NFT_UB["ok"] and need and time.time() - _NFT_RS["at"] >= NFT_RS_SYNC_GAP:
+                    await nft_rs_sync()
+        except Exception:  # noqa: BLE001
+            logger.exception("NFT resale worker")
+        await asyncio.sleep(60)
+
+
+async def _nft_ub_peer(cl, uid):
+    """Qabul qiluvchi InputPeer: avval ID (userbot keshida bo'lsa), keyin @username — ID mosligi SHART."""
+    try:
+        p = await cl.get_input_entity(uid)
+        if int(getattr(p, "user_id", 0) or 0) == uid:
+            return p
+    except Exception:  # noqa: BLE001
+        pass
+    r = db().execute("SELECT username FROM users WHERE user_id=?", (uid,)).fetchone()
+    if r and r[0] and re.fullmatch(r"[A-Za-z0-9_]{4,32}", r[0]):
+        try:
+            p = await cl.get_input_entity("@" + r[0])
+            if int(getattr(p, "user_id", 0) or 0) == uid:      # username boshqa odamga o'tgan bo'lsa — yo'q
+                return p
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
+async def nft_rs_precheck(lid, target):
+    """Invoysdan oldin: listing ok, Telegram'da hali sotuvda va narx ≤ tasdiqlangan, userbot balansi, qabul qiluvchi."""
+    L = nft_rs_get(lid)
+    if not L or nft_rs_state(L) != "ok":
+        return "item"
+    cl = await nft_ub_client()
+    if cl is None:
+        return "unavailable"
+    tl = ub_tl()
+    try:
+        row = await nft_ub_check(cl, tl, L["tg_slug"])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("NFT tekshiruv xato: %s", type(e).__name__)
+        return "unavailable"
+    _nft_rs_apply(lid, row)
+    L = nft_rs_get(lid)
+    if not L or nft_rs_state(L) != "ok":
+        return "item"
+    bal = await nft_ub_balance(force=True)
+    if bal is None or bal < L["cost"]:
+        return "unavailable"
+    if await _nft_ub_peer(cl, target) is None:
+        return "no_username"
+    return None
+
+
+async def _nft_rs_buy(o, lid):
+    """→ (xato yoki None, noaniqmi, haqiqiy narx). Noaniq — tarmoq uzildi: xarid bo'lgan bo'lishi mumkin (qaytarilmaydi)."""
+    L = nft_rs_get(lid)
+    if not L or L["reserved"] != o["id"] or L["sold"]:
+        return "listing band yoki sotilgan", False, 0
+    cl = await nft_ub_client()
+    if cl is None:
+        return "userbot ulanmagan", False, 0
+    tl = ub_tl()
+    try:
+        row = await nft_ub_check(cl, tl, L["tg_slug"])
+    except Exception as e:  # noqa: BLE001
+        return f"tekshiruv: {type(e).__name__}", False, 0
+    _nft_rs_apply(lid, row)
+    if not row or not row["cost"]:
+        return "Telegram'da endi sotuvda yo‘q", False, 0
+    limit = L["approved_cost"]
+    if row["cost"] > limit:
+        return f"narx oshdi ({row['cost']}⭐ > {limit}⭐)", False, 0
+    bal = await nft_ub_balance(force=True)
+    if bal is None or bal < row["cost"]:
+        return "userbot ⭐ balansi yetarli emas", False, 0
+    peer = await _nft_ub_peer(cl, o["target_id"])
+    if peer is None:
+        return "qabul qiluvchi topilmadi (@username kerak)", False, 0
+    inv = tl.InvoiceResale(slug=L["tg_slug"], to_id=peer)
+    try:
+        form = await cl(tl.GetForm(invoice=inv))
+    except Exception as e:  # noqa: BLE001
+        return f"to‘lov formasi: {type(e).__name__}", False, 0
+    total = sum(int(getattr(p, "amount", 0) or 0) for p in getattr(getattr(form, "invoice", None), "prices", None) or ())
+    if total <= 0 or total > limit:
+        return f"forma narxi mos emas ({total}⭐ > {limit}⭐)", False, 0
+    try:
+        await cl(tl.SendStarsForm(form_id=form.form_id, invoice=inv))
+    except Exception as e:  # noqa: BLE001
+        amb = isinstance(e, (asyncio.TimeoutError, ConnectionError, OSError))
+        return f"xarid: {type(e).__name__}: {str(e)[:100]}", amb, 0
+    finally:
+        _NFT_UB["bal_at"] = 0.0
+    return None, False, total
+
+
+def _nft_rs_log(o, lid, cost, status, error=""):
+    L = nft_rs_get(lid) or {"slug": ""}
+    with db() as c:
+        c.execute("""INSERT INTO nft_resale_log(order_id, listing_id, slug, user_id, target_id, cost, price, status, error, at)
+                     VALUES (?,?,?,?,?,?,?,?,?,?)""", (o["id"], lid, L["slug"], o["user_id"], o["target_id"], cost,
+                                                        o["price_stars"], status, error[:300], int(time.time())))
+
+
+async def nft_rs_fulfil(bot, oid):
+    """To'langan resale buyurtma: paid → buying (atomik, bir marta) → userbot xaridi → delivered | refund | failed (noaniq)."""
+    c = db()
+    with c:
+        if not c.execute("UPDATE market_orders SET status='buying', updated_at=? WHERE id=? AND status='paid'",
+                         (int(time.time()), oid)).rowcount:
+            return "skip"
+    o = market_order(oid)
+    lid = nft_rs_id(o["item"])
+    async with _NFT_BUY_LOCK:
+        try:
+            err, amb, total = await _nft_rs_buy(o, lid)
+        except Exception as e:  # noqa: BLE001
+            err, amb, total = f"ichki xato: {type(e).__name__}", True, 0
+    now = int(time.time())
+    if not err:
+        with c:
+            c.execute("UPDATE market_orders SET status='delivered', cost_stars=?, updated_at=? WHERE id=?", (total, now, oid))
+            c.execute("UPDATE nft_resale SET sold=1, available=0, cost=?, updated_at=? WHERE id=?", (total, now, lid))
+        _nft_rs_log(o, lid, total, "ok")
+        await market_notify(bot, o["user_id"], f"✅ <b>Empire Market</b> #{oid}: {escape(o['title'])} yetkazildi"
+                                               + ("" if o["target_id"] == o["user_id"] else f" → {person_name(o['target_id'])}")
+                                               + ".\n💎 NFT Telegram profilingizdagi sovg‘alarda.")
+        if o["target_id"] != o["user_id"]:
+            await market_notify(bot, o["target_id"], f"🎁 {person_name(o['user_id'])} sizga Empire Market orqali "
+                                                     f"<b>{escape(o['title'])}</b> NFT sovg‘a qildi!")
+        return "delivered"
+    _nft_rs_log(o, lid, total, "unknown" if amb else "fail", err)
+    logger.warning("NFT resale #%s: %s", oid, err)
+    if amb:
+        with c:
+            c.execute("UPDATE market_orders SET status='failed', note=?, updated_at=? WHERE id=?",
+                      (("Noaniq: " + err)[:200], now, oid))
+        await market_notify(bot, o["user_id"], f"⏳ <b>Empire Market</b> #{oid}: xarid holati tekshirilmoqda — ownerlar hal qiladi.")
+        await market_notify_owners(bot, f"⚠️ <b>NFT avto-xarid NOANIQ</b> #{oid} · {escape(o['title'])}\n{escape(err)}\n"
+                                        "Telegram'da userbot xaridlarini tekshiring → web app Owner → 🏪 Market → "
+                                        "✅ Yetkazildi yoki ↩️ Qaytarish.")
+        return "failed"
+    with c:
+        c.execute("UPDATE nft_resale SET reserved=0 WHERE id=? AND reserved=? AND sold=0", (lid, oid))
+    await market_refund(bot, oid, "Yetkazib bo‘lmadi: " + err)
+    await market_notify_owners(bot, f"⚠️ <b>NFT avto-xarid xatosi</b> #{oid} · {escape(o['title'])}\n{escape(err)}\n"
+                                    "To‘lov xaridorga qaytarildi.")
+    return "refunded"
+
+
+def _nft_ub_rate(uid, n, win):
+    now = time.time()
+    hits = [t for t in _NFT_UB_HITS.get(uid, ()) if now - t < win]
+    if len(hits) >= n:
+        _NFT_UB_HITS[uid] = hits
+        return False
+    hits.append(now)
+    _NFT_UB_HITS[uid] = hits
+    return True
+
+
+async def _nft_login_drop(uid):
+    L = _NFT_UB_LOGIN.pop(uid, None)
+    if L and L.get("client") is not None and L["client"] is not _NFT_UB["client"]:
+        try:
+            await L["client"].disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def nft_ub_login(uid, act, body):
+    """Owner login: telefon → kod → (2FA) → get_me().id == NFT_USERBOT_ID bo'lmasa log_out + rad."""
+    if act == "ub_cancel":
+        await _nft_login_drop(uid)
+        return {"result": "ok"}
+    if not ub_api_ready():
+        return {"error": "ub_api"}
+    if not ub_crypto_ready():          # shifrlash kaliti yo'q — sessiya saqlanmaydi, login boshlanmaydi
+        return {"error": "ub_key"}
+    if not _nft_ub_rate(uid, *NFT_UB_RATE):
+        return {"error": "rate"}
+    try:
+        if act == "ub_send_code":
+            phone = re.sub(r"[\s()\-]", "", str(body.get("phone") or ""))
+            if not re.fullmatch(r"\+?[0-9]{7,15}", phone):
+                return {"error": "phone"}
+            await _nft_login_drop(uid)
+            cl = ub_make_client("")
+            await cl.connect()
+            _NFT_UB_LOGIN[uid] = {"client": cl, "phone": phone, "hash": "", "at": time.time(), "step": "sending"}
+            sent = await cl.send_code_request(phone)
+            _NFT_UB_LOGIN[uid].update(hash=getattr(sent, "phone_code_hash", ""), step="code")
+            return {"result": "code_sent"}
+        L = _NFT_UB_LOGIN.get(uid)
+        if not L or time.time() - L["at"] > NFT_UB_LOGIN_TTL or L["step"] not in ("code", "password"):
+            await _nft_login_drop(uid)
+            return {"error": "login"}
+        if act == "ub_code":
+            code = re.sub(r"[^0-9]", "", str(body.get("code") or ""))[:8]
+            if L["step"] != "code" or len(code) < 4:
+                return {"error": "code"}
+            try:
+                await L["client"].sign_in(phone=L["phone"], code=code, phone_code_hash=L["hash"])
+            except Exception as e:  # noqa: BLE001
+                if ub_err(e) == "need_password":
+                    L["step"] = "password"
+                    return {"result": "need_password"}
+                raise
+        elif act == "ub_password":
+            pw = str(body.get("password") or "")[:256]
+            if L["step"] != "password" or not pw:
+                return {"error": "password"}
+            await L["client"].sign_in(password=pw)
+        else:
+            return {"error": "act"}
+        cl = L["client"]
+        me = await cl.get_me()
+    except ImportError:
+        await _nft_login_drop(uid)
+        return {"error": "telethon"}
+    except Exception as e:  # noqa: BLE001
+        code = ub_err(e)
+        logger.warning("NFT userbot login: %s", type(e).__name__)
+        if code in ("code_expired", "phone", "flood") or not code:
+            await _nft_login_drop(uid)
+        return {"error": code or "login_fail"}
+    if int(getattr(me, "id", 0) or 0) != NFT_USERBOT_ID:
+        try:
+            await cl.log_out()           # boshqa akkaunt — sessiya darhol bekor qilinadi, saqlanmaydi
+        except Exception:  # noqa: BLE001
+            pass
+        _NFT_UB_LOGIN.pop(uid, None)
+        return {"error": "wrong_account"}
+    try:
+        sess = ub_session_encrypt(cl.session.save())       # DB'da faqat shifrlangan
+    except UbKeyMissing:
+        try:
+            await cl.log_out()
+        except Exception:  # noqa: BLE001
+            pass
+        _NFT_UB_LOGIN.pop(uid, None)
+        return {"error": "ub_key"}
+    with db() as c:
+        c.execute("""INSERT INTO nft_userbot(id, session, user_id, by_owner, updated_at) VALUES (1,?,?,?,?)
+                     ON CONFLICT(id) DO UPDATE SET session=excluded.session, user_id=excluded.user_id,
+                     by_owner=excluded.by_owner, updated_at=excluded.updated_at""", (sess, NFT_USERBOT_ID, uid, int(time.time())))
+    _NFT_UB_LOGIN.pop(uid, None)
+    old = _NFT_UB["client"]
+    _NFT_UB.update(client=cl, ok=True, err="", me=ub_me(me), src="env" if NFT_USERBOT_SESSION_ENV else "db", bal_at=0.0)
+    if old is not None and old is not cl:
+        try:
+            await old.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+    await nft_ub_balance(force=True)
+    await market_notify_owners(_EXCHANGE_LOOP_BOT, f"🤖 NFT userbot ulandi: {escape(_NFT_UB['me']['name'] or '')} "
+                                                   f"(<code>{NFT_USERBOT_ID}</code>) — {person_name(uid)}")
+    return {"result": "connected"}
+
+
+async def nft_admin_action(uid, act, body):
+    """Faqat ownerlar (web_market chaqirishdan oldin tekshiradi): userbot login/holat va resale boshqaruvi."""
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner"}
+    if act in ("ub_send_code", "ub_code", "ub_password", "ub_cancel"):
+        return await nft_ub_login(uid, act, body)
+    c = db()
+    if act == "ub_status":
+        if not _nft_ub_rate(-uid, 10, 60):
+            return {"error": "rate"}
+        cl = await nft_ub_client()
+        if cl is not None:
+            try:
+                _NFT_UB["me"] = ub_me(await cl.get_me())
+            except Exception as e:  # noqa: BLE001
+                logger.warning("NFT userbot get_me: %s", type(e).__name__)
+            await nft_ub_balance(force=True)
+        return {"result": "ok"}
+    if act == "ub_logout":
+        cl = await nft_ub_client()
+        if cl is not None:
+            try:
+                await cl.log_out()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("NFT userbot log_out: %s", type(e).__name__)
+        with c:
+            c.execute("DELETE FROM nft_userbot WHERE id=1")
+        _NFT_UB.update(client=None, ok=False, me=None, bal=None, bal_at=0.0, err="no_session")
+        return {"result": "ok"}
+    if act == "rs_sync":
+        if _NFT_RS["running"]:
+            return {"error": "busy"}
+        if time.time() - _NFT_RS["manual_at"] < NFT_RS_SYNC_MIN:
+            return {"error": "rate"}
+        if await nft_ub_client() is None:
+            return {"error": "ub_off"}
+        _NFT_RS["manual_at"] = time.time()
+        asyncio.get_running_loop().create_task(nft_rs_sync())     # uzoq davom etadi — fonda
+        return {"result": "sync_started"}
+    if act == "rs_follow":
+        if body.get("all") is not None:
+            with c:
+                c.execute("INSERT INTO market_config(key, value) VALUES ('rs_all', ?) ON CONFLICT(key) DO UPDATE SET "
+                          "value=excluded.value", (1 if body.get("all") else 0,))
+            return {"result": "ok"}
+        try:
+            gid = int(body.get("id"))
+        except (TypeError, ValueError):
+            return {"error": "values"}
+        with c:
+            if not c.execute("UPDATE nft_collections SET follow=? WHERE gift_id=?", (1 if body.get("on") else 0, gid)).rowcount:
+                return {"error": "values"}
+        return {"result": "ok"}
+    if act in ("rs_price", "rs_toggle"):
+        try:
+            lid = int(body.get("id"))
+        except (TypeError, ValueError):
+            return {"error": "values"}
+        L = nft_rs_get(lid)
+        if not L or L["sold"]:
+            return {"error": "rs"}
+        with c:
+            if act == "rs_toggle":
+                c.execute("UPDATE nft_resale SET enabled=1-enabled WHERE id=?", (lid,))
+            else:
+                try:
+                    price = int(body.get("price"))
+                except (TypeError, ValueError):
+                    return {"error": "price"}
+                if price != 0 and not 1 <= price <= MARKET_MAX_STARS:
+                    return {"error": "price"}
+                if price and L["cost"] <= 0:
+                    return {"error": "rs"}
+                # narx qo'yish = joriy Telegram narxini tasdiqlash (oshsa — qayta tasdiq kerak); 0 — sotuvdan olish
+                c.execute("UPDATE nft_resale SET price=?, approved_cost=? WHERE id=?", (price, L["cost"] if price else 0, lid))
+        return {"result": "ok"}
+    if act == "rs_bulk":
+        try:
+            mu = max(0.0, min(500.0, float(body.get("markup"))))
+        except (TypeError, ValueError):
+            return {"error": "values"}
+        scope = str(body.get("scope") or "unpriced")
+        where = {"unpriced": "price=0", "reapprove": "price>0 AND cost>approved_cost", "all": "1=1"}.get(scope)
+        if not where:
+            return {"error": "values"}
+        n = 0
+        with c:
+            c.execute("INSERT INTO market_config(key, value) VALUES ('rs_markup', ?) ON CONFLICT(key) DO UPDATE SET "
+                      "value=excluded.value", (mu,))
+            for lid, cost in c.execute(f"SELECT id, cost FROM nft_resale WHERE sold=0 AND available=1 AND cost>0 AND {where}"
+                                       ).fetchall():
+                p = market_price(cost, mu)
+                if 1 <= p <= MARKET_MAX_STARS:
+                    n += c.execute("UPDATE nft_resale SET price=?, approved_cost=? WHERE id=? AND sold=0", (p, cost, lid)).rowcount
+        return {"result": "ok", "n": n}
+    return {"error": "act"}
 # ── 🏪 /EMPIRE MARKET ──
 
 
@@ -24288,6 +25201,14 @@ WEBAPP_HTML = r"""<!doctype html>
   .mkadm .mkn{display:flex;gap:8px;align-items:center;margin-top:8px}
   .mkadm .mkn img{width:42px;height:42px;border-radius:8px;object-fit:cover;background:#111}
   .mkadm .mkn.off{opacity:.5}
+  .mkadm .mkrs{flex-wrap:wrap;font-size:13px}
+  .mkadm .mkrs>span:first-child{flex:1;min-width:120px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mkadm .mkrs .rsv,.mkadm .mkrs .rtg{cursor:pointer}
+  .mkadm .mkcolls{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;max-height:180px;overflow:auto}
+  .mkadm .mkcolls .chip{cursor:pointer}
+  .mkadm .mkcolls .chip.on{box-shadow:inset 0 0 0 1px #4fd1a5}
+  .mkadm .mkhint{margin-top:8px;padding:8px 10px;border-radius:10px;background:rgba(255,179,122,.1);color:#ffcf9e;font-size:12.5px}
+  .mkc .mkauto{display:block;font-size:11px;color:#7fe0b8;margin-top:6px}
   /* ───── 🎬 Media (YouTube) ───── */
   .gcc.media{background:linear-gradient(135deg,rgba(255,60,60,.2),rgba(0,0,0,.35));box-shadow:inset 0 0 0 1.5px rgba(255,120,120,.5),0 10px 24px rgba(0,0,0,.45)}
   .mdq{display:flex;gap:8px;margin-bottom:10px}
@@ -27527,11 +28448,18 @@ function kidErr(e,wait){
   return errText(e);
 }
 // ---- 🏪 EMPIRE MARKET: Telegram Premium / Gifts (avtomatik) · Stars / NFT (qo'lda) — ⭐ Stars yoki 🪙 EMP ----
-const MKST={pending:'⏳ To‘lov kutilmoqda',paid:'🧾 Navbatda',delivered:'✅ Yetkazildi',refunded:'↩️ Qaytarildi',failed:'⚠️ Muammo',expired:'⌛ Eskirgan',cancelled:'✖ Bekor'};
+const MKST={pending:'⏳ To‘lov kutilmoqda',paid:'🧾 Navbatda',buying:'⏳ Sotib olinmoqda',delivered:'✅ Yetkazildi',refunded:'↩️ Qaytarildi',failed:'⚠️ Muammo',expired:'⌛ Eskirgan',cancelled:'✖ Bekor'};
 const MKERR={disabled:'🏪 Market hozircha yopiq',kind:'🏪 Bu bo‘lim yopiq',not_found:'🔎 Qabul qiluvchi topilmadi (u botni ishlatgan bo‘lishi kerak)',
   item:'⚠️ Mahsulot mavjud emas',unavailable:'⏳ Vaqtincha mavjud emas — keyinroq urinib ko‘ring',too_many:'⚠️ To‘lanmagan buyurtmalar ko‘p — birozdan keyin',
   emp_off:'🪙 EMP bilan to‘lash yopiq',emp_funds:'💸 EMP yetarli emas',invoice:'⚠️ Invoys yaratilmadi',bot:'⚠️ Bot band',values:'⚠️ Qiymatlar noto‘g‘ri',
-  image:'⚠️ Rasm noto‘g‘ri (fayl yoki https havola)',nft_slug:'⚠️ NFT havolasi noto‘g‘ri — masalan t.me/nft/PlushPepe-1',nft_fetch:'⚠️ Fragment’da bu NFT topilmadi',order:'⚠️ Buyurtma topilmadi',refund:'⚠️ Qaytarib bo‘lmadi',owner:'👑 Faqat ownerlar'};
+  image:'⚠️ Rasm noto‘g‘ri (fayl yoki https havola)',nft_slug:'⚠️ NFT havolasi noto‘g‘ri — masalan t.me/nft/PlushPepe-1',nft_fetch:'⚠️ Fragment’da bu NFT topilmadi',order:'⚠️ Buyurtma topilmadi',refund:'⚠️ Qaytarib bo‘lmadi',owner:'👑 Faqat ownerlar',
+  no_username:'🔎 Qabul qiluvchining Telegram @username’i kerak (NFT avtomatik yuboriladi)',ub_api:'⚙️ TG_API_ID / TG_API_HASH env o‘rnatilmagan',
+  ub_key:'🔐 USERBOT_SESSION_KEY env o‘rnatilmagan — sessiya saqlanmaydi',ub_off:'🤖 Userbot ulanmagan',telethon:'⚙️ telethon o‘rnatilmagan',
+  wrong_account:'⛔ Faqat 1150777456 akkaunti ulanishi mumkin',phone:'📱 Telefon raqami noto‘g‘ri',code:'🔢 Kod noto‘g‘ri',
+  code_expired:'⌛ Kod eskirdi — qaytadan yuboring',password:'🔐 2FA parol noto‘g‘ri',flood:'⏳ Telegram cheklovi — keyinroq urinib ko‘ring',
+  login:'⚠️ Login seansi tugagan — qaytadan boshlang',login_fail:'⚠️ Kirib bo‘lmadi',rate:'⏳ Juda tez — biroz kuting',busy:'⏳ Sinxron davom etmoqda',
+  rs:'⚠️ Listing topilmadi yoki sotilgan',price:'⚠️ Narx 1–100 000 ⭐ (0 — sotuvdan olish)',act:'⚠️ Noma’lum amal'};
+const MKRS={gone:'Sotuvda yo‘q',reapprove:'Sotuvda yo‘q',offline:'Sotuvda yo‘q',sold:'Sotilgan',reserved:'⏳ Band',hidden:'Yashirin',no_price:'Narxsiz'};
 // 🎞 Market animatsiyalari (rasmiy TGS/WEBM): faqat ko'rinayotganlar o'ynaydi, bir vaqtda ≤ MK_ANIM_MAX; lottie-web kerak bo'lganda yuklanadi.
 // Joy egasi (eskiz/emoji) darhol ko'rinadi, animatsiya tayyor bo'lgach ustiga chiqadi. data-pri — limitdan tashqari (xarid oynasi).
 const MK_ANIM_MAX=8;
@@ -27615,10 +28543,13 @@ const MARKET=(()=>{
         '<span class="mkp">'+star(x.price)+'</span></div>').join('')+'</div><div class="mknote">🌟 Stars Fragment orqali qo‘lda yetkaziladi (odatda 24 soat ichida). Yetkazilmasa — to‘liq qaytariladi.</div>';
     } else if(tab==='nft'){
       const n=m.nft||[];
-      h=n.length?'<div class="mkgrid mknft">'+n.map(x=>'<div class="mkc" data-k="nft" data-i="'+x.id+'">'+mkNftArt(x)+
-          mkNftName(x)+mkAttrs(x)+(x.note?'<div class="mkno">'+esc(x.note)+'</div>':'')+'<span class="mkp">'+star(x.price)+'</span></div>').join('')+'</div>'
+      const off=x=>x.rs&&x.state!=='ok';
+      h=n.length?'<div class="mkgrid mknft">'+n.map(x=>'<div class="mkc'+(off(x)?' off':'')+'" data-k="nft" data-i="'+esc(String(x.id))+'">'+mkNftArt(x)+
+          mkNftName(x)+mkAttrs(x)+(x.note?'<div class="mkno">'+esc(x.note)+'</div>':'')+'<span class="mkp">'+star(x.price)+'</span>'+
+          (off(x)?'<span class="mkna">'+esc(MKRS[x.state]||'Sotuvda yo‘q')+'</span>':(x.rs?'<span class="mkauto">⚡ avtomatik</span>':''))+'</div>').join('')+'</div>'
         :'<div class="mknote">💎 Hozircha NFT sovg‘alar yo‘q — tez orada!</div>';
-      h+='<div class="mknote">NFT (unikal) sovg‘alar Fragment orqali qo‘lda o‘tkaziladi.</div>';
+      h+='<div class="mknote">'+(n.some(x=>x.rs)?'⚡ belgili NFT’lar Telegram bozoridan avtomatik sotib olinib, darhol yuboriladi (qabul qiluvchida @username bo‘lishi kerak). ':'')+
+        (n.some(x=>!x.rs)?'Qolganlari Fragment orqali qo‘lda o‘tkaziladi.':'')+'</div>';
     } else {
       const o=m.orders||[];
       h=o.length?o.map(x=>'<div class="mkord"><div class="mkoi"><b>#'+x.id+' · '+esc(x.title)+'</b><small>'+esc(x.at)+(x.self?'':' · → '+esc(x.to))+' · '+
@@ -27651,10 +28582,10 @@ const MARKET=(()=>{
       const req={kind:k,item:i,to:ov.querySelector('#mkTo').value.trim(),text:(ov.querySelector('#mkMsg')||{}).value||'',pay:pay};
       api('/app/api/market/order',req).then(r=>{ btn.disabled=false;
         if(r.market) setM(r.market);
-        if(r.result==='paid'){ close(); done(r.order); return; }
+        if(r.result==='paid'){ close(); if(r.order&&r.order.rs){ toast('⏳ NFT sotib olinmoqda…'); poll(r.order.id,30); } else done(r.order); return; }
         if(r.result!=='ok'){ toast(MKERR[r.error]||'⚠️ Xatolik'); return; }
         close(); const id=r.order.id;
-        if(tg&&tg.openInvoice){ tg.openInvoice(r.link,st=>{ if(st==='paid'){ toast('⏳ To‘lov tasdiqlanmoqda…'); poll(id,16); } else if(st==='failed') toast('❌ To‘lov amalga oshmadi'); }); }
+        if(tg&&tg.openInvoice){ tg.openInvoice(r.link,st=>{ if(st==='paid'){ toast('⏳ To‘lov tasdiqlanmoqda…'); poll(id,k==='nft'?30:16); } else if(st==='failed') toast('❌ To‘lov amalga oshmadi'); }); }
         else if(tg&&tg.openTelegramLink){ tg.openTelegramLink(r.link); setTimeout(()=>poll(id,30),4000); }
         else window.open(r.link,'_blank');
       }).catch(()=>{ btn.disabled=false; toast('⚠️ Aloqa xatosi'); }); };
@@ -27668,7 +28599,7 @@ const MARKET=(()=>{
     else if(o.status==='failed') toast('⚠️ Muammo — ownerlar hal qiladi');
     tab='orders'; show(); }
   function poll(id,n){ api('/app/api/market/state',{id:id}).then(r=>{ const o=r.order;
-      if(o&&o.status!=='pending'&&!(o.status==='paid'&&n>8&&/^(premium|gift)$/.test(o.kind))) done(o);
+      if(o&&o.status!=='pending'&&o.status!=='buying'&&!(o.status==='paid'&&n>8&&(/^(premium|gift)$/.test(o.kind)||o.rs))) done(o);
       else if(n>0) setTimeout(()=>poll(id,n-1),1500); else { tab='orders'; show(); } }).catch(()=>{ if(n>0) setTimeout(()=>poll(id,n-1),2000); }); }
   return {show, draw};
 })();
@@ -27679,9 +28610,63 @@ function marketPage(d){
     '<div class="mktabs" id="mkTabs"></div><div id="mkBody"></div>';
   return sec;
 }
+// 🤖 NFT userbot (Telethon) — ulanish, resale kolleksiyalari, narxlar, xarid jurnali (faqat ownerlar)
+const MKUBE={no_session:'ulanmagan',api:'TG_API_ID/TG_API_HASH yo‘q',ub_key:'USERBOT_SESSION_KEY yo‘q yoki o‘zgargan',telethon:'telethon o‘rnatilmagan',
+  unauthorized:'sessiya bekor qilingan',connect:'ulanish xatosi',wrong_account:'boshqa akkaunt rad etildi',disconnected:'uzildi'};
+function mkUbHtml(A){ const U=A.ub||{}, R=A.rs||{colls:[],list:[],log:[],sync:{}}, c=A.cfg||{};
+  let h='<div class="lbl" style="margin-top:16px">🤖 Userbot (NFT avtomatik) · <code>'+U.id+'</code></div>';
+  if(!U.api) h+='<div class="mkhint">⚙️ Railway env: <code>TG_API_ID</code>, <code>TG_API_HASH</code> (my.telegram.org) o‘rnating.</div>';
+  if(!U.key) h+='<div class="mkhint">🔐 <code>USERBOT_SESSION_KEY</code> env o‘rnatilmagan — sessiya shifrlab saqlanmaydi, login yopiq. Kalit: istalgan uzun maxfiy satr (yoki Fernet kaliti).</div>';
+  if(U.ok){ const me=U.me||{};
+    h+='<div class="chips"><span class="chip">🟢 '+esc(me.name||'')+(me.username?' @'+esc(me.username):'')+'</span><span class="chip">⭐ '+(U.bal==null?'?':fmtMoney(U.bal))+'</span>'+
+      (U.env?'<span class="chip">env sessiya</span>':'')+'<span class="chip" id="ubSt" style="cursor:pointer">🔄 Holat</span><span class="chip" id="ubOut" style="cursor:pointer">🚪 Chiqish</span></div>';
+  } else if(U.login==='code'||U.login==='password'){
+    h+='<div class="hsub">'+esc(U.phone||'')+(U.login==='code'?' — Telegram’dagi kodni kiriting (hech kimga yubormang!)':' — 2FA parol')+'</div><div class="mkrow">'+
+      (U.login==='code'?'<input id="ubCode" inputmode="numeric" maxlength="8" placeholder="Kod">':'<input id="ubPw" type="password" maxlength="256" placeholder="2FA parol">')+
+      '<button class="btn go" id="ubGo">'+(U.login==='code'?'✅ Kirish':'🔐 Tasdiqlash')+'</button><button class="btn" id="ubCx">✖</button></div>';
+  } else {
+    h+='<div class="hsub">Holat: '+esc(MKUBE[U.err]||U.err||'ulanmagan')+'. Faqat '+U.id+' akkaunti qabul qilinadi.</div>'+
+      '<div class="mkrow"><input id="ubPh" inputmode="tel" maxlength="20" placeholder="+998…"><button class="btn go" id="ubSend"'+(U.api&&U.key?'':' disabled')+'>📲 Kod yuborish</button></div>';
+  }
+  const sy=R.sync||{};
+  h+='<div class="lbl" style="margin-top:16px">💎 Resale (Telegram bozori)</div><div class="chips">'+
+    '<span class="chip" id="rsSync" style="cursor:pointer">'+(sy.running?'⏳ Sinxron…':'🔄 Sync')+'</span><span class="chip">🕒 '+esc(sy.at||'—')+(sy.n?' · '+sy.n+' ta':'')+'</span>'+
+    (sy.err?'<span class="chip">⚠️ '+esc(sy.err)+'</span>':'')+'</div>'+
+    '<div class="oflag" id="rsAll"><span>Barcha kolleksiyalarni kuzatish</span><span class="otg'+(c.rs_all?' on':'')+'"><i></i></span></div>'+
+    (R.colls.length?'<div class="mkcolls">'+R.colls.map(x=>'<span class="chip'+(x.follow?' on':'')+'" data-col="'+x.id+'" data-on="'+(x.follow?0:1)+'">'+(x.follow?'✅ ':'')+esc(x.title)+' · '+x.resale+'</span>').join('')+'</div>'
+      :'<div class="hsub">Kolleksiyalar yo‘q — userbot ulangach 🔄 Sync bosing.</div>')+
+    '<div class="mkrow"><label class="hsub">Ommaviy ustama %</label><input id="rsMu" type="number" step="0.5" value="'+(c.rs_markup==null?10:c.rs_markup)+'" style="max-width:90px">'+
+    '<select id="rsSc" class="sel"><option value="unpriced">Narxsizlar</option><option value="reapprove">Qayta tasdiq</option><option value="all">Hammasi</option></select>'+
+    '<button class="btn" id="rsBulk">💰 Qo‘llash</button></div>'+
+    '<div class="hsub">Narx qo‘yish = joriy Telegram narxini tasdiqlash. Telegram narxi oshsa — listing yopiladi, qayta 💾 kerak. 0 — sotuvdan olish.</div>'+
+    R.list.map(x=>'<div class="mkn mkrs'+(x.state==='ok'?'':' off')+'" data-rs="'+x.id+'"><span title="'+esc(x.slug)+'">'+esc(x.title)+' #'+x.num+'</span>'+
+      '<small class="hsub">⭐'+fmtMoney(x.cost)+(x.approved&&x.approved!==x.cost?' (✓'+fmtMoney(x.approved)+')':'')+' · '+esc(MKRS[x.state]||'✅')+'</small>'+
+      '<input class="rp" type="number" value="'+x.price+'" style="width:80px"><span class="rsv" title="Narxni saqlash/tasdiqlash">💾</span>'+
+      '<span class="rtg" title="Ko‘rsatish/yashirish">'+(x.enabled?'👁':'🚫')+'</span></div>').join('')+
+    (R.log.length?'<div class="lbl" style="margin-top:16px">🧾 Avto-xarid jurnali</div>'+R.log.map(l=>'<div class="mkq"><b>#'+l.order+' · '+esc(l.slug)+'</b> · ⭐'+
+      fmtMoney(l.cost)+' → '+fmtMoney(l.price)+' · '+(l.status==='ok'?'✅':l.status==='unknown'?'❓ noaniq':'❌')+'<div class="hsub">'+esc(l.at)+' · → '+esc(l.to)+
+      (l.error?'<br>'+esc(l.error):'')+'</div></div>').join(''):'');
+  return h; }
+function mkUbBind(box,A,save){ const $q=s=>box.querySelector(s);
+  const on=(s,f)=>{ const e=$q(s); if(e) e.onclick=f; };
+  on('#ubSend',()=>save({act:'ub_send_code',phone:$q('#ubPh').value.trim()}));
+  on('#ubGo',()=>{ const c=$q('#ubCode'); if(c) save({act:'ub_code',code:c.value.trim()}); else save({act:'ub_password',password:$q('#ubPw').value}); });
+  on('#ubCx',()=>save({act:'ub_cancel'}));
+  on('#ubSt',()=>save({act:'ub_status'}));
+  on('#ubOut',()=>{ if(confirm('Userbot sessiyasi yopilsinmi (log out)? NFT avto-sotuv to‘xtaydi.')) save({act:'ub_logout'}); });
+  on('#rsSync',()=>save({act:'rs_sync'}));
+  on('#rsAll',()=>save({act:'rs_follow',all:(A.cfg&&A.cfg.rs_all)?0:1}));
+  on('#rsBulk',()=>{ const sc=$q('#rsSc').value; if(confirm('Ustama '+$q('#rsMu').value+'% — "'+$q('#rsSc').selectedOptions[0].text+'" listinglarga qo‘llansinmi?'))
+    save({act:'rs_bulk',markup:$q('#rsMu').value,scope:sc}); });
+  box.querySelectorAll('[data-col]').forEach(e=>e.onclick=()=>save({act:'rs_follow',id:+e.dataset.col,on:+e.dataset.on}));
+  box.querySelectorAll('.mkrs').forEach(r=>{ const id=+r.dataset.rs;
+    r.querySelector('.rsv').onclick=()=>save({act:'rs_price',id:id,price:r.querySelector('.rp').value||0});
+    r.querySelector('.rtg').onclick=()=>save({act:'rs_toggle',id:id}); }); }
 function marketAdmin(d){
   const box=$('<div class="card full mkadm"></div>');
-  const save=p=>api('/app/api/market/'+p.act,p).then(r=>{ if(r.market){ d.market=r.market; if(window.DD) window.DD.market=r.market; draw(); MARKET.draw(); toast('✅ Saqlandi'); }
+  const MKOK={code_sent:'📲 Kod Telegram’ga yuborildi',need_password:'🔐 2FA parolini kiriting',connected:'🤖 Userbot ulandi',sync_started:'🔄 Sinxron boshlandi — 1–2 daqiqadan keyin yangilang'};
+  const save=p=>api('/app/api/market/'+p.act,p).then(r=>{ if(r.market){ d.market=r.market; if(window.DD) window.DD.market=r.market; draw(); MARKET.draw();
+      toast(MKOK[r.result]||(r.n!=null?'✅ '+r.n+' ta listing narxlandi':'✅ Saqlandi')); }
     else toast(MKERR[r.error]||'⚠️ Xatolik'); }).catch(()=>toast('⚠️ Aloqa xatosi'));
   function draw(){ const m=d.market||{}, A=m.admin; if(!A){ box.innerHTML='<div class="hsub">🏪 Market ma’lumoti yo‘q</div>'; return; }
     const c=A.cfg, K=[['premium','⭐ Premium (avto)'],['gift','🎁 Gifts (avto)'],['stars','🌟 Stars (qo‘lda)'],['nft','💎 NFT (qo‘lda)']];
@@ -27708,7 +28693,9 @@ function marketAdmin(d){
       A.nft_all.map(n=>'<div class="mkn'+(n.active&&!n.sold?'':' off')+'" data-id="'+n.id+'">'+(n.img?'<img alt="" src="'+esc(n.img)+'">':'<span>💎</span>')+(n.slug?'<span title="'+esc(n.slug)+'">🎞</span>':'')+
         '<input class="nt" value="'+esc(n.title)+'" maxlength="60" style="flex:1;min-width:0"><input class="np" type="number" value="'+n.price+'" style="width:80px">'+
         (n.sold?'<span title="Sotilgan">🏷</span>':'')+'<span class="ns" title="Saqlash">💾</span><span class="ntg" title="Ko‘rsatish/yashirish">'+(n.active?'👁':'🚫')+'</span><span class="nd" title="O‘chirish">🗑</span></div>').join('')+
-      (A.recent.length?'<div class="lbl" style="margin-top:16px">📜 Oxirgilar</div>'+A.recent.map(q).join(''):'');
+      (A.recent.length?'<div class="lbl" style="margin-top:16px">📜 Oxirgilar</div>'+A.recent.map(q).join(''):'')+
+      mkUbHtml(A);
+    mkUbBind(box,A,save);
     box.querySelector('#mkBal').onclick=()=>save({act:'balance'});
     box.querySelectorAll('.oflag').forEach(r=>r.onclick=()=>{ r.querySelector('.otg').classList.toggle('on'); });
     box.querySelector('#mkCfg').onclick=()=>{ const p={act:'config',markup:box.querySelector('#mkMu').value,emp_per_star:box.querySelector('#mkEr').value};

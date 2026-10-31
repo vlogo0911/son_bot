@@ -21397,7 +21397,7 @@ async def nft_admin_action(uid, act, body):
 UTAG_PRICE_DIAMONDS = 10
 UTAG_DAYS = 30
 UTAG_SPEED_MIN, UTAG_SPEED_MAX, UTAG_SPEED_DEFAULT = 0.3, 1.5, 0.7
-UTAG_MAX_MEMBERS = 300            # bir yurishda ko'pi bilan
+UTAG_MAX_MEMBERS = 600            # bir yurishda ko'pi bilan
 UTAG_GROUP_COOLDOWN = 60          # bir guruhda .tag lar orasidagi minimal vaqt (s)
 UTAG_MAX_CLIENTS = 300            # bir vaqtda ishlaydigan Telethon klientlar
 UTAG_FLOOD_MAX = 60               # FloodWait shundan uzun bo'lsa — to'xtatiladi

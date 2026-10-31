@@ -513,7 +513,7 @@
   (X-Signature HMAC); `utag_record` (atomik, bir marta) yiqilsa `/exchange/refund_asset` {txid,orig_txid,...}; tarmoq/5xx → pending, `utag_worker`
   (30 s) o'sha txid bilan qayta (`utag_payments`, `UTAG_PAY_MAX_RETRY` → stuck + owner log). Tinglovchi: `utag_ensure_client` (Telethon updates=True,
   `NewMessage(outgoing=True)`, maks `UTAG_MAX_CLIENTS` 300) → `utag_on_message`: guruhda `.tag <matn>` (buyruq o'chadi, `utag_strip_command` — entitylar
-  UTF-16 bo'yicha siljiydi, premium/custom emoji saqlanadi; `utag_build` + `InputMessageEntityMentionName`), a'zolar bot/deleted/o'zi'siz ≤300,
+  UTF-16 bo'yicha siljiydi, premium/custom emoji saqlanadi; `utag_build` + `InputMessageEntityMentionName`), a'zolar bot/deleted/o'zi'siz ≤600 (`UTAG_MAX_MEMBERS`),
   guruhda `UTAG_GROUP_COOLDOWN` 60 s, oraliq `utag_speed` 0.3–1.5 (`utag_settings`, standart 0.7), FloodWait ≤60 s kutadi, uzunroq → to'xtab bot xabari;
   `.stop`, obuna tugashi (`utag_tick`), uzish yurishni to'xtatadi. Bot: `utag_card`/`cb_utag` (`ut:<uid>:m|p|buy|ok|card`), `?start=utag`. Payload `utag`.
 - 📋 Shaxsiy chat pastki menyusi: `/start` va `/emps` (shaxsiyda) doimiy `private_menu_kb()` (ReplyKeyboard, `PRIVATE_MENU`): Profil/Oila/Farzandlarim/

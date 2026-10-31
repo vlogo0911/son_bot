@@ -8881,6 +8881,7 @@ async def post_init(application: Application):
     application.create_task(vip_sync_initial(application), name="vip-sync-initial")     # 👑 bir martalik: VIP'lar → Empire
     application.create_task(nft_rs_worker(application), name="nft-resale-worker")      # 🤖 NFT userbot: ulanish + resale sinxron
     application.create_task(utag_worker(application), name="utag-worker")              # 🏷 UTag: tinglovchilar + to'lovlar
+    application.create_task(music_worker(application), name="music-worker")            # 🎵 Musiqa yordamchisi
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -8928,6 +8929,8 @@ async def post_init(application: Application):
         ("rules", "📜 Guruh qoidalari"), ("badmute", "🔇 Taqiq. so‘z mute muddati"),
         ("setlog", "📋 Log kanal"), ("report", "📣 Adminlarga shikoyat"),
         ("info", "🪪 Foydalanuvchi ma’lumoti"), ("id", "🆔 ID"), ("admins", "👮 Adminlar"),
+        ("play", "🎵 Musiqa qo‘yish (nomi yoki havola)"), ("skip", "⏭ Keyingi trek"), ("pause", "⏸ Pauza"),
+        ("resume", "▶️ Davom ettirish"), ("end", "⏹ Musiqani to‘xtatish"), ("queue", "📃 Musiqa navbati"),
         ("help", "❓ Yordam"),
     ]
     try:
@@ -8975,6 +8978,11 @@ async def post_shutdown(application: Application):
         timer = game.get("timer")
         if timer and not timer.done():
             timer.cancel()
+    try:
+        await music_leave_all()                # 🎵 ovozli chatlardan chiqamiz
+        await music_drop_client()
+    except Exception:  # noqa: BLE001
+        pass
     if _NFT_UB.get("client") is not None:      # 🤖 NFT userbot ulanishini yopamiz
         try:
             await _NFT_UB["client"].disconnect()
@@ -17439,6 +17447,8 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_news_admin(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/owner/flag":
             coro = web_owner_flag(uid, body.get("key"))
+        elif path.startswith("/app/api/music/") and path.rsplit("/", 1)[1] in MUSIC_ACTS:
+            coro = web_music(uid, path.rsplit("/", 1)[1], body)
         elif path.startswith("/app/api/utag/") and path.rsplit("/", 1)[1] in UTAG_ACTS:
             coro = web_utag(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/kid":
@@ -17448,7 +17458,7 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             return
         try:
             # Telegram login (userbot) va Empire bilan to'lov sekinroq bo'lishi mumkin — ularga ko'proq vaqt
-            slow = path.startswith("/app/api/utag/") or "/market/ub_" in path or path.endswith("/market/rs_sync")
+            slow = path.startswith(("/app/api/utag/", "/app/api/music/")) or "/market/ub_" in path or path.endswith("/market/rs_sync")
             res = asyncio.run_coroutine_threadsafe(coro, _EXCHANGE_LOOP).result(timeout=18 if slow else 10)   # klient api() 20 s da uzadi
         except Exception as e:  # noqa: BLE001
             logger.warning("WebApp API %s xato: %s", path, e)
@@ -18882,6 +18892,7 @@ def init_webapp():
         # 🏪 Empire Market: sozlamalar, NFT ro'yxati, buyurtmalar
         init_market(c)
         init_utag(c)
+        init_music(c)
 
 
 # ── 🧍 Realistik 3D avatar (web app) — test: standart faqat ownerlar ──
@@ -20426,7 +20437,8 @@ def ub_tl():
         SendStarsForm=F.payments.SendStarsFormRequest, GetStarsStatus=F.payments.GetStarsStatusRequest,
         InvoiceResale=T.InputInvoiceStarGiftResale, InputPeerSelf=T.InputPeerSelf, StarsAmount=T.StarsAmount,
         StarGift=T.StarGift, Unique=T.StarGiftUnique, AttrModel=T.StarGiftAttributeModel,
-        AttrBackdrop=T.StarGiftAttributeBackdrop, AttrPattern=T.StarGiftAttributePattern)
+        AttrBackdrop=T.StarGiftAttributeBackdrop, AttrPattern=T.StarGiftAttributePattern,
+        JoinChannel=F.channels.JoinChannelRequest, ImportChatInvite=F.messages.ImportChatInviteRequest)
     _UB_TLC.append(tl)
     return tl
 
@@ -22172,6 +22184,734 @@ async def on_private_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.reply_text(t(user.id, "start_text"), reply_markup=add)
 # ── 🏷 /UTAG ──
+
+
+# ── 🎵 MUSIQA ──
+# Guruhda istalgan a'zo "/play nomi|havola" (yoki audio xabarga reply) yozadi — alohida MUSIQA YORDAMCHI akkaunti (Telethon userbot,
+# ownerlar web app → Owner → 🎵 Musiqa'da ulaydi; umumiy `ub_login`, istalgan akkaunt) guruhga o'zi qo'shiladi (public — username,
+# yopiq — bot yaratgan 1 martalik taklif havolasi; bot admin bo'lishi kerak), ovozli chatga kirib (yo'q bo'lsa ochadi) musiqani
+# py-tgcalls (ntgcalls) orqali qo'yadi. Manba: yt-dlp (YouTube qidiruv → zaxira SoundCloud; havola faqat MUSIC_URL_HOSTS) yoki
+# Telegram audio (Bot API get_file ≤ 20 MB). Fayllar `MUSIC_DIR` keshida. Navbat `MUSIC_Q` (xotirada, restartda bo'shaydi).
+# Boshqaruv (/skip /pause /resume /end, tugmalar `mu:<amal>`): so'ragan odam, guruh adminlari, bot egalari.
+# Server talabi: ffmpeg + ffprobe (Railway: nixpacks.toml / railpack.json), env TG_API_ID/TG_API_HASH/USERBOT_SESSION_KEY.
+MUSIC_DEVICE = "Empire Music"
+MUSIC_DIR = os.path.join(VOLUME_PATH or BASE_DIR, "music_cache")
+MUSIC_MAX_DUR = _env_int("MUSIC_MAX_DURATION", 1800)       # bitta trek ko'pi bilan (s)
+MUSIC_FILE_MAX = 60 * 1024 * 1024
+MUSIC_CACHE_MAX = 800 * 1024 * 1024                        # kesh hajmi — oshsa eski fayllar o'chadi
+MUSIC_QUEUE_MAX = 25
+MUSIC_USER_RATE = (3, 30)                                  # bitta odam: 30 s da 3 ta /play
+MUSIC_LOGIN_RATE = (8, 600)
+MUSIC_URL_HOSTS = ("youtube.com", "youtu.be", "soundcloud.com")
+MUSIC_COOKIES = os.getenv("YTDLP_COOKIES", "").strip()    # ixtiyoriy: YouTube cookies.txt (Netscape) matni — "bot emasligingizni tasdiqlang" uchun
+MUSIC_ACTS = ("state", "send_code", "resend", "code", "password", "cancel", "logout", "reconnect")
+_MUSIC = {"client": None, "calls": None, "me": None, "err": "", "lock": None}
+_MUSIC_LOGIN = {}
+_MUSIC_HITS = {}
+MUSIC_Q = {}                       # chat_id → {"now": trek|None, "queue": [...], "paused": bool, "at": float, "msg": id}
+_MUSIC_CHAT_LOCKS = {}
+
+
+def init_music(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS music_userbot(id INTEGER PRIMARY KEY CHECK (id=1), session TEXT NOT NULL,
+                 user_id INTEGER, tg_name TEXT, tg_username TEXT, by_owner INTEGER, updated_at INTEGER)""")
+
+
+def music_ffmpeg_ok():
+    import shutil
+    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+def music_lib_ok():
+    try:
+        import pytgcalls  # noqa: F401
+        import yt_dlp  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _music_rate(store, key, n, win):
+    hits = [t for t in store.get(key, ()) if time.time() - t < win]
+    if len(hits) >= n:
+        store[key] = hits
+        return False
+    hits.append(time.time())
+    store[key] = hits
+    return True
+
+
+def music_fmt_dur(s):
+    s = int(s or 0)
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+
+
+def music_account():
+    r = db().execute("SELECT user_id, tg_name, tg_username, updated_at FROM music_userbot WHERE id=1").fetchone()
+    return {"id": r[0], "name": r[1] or "", "username": r[2], "at": r[3]} if r else None
+
+
+async def music_ensure():
+    """Ulangan va ishga tushgan PyTgCalls yoki None (sabab `_MUSIC['err']`)."""
+    calls, cl = _MUSIC["calls"], _MUSIC["client"]
+    if calls is not None and cl is not None:
+        try:
+            if cl.is_connected():
+                return calls
+        except Exception:  # noqa: BLE001
+            pass
+    if _MUSIC["lock"] is None:
+        _MUSIC["lock"] = asyncio.Lock()
+    async with _MUSIC["lock"]:
+        if _MUSIC["calls"] is not None and _MUSIC["client"] is not None and _MUSIC["client"].is_connected():
+            return _MUSIC["calls"]
+        await music_drop_client()
+        r = db().execute("SELECT session FROM music_userbot WHERE id=1").fetchone()
+        sess = ub_session_decrypt(r[0]) if r else ""
+        if not sess:
+            _MUSIC["err"] = "no_session"
+            return None
+        if not music_lib_ok():
+            _MUSIC["err"] = "lib"
+            return None
+        cl, me, err = await ub_connect(sess, device=MUSIC_DEVICE, updates=True)
+        if err in ("unauthorized",):
+            with db() as c:
+                c.execute("DELETE FROM music_userbot WHERE id=1")
+            await market_notify_owners(_EXCHANGE_LOOP_BOT, "🎵 Musiqa yordamchi akkaunti sessiyasi bekor qilingan — web app → Owner → 🎵 Musiqa'da qayta ulang.")
+        if cl is None:
+            _MUSIC["err"] = err or "connect"
+            return None
+        try:
+            from pytgcalls import PyTgCalls
+            from pytgcalls.types import ChatUpdate, StreamEnded
+            calls = PyTgCalls(cl)
+
+            async def _upd(_client, update):
+                try:
+                    if isinstance(update, StreamEnded):
+                        if update.stream_type == StreamEnded.Type.AUDIO:
+                            await music_on_end(int(update.chat_id))
+                    elif isinstance(update, ChatUpdate) and update.status & (
+                            ChatUpdate.Status.KICKED | ChatUpdate.Status.LEFT_GROUP | ChatUpdate.Status.CLOSED_VOICE_CHAT):
+                        music_clear(int(update.chat_id))
+                except Exception as e:  # noqa: BLE001
+                    ub_log_err("Musiqa update", e)
+
+            calls.add_handler(_upd)
+            await calls.start()
+        except Exception as e:  # noqa: BLE001
+            ub_log_err("Musiqa start", e)
+            await ub_disconnect(cl)
+            _MUSIC["err"] = "start"
+            return None
+        _MUSIC.update(client=cl, calls=calls, me=ub_me(me), err="")
+        return calls
+
+
+async def music_drop_client():
+    cl = _MUSIC.get("client")
+    _MUSIC.update(client=None, calls=None)
+    MUSIC_Q.clear()
+    await ub_disconnect(cl)
+
+
+def music_clear(chat_id):
+    q = MUSIC_Q.pop(chat_id, None)
+    return q
+
+
+# ── 🔎 Manba: yt-dlp (qidiruv/havola) ──
+def music_url_ok(url):
+    try:
+        from urllib.parse import urlparse
+        u = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return False
+    host = (u.hostname or "").lower()
+    return u.scheme in ("http", "https") and any(host == h or host.endswith("." + h) for h in MUSIC_URL_HOSTS)
+
+
+def _music_cookiefile():
+    if not MUSIC_COOKIES:
+        return None
+    p = os.path.join(MUSIC_DIR, ".cookies.txt")
+    try:
+        if not os.path.exists(p):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(MUSIC_COOKIES.replace("\\n", "\n") + "\n")
+            os.chmod(p, 0o600)
+        return p
+    except OSError:
+        return None
+
+
+def music_cache_trim():
+    try:
+        files = [(e.stat().st_mtime, e.stat().st_size, e.path) for e in os.scandir(MUSIC_DIR)
+                 if e.is_file() and not e.name.startswith(".")]
+    except OSError:
+        return
+    busy = {t.get("file") for q in MUSIC_Q.values() for t in ([q.get("now")] + q.get("queue", [])) if t}
+    total = sum(s for _m, s, _p in files)
+    for _m, s, p in sorted(files):
+        if total <= MUSIC_CACHE_MAX:
+            break
+        if p in busy:
+            continue
+        try:
+            os.remove(p)
+            total -= s
+        except OSError:
+            pass
+
+
+def _music_targets(targets):
+    """Ro'yxat bo'ylab yuradi; YouTube havolasi yiqilsa (datacenter IP "bot emasligini tasdiqlang") — sarlavhasini oEmbed'dan
+    olib SoundCloud'dan qidiradi."""
+    for t in targets:
+        yield t
+    m = MEDIA_URL_RE.search(targets[0]) if len(targets) == 1 else None
+    if m:
+        info = _media_oembed_sync(m.group(1))
+        t = re.sub(r"[(\[{][^)\]}]*[)\]}]|#\S+|\b(official|video|clip|klip|lyrics?|audio|music|hd|4k|mv)\b", " ",
+                   info.get("title") or "", flags=re.I)
+        t = re.sub(r"\s+", " ", t).strip(" -|")
+        if t:
+            yield f"scsearch1:{t[:120]}"
+
+
+def _music_fetch_sync(query):
+    """→ (trek dict, None) yoki (None, xato kodi). Bloklovchi — asyncio.to_thread da."""
+    import yt_dlp
+    os.makedirs(MUSIC_DIR, exist_ok=True)
+    opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True, "socket_timeout": 15,
+            "outtmpl": os.path.join(MUSIC_DIR, "%(extractor_key)s_%(id)s.%(ext)s"), "max_filesize": MUSIC_FILE_MAX,
+            "restrictfilenames": True, "noprogress": True, "cachedir": False}
+    ck = _music_cookiefile()
+    if ck:
+        opts["cookiefile"] = ck
+    is_url = query.startswith(("http://", "https://"))
+    if is_url and not music_url_ok(query):
+        return None, "url"
+    targets = [query] if is_url else [f"ytsearch1:{query}", f"scsearch1:{query}"]
+    last = "not_found"
+    for tgt in _music_targets(targets):
+        try:
+            with yt_dlp.YoutubeDL(opts) as y:
+                info = y.extract_info(tgt, download=False)
+                if info and info.get("entries") is not None:
+                    info = next((e for e in info["entries"] if e), None)
+                if not info:
+                    continue
+                if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):
+                    return None, "live"
+                dur = int(info.get("duration") or 0)
+                if dur > MUSIC_MAX_DUR:
+                    return None, "long"
+                path = y.prepare_filename(info)
+                if not os.path.exists(path):
+                    info = y.process_ie_result(info, download=True)
+                    path = y.prepare_filename(info)
+                if not os.path.exists(path):
+                    last = "download"
+                    continue
+                os.utime(path, None)
+                return {"title": str(info.get("title") or query)[:120], "dur": dur, "file": path,
+                        "url": str(info.get("webpage_url") or "")[:300],
+                        "src": "SoundCloud" if "soundcloud" in str(info.get("extractor_key", "")).lower() else "YouTube"}, None
+        except Exception as e:  # noqa: BLE001 — yt-dlp xatosi: keyingi manba
+            logger.warning("Musiqa yt-dlp (%s): %s", tgt.split(":", 1)[0], str(e)[:200])
+            last = "download"
+    return None, last
+
+
+async def music_from_tg(bot, msg):
+    """Reply qilingan audio/ovozli xabar → (trek, None) | (None, xato)."""
+    a = msg.audio or msg.voice or (msg.document if msg.document and str(msg.document.mime_type or "").startswith("audio/") else None)
+    if a is None:
+        return None, "no_audio"
+    if (a.file_size or 0) > 20 * 1024 * 1024:
+        return None, "big"
+    dur = int(getattr(a, "duration", 0) or 0)
+    if dur > MUSIC_MAX_DUR:
+        return None, "long"
+    os.makedirs(MUSIC_DIR, exist_ok=True)
+    ext = ".ogg" if msg.voice else os.path.splitext(getattr(a, "file_name", "") or "")[1][:6] or ".mp3"
+    if not re.fullmatch(r"\.[A-Za-z0-9]{1,5}", ext):
+        ext = ".mp3"
+    path = os.path.join(MUSIC_DIR, f"TG_{re.sub(r'[^A-Za-z0-9_-]', '', a.file_unique_id)}{ext}")
+    if not os.path.exists(path):
+        f = await bot.get_file(a.file_id)
+        await f.download_to_drive(path)
+    os.utime(path, None)
+    if msg.audio:
+        title = " — ".join(x for x in (msg.audio.performer, msg.audio.title) if x) or msg.audio.file_name or "Audio"
+    elif msg.voice:
+        title = "🎤 Ovozli xabar"
+    else:
+        title = msg.document.file_name or "Audio"
+    return {"title": str(title)[:120], "dur": dur, "file": path, "url": "", "src": "Telegram"}, None
+
+
+# ── 👥 Guruhga qo'shilish ──
+async def music_peer(cl, chat_id):
+    try:
+        return await cl.get_input_entity(chat_id)
+    except Exception:  # noqa: BLE001 — sessiya keshida yo'q: dialoglardan topamiz
+        await cl.get_dialogs(limit=500)
+        return await cl.get_input_entity(chat_id)
+
+
+async def music_join(bot, chat_id):
+    """Yordamchi akkaunt guruhda bo'lmasa — qo'shiladi. None (ok) yoki xato kodi."""
+    cl, me = _MUSIC["client"], _MUSIC["me"] or {}
+    aid = int(me.get("id") or 0)
+    st = None
+    try:
+        m = await bot.get_chat_member(chat_id, aid)
+        st = m.status
+        if st == ChatMemberStatus.BANNED:
+            return "banned"
+        if st in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER, ChatMemberStatus.MEMBER) or \
+                (st == ChatMemberStatus.RESTRICTED and getattr(m, "is_member", False)):
+            await music_peer(cl, chat_id)
+            return None
+    except TelegramError:
+        pass
+    tl = ub_tl()
+    try:
+        chat = await bot.get_chat(chat_id)
+        if chat.username:
+            await cl(tl.JoinChannel(channel=chat.username))
+        else:
+            try:
+                link = await bot.create_chat_invite_link(chat_id, member_limit=1, name="Empire Music")
+            except TelegramError:
+                return "invite"
+            h = link.invite_link.rstrip("/").rsplit("/", 1)[-1].lstrip("+")
+            try:
+                await cl(tl.ImportChatInvite(hash=h))
+            except Exception as e:  # noqa: BLE001
+                if type(e).__name__ == "InviteRequestSentError":
+                    try:
+                        await bot.approve_chat_join_request(chat_id, aid)
+                    except TelegramError:
+                        return "join_request"
+                elif type(e).__name__ != "UserAlreadyParticipantError":
+                    raise
+        await music_peer(cl, chat_id)
+        return None
+    except Exception as e:  # noqa: BLE001
+        ub_log_err("Musiqa join", e)
+        n = type(e).__name__
+        if n in ("UserBannedInChannelError", "ChannelPrivateError"):
+            return "banned"
+        if n in ("FloodWaitError", "ChannelsTooMuchError"):
+            return "flood"
+        return "join"
+
+
+# ── ▶️ Ijro ──
+def music_kb(q):
+    paused = q.get("paused")
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("▶️ Davom" if paused else "⏸ Pauza", callback_data="mu:resume" if paused else "mu:pause"),
+        InlineKeyboardButton("⏭ Keyingi", callback_data="mu:skip"),
+        InlineKeyboardButton("⏹ To'xtatish", callback_data="mu:end"),
+    ], [InlineKeyboardButton("📃 Navbat", callback_data="mu:q")]])
+
+
+def music_now_text(q):
+    t = q.get("now") or {}
+    link = f'<a href="{escape(t["url"], quote=True)}">{escape(t["title"])}</a>' if t.get("url") else f"<b>{escape(t.get('title', ''))}</b>"
+    return (f"{'⏸' if q.get('paused') else '🎵'} <b>Hozir:</b> {link}\n"
+            f"⏱ {music_fmt_dur(t.get('dur'))} · {escape(t.get('src', ''))} · so'radi: {escape(t.get('by_name', ''))}"
+            + (f"\n📃 Navbatda: {len(q['queue'])} ta" if q.get("queue") else ""))
+
+
+async def music_start_track(bot, chat_id, q):
+    """q['now'] ni ovozli chatda boshlaydi. None yoki xato kodi."""
+    calls = await music_ensure()
+    if calls is None:
+        return "off"
+    from pytgcalls.types import MediaStream, GroupCallConfig, AudioQuality
+    stream = MediaStream(q["now"]["file"], AudioQuality.HIGH, video_flags=MediaStream.Flags.IGNORE)
+    for attempt in (1, 2):
+        try:
+            await calls.play(chat_id, stream, GroupCallConfig(auto_start=True))
+            q.update(paused=False, at=time.time())
+            return None
+        except Exception as e:  # noqa: BLE001
+            n = type(e).__name__
+            ub_log_err("Musiqa play", e)
+            if attempt == 1 and n in ("ChatAdminRequiredError", "NoActiveGroupCall", "GroupcallForbiddenError"):
+                try:   # ovozli chatni ochish huquqi — bot o'zi admin bo'lsa yordamchiga beradi
+                    await bot.promote_chat_member(chat_id, int(_MUSIC["me"]["id"]), can_manage_video_chats=True)
+                    continue
+                except TelegramError:
+                    return "voice_chat"
+            if n in ("ChatAdminRequiredError", "NoActiveGroupCall", "GroupcallForbiddenError"):
+                return "voice_chat"
+            if n in ("FileNotFoundError", "FFmpegError"):
+                return "ffmpeg" if not music_ffmpeg_ok() else "file"
+            return "play"
+    return "play"
+
+
+async def music_announce(bot, chat_id, q):
+    old = q.get("msg")
+    try:
+        m = await bot.send_message(chat_id, music_now_text(q), reply_markup=music_kb(q), disable_web_page_preview=True)
+        q["msg"] = m.message_id
+    except TelegramError:
+        q["msg"] = None
+    if old:
+        try:
+            await bot.delete_message(chat_id, old)
+        except TelegramError:
+            pass
+
+
+async def music_leave(chat_id):
+    MUSIC_Q.pop(chat_id, None)
+    calls = _MUSIC.get("calls")
+    if calls is not None:
+        try:
+            await calls.leave_call(chat_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def music_next(bot, chat_id):
+    """Navbatdagi trekka o'tadi; navbat bo'sh bo'lsa ovozli chatdan chiqadi."""
+    q = MUSIC_Q.get(chat_id)
+    while q and q["queue"]:
+        q["now"] = q["queue"].pop(0)
+        err = await music_start_track(bot, chat_id, q)
+        if not err:
+            await music_announce(bot, chat_id, q)
+            return True
+        try:
+            await bot.send_message(chat_id, f"⚠️ «{escape(q['now']['title'])}» qo'yilmadi: {MUSIC_ERR.get(err, err)}")
+        except TelegramError:
+            pass
+    await music_leave(chat_id)
+    return False
+
+
+async def music_on_end(chat_id):
+    lock = _MUSIC_CHAT_LOCKS.setdefault(chat_id, asyncio.Lock())
+    async with lock:
+        if chat_id not in MUSIC_Q:
+            return
+        await music_next(_EXCHANGE_LOOP_BOT, chat_id)
+        q = MUSIC_Q.get(chat_id)
+        if q is None:
+            try:
+                await _EXCHANGE_LOOP_BOT.send_message(chat_id, "✅ Navbat tugadi — yordamchi ovozli chatdan chiqdi.")
+            except TelegramError:
+                pass
+
+
+MUSIC_ERR = {
+    "off": "🎵 Musiqa yordamchisi ulanmagan (bot egalari web app → Owner → 🎵 Musiqa'da ulaydi).",
+    "lib": "⚙️ Serverda musiqa kutubxonalari o'rnatilmagan.",
+    "ffmpeg": "⚙️ Serverda ffmpeg o'rnatilmagan.",
+    "not_found": "🔎 Hech narsa topilmadi.",
+    "download": "⚠️ Yuklab bo'lmadi (manba vaqtincha javob bermayapti) — boshqa nom/havola bilan urinib ko'ring yoki audio faylga reply qiling.",
+    "url": "🔗 Faqat YouTube va SoundCloud havolalari qabul qilinadi.",
+    "live": "📡 Jonli efirlar qo'yilmaydi.",
+    "long": f"⏱ Juda uzun (ko'pi bilan {MUSIC_MAX_DUR // 60} daqiqa).",
+    "big": "📦 Fayl 20 MB dan katta.",
+    "no_audio": "🎧 Reply qilingan xabarda audio yo'q.",
+    "banned": "⛔ Yordamchi akkaunt bu guruhdan chiqarilgan/bloklangan — uni bandan chiqaring.",
+    "invite": "🔑 Yordamchini qo'shib bo'lmadi: botni guruhda admin qiling («Havola orqali taklif qilish» huquqi bilan).",
+    "join_request": "🔑 Yordamchining qo'shilish so'rovini tasdiqlang (yoki botga «A'zolarni qo'shish» huquqini bering).",
+    "flood": "⏳ Telegram cheklovi — birozdan keyin urinib ko'ring.",
+    "join": "⚠️ Yordamchi guruhga qo'shila olmadi.",
+    "voice_chat": "🎙 Ovozli chatni oching yoki yordamchi akkauntga «Ovozli chatlarni boshqarish» admin huquqini bering.",
+    "file": "⚠️ Faylni o'qib bo'lmadi.",
+    "play": "⚠️ Ovozli chatga ulanib bo'lmadi — birozdan keyin urinib ko'ring.",
+    "queue": f"📃 Navbat to'lgan (ko'pi bilan {MUSIC_QUEUE_MAX} ta).",
+    "rate": "⏳ Sekinroq — bir necha soniyadan keyin.",
+}
+
+
+async def cmd_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat, user = update.effective_chat, update.effective_user
+    if msg is None or user is None:
+        return
+    if chat.type not in ("group", "supergroup"):
+        await msg.reply_text("🎵 <b>/play</b> guruhda ishlaydi: <code>/play qo'shiq nomi</code>, YouTube/SoundCloud havolasi "
+                             "yoki audio faylga reply qilib <code>/play</code>.\nBotni guruhga admin qilib qo'shing — "
+                             "musiqa yordamchisi ovozli chatga o'zi kiradi.")
+        return
+    query = " ".join(context.args or []).strip()[:200]
+    rep = msg.reply_to_message
+    has_audio = rep is not None and (rep.audio or rep.voice or (rep.document and str(rep.document.mime_type or "").startswith("audio/")))
+    if not query and not has_audio:
+        await msg.reply_text("🎵 Foydalanish: <code>/play qo'shiq nomi</code> yoki havola, yoki audio faylga reply qilib <code>/play</code>.")
+        return
+    if user.id not in CAREER_OWNER_IDS and not _music_rate(_MUSIC_HITS, user.id, *MUSIC_USER_RATE):
+        await msg.reply_text(MUSIC_ERR["rate"])
+        return
+    if not music_lib_ok():
+        await msg.reply_text(MUSIC_ERR["lib"])
+        return
+    if not music_ffmpeg_ok():
+        await msg.reply_text(MUSIC_ERR["ffmpeg"])
+        return
+    if await music_ensure() is None:
+        await msg.reply_text(MUSIC_ERR["off"])
+        return
+    q = MUSIC_Q.get(chat.id)
+    if q and len(q["queue"]) >= MUSIC_QUEUE_MAX:
+        await msg.reply_text(MUSIC_ERR["queue"])
+        return
+    wait = await msg.reply_text("🔎 Qidirilmoqda…" if query and not has_audio else "📥 Yuklanmoqda…")
+    try:
+        if has_audio:
+            track, err = await music_from_tg(context.bot, rep)
+        else:
+            track, err = await asyncio.wait_for(asyncio.to_thread(_music_fetch_sync, query), timeout=150)
+    except asyncio.TimeoutError:
+        track, err = None, "download"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Musiqa manba: %s", type(e).__name__)
+        track, err = None, "download"
+    if track is None:
+        await _music_edit(wait, MUSIC_ERR.get(err, err))
+        return
+    track.update(by=user.id, by_name=user.full_name[:64])
+    lock = _MUSIC_CHAT_LOCKS.setdefault(chat.id, asyncio.Lock())
+    async with lock:
+        q = MUSIC_Q.get(chat.id)
+        if q and q.get("now"):
+            if len(q["queue"]) >= MUSIC_QUEUE_MAX:
+                await _music_edit(wait, MUSIC_ERR["queue"])
+                return
+            q["queue"].append(track)
+            await _music_edit(wait, f"➕ Navbatga qo'shildi (#{len(q['queue'])}): <b>{escape(track['title'])}</b> · "
+                                    f"⏱ {music_fmt_dur(track['dur'])}")
+            return
+        err = await music_join(context.bot, chat.id)
+        if err:
+            await _music_edit(wait, MUSIC_ERR.get(err, err))
+            return
+        q = MUSIC_Q[chat.id] = {"now": track, "queue": [], "paused": False, "at": time.time(), "msg": None}
+        err = await music_start_track(context.bot, chat.id, q)
+        if err:
+            MUSIC_Q.pop(chat.id, None)
+            await _music_edit(wait, MUSIC_ERR.get(err, err))
+            return
+        try:
+            await wait.delete()
+        except TelegramError:
+            pass
+        await music_announce(context.bot, chat.id, q)
+    music_cache_trim()
+
+
+async def _music_edit(m, text):
+    try:
+        await m.edit_text(text, disable_web_page_preview=True)
+    except TelegramError:
+        pass
+
+
+async def music_can_control(bot, chat_id, uid):
+    q = MUSIC_Q.get(chat_id)
+    if uid in CAREER_OWNER_IDS or (q and q.get("now") and q["now"].get("by") == uid):
+        return True
+    return await is_admin(bot, chat_id, uid)
+
+
+async def music_control(bot, chat_id, uid, act):
+    """act: pause | resume | skip | end → (matn, alert?)"""
+    q = MUSIC_Q.get(chat_id)
+    if not q or not q.get("now"):
+        return "🔇 Hozir hech narsa ijro etilmayapti.", True
+    if not await music_can_control(bot, chat_id, uid):
+        return "⛔ Faqat so'ragan odam yoki adminlar boshqaradi.", True
+    calls = _MUSIC.get("calls")
+    lock = _MUSIC_CHAT_LOCKS.setdefault(chat_id, asyncio.Lock())
+    async with lock:
+        if chat_id not in MUSIC_Q:
+            return "🔇 Hozir hech narsa ijro etilmayapti.", True
+        try:
+            if act == "pause" and not q["paused"]:
+                await calls.pause(chat_id)
+                q["paused"] = True
+                return "⏸ Pauza", False
+            if act == "resume" and q["paused"]:
+                await calls.resume(chat_id)
+                q["paused"] = False
+                return "▶️ Davom etmoqda", False
+            if act in ("pause", "resume"):
+                return ("⏸ Allaqachon pauzada" if q["paused"] else "▶️ Allaqachon ijro etilmoqda"), True
+        except Exception as e:  # noqa: BLE001
+            ub_log_err("Musiqa control", e)
+            return "⚠️ Bajarib bo'lmadi", True
+        if act == "skip":
+            if await music_next(bot, chat_id):
+                return "⏭ Keyingi trek", False
+            return "⏹ Navbat tugadi — to'xtatildi", False
+        if act == "end":
+            await music_leave(chat_id)
+            return "⏹ To'xtatildi, navbat tozalandi", False
+    return "?", True
+
+
+def music_queue_text(chat_id):
+    q = MUSIC_Q.get(chat_id)
+    if not q or not q.get("now"):
+        return "🔇 Navbat bo'sh. <code>/play qo'shiq nomi</code>"
+    lines = [music_now_text(q).split("\n")[0]]
+    for i, t in enumerate(q["queue"][:15], 1):
+        lines.append(f"{i}. {escape(t['title'])} · {music_fmt_dur(t['dur'])} — {escape(t.get('by_name', ''))}")
+    if len(q["queue"]) > 15:
+        lines.append(f"… yana {len(q['queue']) - 15} ta")
+    return "\n".join(lines)
+
+
+async def cmd_music_ctl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if msg is None or user is None or chat.type not in ("group", "supergroup"):
+        return
+    name = (msg.text or "").split()[0].lstrip("/.!").split("@")[0].lower()
+    act = {"skip": "skip", "next": "skip", "pause": "pause", "resume": "resume", "end": "end", "mstop": "end",
+           "queue": "q", "navbat": "q"}.get(name)
+    if act == "q":
+        await msg.reply_text(music_queue_text(chat.id), disable_web_page_preview=True)
+        return
+    if act is None:
+        return
+    text, _alert = await music_control(context.bot, chat.id, user.id, act)
+    await msg.reply_text(text)
+    q = MUSIC_Q.get(chat.id)
+    if q and q.get("msg") and act in ("pause", "resume"):
+        try:
+            await context.bot.edit_message_text(music_now_text(q), chat.id, q["msg"], reply_markup=music_kb(q), disable_web_page_preview=True)
+        except TelegramError:
+            pass
+
+
+async def cb_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    chat_id = query.message.chat.id if query.message else 0
+    act = query.data.split(":", 1)[1]
+    if act == "q":
+        await query.answer(re.sub(r"<[^>]+>", "", music_queue_text(chat_id))[:190], show_alert=True)
+        return
+    text, alert = await music_control(context.bot, chat_id, query.from_user.id, act)
+    await query.answer(text, show_alert=alert)
+    q = MUSIC_Q.get(chat_id)
+    if not alert and q and act in ("pause", "resume"):
+        try:
+            await query.edit_message_text(music_now_text(q), reply_markup=music_kb(q), disable_web_page_preview=True)
+        except TelegramError:
+            pass
+    elif not alert and act == "end":
+        try:
+            await query.edit_message_reply_markup(None)
+        except TelegramError:
+            pass
+
+
+# ── 🌐 Web app (faqat ownerlar): /app/api/music/<act> — yordamchi akkauntni ulash / uzish / holat ──
+def music_state():
+    acc = music_account()
+    cl = _MUSIC.get("client")
+    online = False
+    try:
+        online = bool(cl is not None and _MUSIC.get("calls") is not None and cl.is_connected())
+    except Exception:  # noqa: BLE001
+        pass
+    return {"connected": bool(acc), "me": ({"id": acc["id"], "name": acc["name"], "username": acc["username"]} if acc else None),
+            "online": online, "err": _MUSIC.get("err") or "", "api": ub_api_ready(), "key": ub_crypto_ready(),
+            "lib": music_lib_ok(), "ffmpeg": music_ffmpeg_ok(), "cookies": bool(MUSIC_COOKIES),
+            "chats": len(MUSIC_Q), "max_min": MUSIC_MAX_DUR // 60}
+
+
+async def web_music(uid, act, body):
+    if uid not in CAREER_OWNER_IDS:
+        return {"error": "owner"}
+    body = body if isinstance(body, dict) else {}
+    res = {"result": "ok"}
+    if act == "state":
+        pass
+    elif act == "reconnect":
+        await music_drop_client()
+        res = {"result": "online" if await music_ensure() is not None else "offline"}
+    elif act == "logout":
+        await ub_login_drop(_MUSIC_LOGIN, uid)
+        cl = _MUSIC.get("client")
+        await music_leave_all()
+        if cl is None:
+            r = db().execute("SELECT session FROM music_userbot WHERE id=1").fetchone()
+            sess = ub_session_decrypt(r[0]) if r else ""
+            if sess:
+                cl, _me, _e = await ub_connect(sess, device=MUSIC_DEVICE)
+        if cl is not None:
+            try:
+                await cl.log_out()
+            except Exception as e:  # noqa: BLE001
+                ub_log_err("Musiqa log_out", e)
+        await music_drop_client()
+        with db() as c:
+            c.execute("DELETE FROM music_userbot WHERE id=1")
+        _MUSIC.update(me=None, err="no_session")
+        res = {"result": "logged_out"}
+    elif act in ("send_code", "resend", "code", "password", "cancel"):
+        if act == "send_code" and music_account():
+            return {"error": "connected", "music": music_state()}
+        if act != "cancel" and not _music_rate(_MUSIC_HITS, -uid, *MUSIC_LOGIN_RATE):
+            return {"error": "rate", "music": music_state()}
+        res, cl, me = await ub_login(_MUSIC_LOGIN, uid, act, body, device=MUSIC_DEVICE)
+        if cl is not None:
+            res = await music_save_login(uid, cl, me)
+    else:
+        res = {"error": "act"}
+    return dict(res, music=music_state(), login=ub_login_view(_MUSIC_LOGIN, uid))
+
+
+async def music_save_login(uid, cl, me):
+    try:
+        sess = ub_session_encrypt(cl.session.save())       # DB'da faqat shifrlangan
+    except UbKeyMissing:
+        try:
+            await cl.log_out()
+        except Exception:  # noqa: BLE001
+            pass
+        await ub_disconnect(cl)
+        return {"error": "ub_key"}
+    mi = ub_me(me)
+    with db() as c:
+        c.execute("""INSERT INTO music_userbot(id, session, user_id, tg_name, tg_username, by_owner, updated_at) VALUES (1,?,?,?,?,?,?)
+                     ON CONFLICT(id) DO UPDATE SET session=excluded.session, user_id=excluded.user_id, tg_name=excluded.tg_name,
+                     tg_username=excluded.tg_username, by_owner=excluded.by_owner, updated_at=excluded.updated_at""",
+                  (sess, mi["id"], mi["name"], mi["username"], uid, int(time.time())))
+    await ub_disconnect(cl)            # login klienti yangilanishlarsiz — ijro klienti alohida ochiladi
+    await music_drop_client()
+    ok = await music_ensure() is not None
+    await market_notify_owners(_EXCHANGE_LOOP_BOT, f"🎵 Musiqa yordamchisi ulandi: {escape(mi['name'] or '')}"
+                                                   f"{' @' + escape(mi['username']) if mi['username'] else ''} (<code>{mi['id']}</code>) — {person_name(uid)}")
+    return {"result": "connected", "online": ok}
+
+
+async def music_leave_all():
+    for cid in list(MUSIC_Q):
+        await music_leave(cid)
+
+
+async def music_worker(application):
+    """Ishga tushganda yordamchini ulaydi (sessiya bo'lsa)."""
+    await asyncio.sleep(20)
+    if music_account():
+        await music_ensure()
+# ── 🎵 /MUSIQA ──
 
 
 # ── 👛 O'tkazmalar: $ va 🪙 EMP — web (ID/@username), guruhda /pul va /coin (reply), ownerlar /coins ──
@@ -26772,7 +27512,7 @@ function render(res){
   if(d.is_owner && d.owner){
     const o=$('<div class="sec" id="s-owner"></div>');
     o.appendChild($('<h2>👑 Owner panel</h2>'));
-    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['vip','👑','VIP'],['test','🧪','Testerlar'],['judge','⚖️','Ajrimchilar'],['market','🏪','Market'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
+    const OG=[['stat','📊','Statistika'],['news','📰','Yangiliklar'],['emp','🪙','EMP'],['vip','👑','VIP'],['test','🧪','Testerlar'],['judge','⚖️','Ajrimchilar'],['market','🏪','Market'],['music','🎵','Musiqa'],['edu','🏫','Ta‘lim'],['set','⚙️','Sozlamalar']];
     const oseg=$('<div class="oseg">'+OG.map(([k,i,l])=>'<span data-g="'+k+'"><i>'+i+'</i>'+l+'</span>').join('')+'</div>');
     o.appendChild(oseg);
     const G={}; OG.forEach(([k])=>{ G[k]=$('<div class="ogrp" data-g="'+k+'"></div>'); o.appendChild(G[k]); });
@@ -26816,6 +27556,7 @@ function render(res){
     G.test.appendChild(testerAdmin(d));
     G.judge.appendChild(judgeAdmin(d));
     G.market.appendChild(marketAdmin(d));
+    G.music.appendChild(musicAdmin());
     G.set.appendChild(ownerFlags(d));
     G.set.appendChild(amnestyCard(d));
     if(d.emp&&d.emp.admin){ // 🪙 EMP paketlari — narxlarni ownerlar boshqaradi
@@ -28316,6 +29057,53 @@ const SEAG=mpGame('sea_battle','__SB_VER__','sb.js','sb.css','SEAB',true,'sea','
 const CHECKG=mpGame('checkers','__CK_VER__','ck.js','ck.css','CHECK',true,'checkers','vipCkBest');
 // 🧪 Web testerlar — haqiqiy odamlar jamoasi test rejimidagi bo'limlarni ko'radi
 // ⚖️ Ajrimchilar — juftlashish va ajrashish arizalari ularga ham keladi
+// ---- 🎵 Musiqa yordamchisi (faqat ownerlar): guruh ovozli chatiga /play bilan musiqa qo'yadigan alohida Telegram akkaunt ----
+const MUERR={owner:'⛔ Faqat bot egalari',connected:'🔌 Akkaunt allaqachon ulangan — avval uzing',act:'⚠️ Noma’lum amal'};
+function musicAdmin(){
+  const box=$('<div class="card full utbox"><div class="hsub">Yuklanmoqda…</div></div>');
+  let S=null, L=null, busy=false;
+  const call=(act,body)=>{ if(busy) return; busy=true;
+    return api('/app/api/music/'+act,body||{}).then(r=>{ busy=false; if(r&&r.music){ S=r.music; L=r.login||null; draw(); }
+      if(!r||!r.ok){ toast('⚠️ Xatolik'); return r; }
+      if(r.error){ toast(MUERR[r.error]||ubErr(r)||UTERR[r.error]||'⚠️ Xatolik'); haptic('error'); return r; }
+      const ok={code_sent:ubDeliveryHint(r),need_password:'🔐 2FA parolini kiriting',connected:'✅ Musiqa yordamchisi ulandi',logged_out:'🔌 Akkaunt uzildi',
+        online:'🟢 Ulandi',offline:'⚠️ Ulanib bo‘lmadi'}[r.result];
+      if(ok){ toast(ok); haptic(r.result==='offline'?'error':'success'); } return r; }).catch(()=>{ busy=false; toast('⚠️ Aloqa xatosi'); }); };
+  function draw(){ if(!S) return; const me=S.me||{};
+    let h='<div class="lbl">🎵 Musiqa yordamchisi</div>'+
+      '<div class="chips"><span class="chip">'+(S.lib?'✅':'❌')+' kutubxonalar</span><span class="chip">'+(S.ffmpeg?'✅':'❌')+' ffmpeg</span>'+
+      '<span class="chip">'+(S.api&&S.key?'✅':'❌')+' API/kalit</span><span class="chip">🍪 cookies: '+(S.cookies?'bor':'yo‘q')+'</span>'+
+      '<span class="chip">🔊 Faol guruhlar: '+S.chats+'</span></div>';
+    if(S.connected){
+      h+='<div class="chips" style="margin-top:8px"><span class="chip">'+(S.online?'🟢':'⚪')+' '+esc(me.name||'')+(me.username?' @'+esc(me.username):'')+' · <code>'+me.id+'</code></span></div>'+
+        (S.online?'':'<div class="hsub">Ulanmagan'+(S.err?' ('+esc(S.err)+')':'')+'.</div>')+
+        '<div class="chbtns" style="margin-top:10px"><button class="btn" id="muRe">🔄 Qayta ulash</button><button class="btn" id="muOut">🔌 Uzish</button></div>';
+    } else if(L&&(L.step==='code'||L.step==='password')){
+      h+='<div class="hsub">'+esc(L.phone||'')+' — '+(L.step==='code'?esc(ubDeliveryHint(L)):'2FA (bulutli parol) yoqilgan — parolni kiriting')+'</div>'+
+        '<div class="utrow">'+(L.step==='code'?'<input id="muCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" placeholder="Kod (5–6 raqam)">'
+          :'<input id="muPw" type="password" maxlength="256" placeholder="2FA parol">')+
+        '<button class="btn go" id="muGo">'+(L.step==='code'?'✅ Kirish':'🔐 Tasdiqlash')+'</button><button class="btn" id="muCx">✖</button></div>'+
+        (L.step==='code'&&L.next?'<div class="chips"><span class="chip" id="muRs" style="cursor:pointer">'+esc(UBNEXT[L.next]||'🔁 Kodni qayta yuborish')+'</span></div>':'');
+    } else {
+      h+='<div class="hsub" style="margin-top:8px">Ulanmagan. Musiqa uchun ALOHIDA Telegram akkaunt (ikkinchi raqam) ulang — u guruhlarga o‘zi qo‘shilib ovozli chatda musiqa qo‘yadi.</div>'+
+        '<div class="utrow"><input id="muPh" type="tel" inputmode="tel" maxlength="32" placeholder="+998… / +7… / +1…"><button class="btn go" id="muSend"'+(S.api&&S.key?'':' disabled')+'>📲 Kod yuborish</button></div>'+
+        (!S.api||!S.key?'<div class="uthint">⚙️ Railway’da TG_API_ID, TG_API_HASH, USERBOT_SESSION_KEY kerak.</div>':'');
+    }
+    h+='<div class="lbl" style="margin-top:16px">ℹ️ Foydalanish</div><div class="hsub">Botni guruhga admin qiling («Havola orqali taklif», «Adminlar qo‘shish» huquqlari bilan). '+
+      'Guruhda: <code>/play qo‘shiq nomi</code>, YouTube/SoundCloud havolasi yoki audio faylga reply + <code>/play</code>. '+
+      'Boshqaruv: <code>/pause /resume /skip /end /queue</code> (so‘ragan odam yoki adminlar). Trek ko‘pi bilan '+S.max_min+' daqiqa.</div>';
+    box.innerHTML=h;
+    const q=x=>box.querySelector(x), on=(x,f)=>{ const e=q(x); if(e) e.onclick=f; };
+    on('#muSend',()=>call('send_code',{phone:q('#muPh').value.trim()}));
+    on('#muGo',()=>{ const c=q('#muCode'); if(c) call('code',{code:c.value.trim()}); else call('password',{password:q('#muPw').value}); });
+    on('#muCx',()=>call('cancel'));
+    on('#muRs',()=>call('resend'));
+    on('#muRe',()=>call('reconnect'));
+    on('#muOut',()=>{ if(confirm('Musiqa akkaunti uzilsinmi? Sessiya Telegram’da bekor qilinadi.')) call('logout'); });
+  }
+  call('state');
+  return box;
+}
 function judgeAdmin(d){
   const box=$('<div class="card full"></div>');
   const ERR={owner_only:'👑 Faqat ownerlar',not_found:'🔎 Foydalanuvchi topilmadi (botni ishlatgan bo‘lishi kerak)',owner:'👑 Ownerlarga arizalar baribir keladi',max:'⚠️ Ajrimchilar soni chegarada (50)'};
@@ -29897,6 +30685,8 @@ def main():
         (["app", "ilova"], cmd_app),
         (["help", "yordam"], cmd_help),
         (["lang"], cmd_lang),
+        (["play"], cmd_play),
+        (["skip", "next", "pause", "resume", "end", "mstop", "queue", "navbat"], cmd_music_ctl),
     ]
     # Buyruqlar / belgisidan tashqari . va ! bilan ham ishlaydi (Group Help uslubi): .admin .del .mute ...
     EXTRA_PREFIXES = [".", "!"]
@@ -29955,6 +30745,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_sticker_pack, pattern=r"^stk:[gu]:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_crash, pattern=r"^cr:"))
     app.add_handler(CallbackQueryHandler(cb_utag, pattern=r"^ut:\d+:(m|p|buy|ok|card)$"))
+    app.add_handler(CallbackQueryHandler(cb_music, pattern=r"^mu:(pause|resume|skip|end|q)$"))
     app.add_handler(CallbackQueryHandler(cb_noop))
     # 📋 Shaxsiy chat pastki menyusi (ReplyKeyboard) — aniq tugma matnlari mavjud handlerlarga
     app.add_handler(MessageHandler(filters.Text(list(PRIVATE_MENU_MAP)) & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE,

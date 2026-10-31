@@ -1,0 +1,3 @@
+# 🎵 Musiqa (/play): py-tgcalls ffmpeg + ffprobe talab qiladi
+[phases.setup]
+nixPkgs = ["...", "ffmpeg"]

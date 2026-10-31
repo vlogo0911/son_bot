@@ -519,3 +519,16 @@
 - 📋 Shaxsiy chat pastki menyusi: `/start` va `/emps` (shaxsiyda) doimiy `private_menu_kb()` (ReplyKeyboard, `PRIVATE_MENU`): Profil/Oila/Farzandlarim/
   Banklar/Birja/Almashuv/Do'kon/Reyting/Missiyalar/O'yinlar (guruh o'yinlari ro'yxati + guruhga qo'shish)/🏷 UTag/Ilova/Guruhga qo'shish/Til/Yordam →
   `on_private_menu` (`filters.Text(PRIVATE_MENU_MAP)`, career_private_text'dan oldin) mavjud handlerlarga yo'naltiradi. Guruhlar o'zgarmagan.
+- 🎵 Musiqa (/play; kod bloki `# ── 🎵 MUSIQA` … `/MUSIQA`): ALOHIDA musiqa yordamchi akkaunti (Telethon userbot) — ownerlar web app → Owner →
+  🎵 Musiqa'da ulaydi (`musicAdmin`, `/app/api/music/{state,send_code,resend,code,password,cancel,logout,reconnect}` → `web_music`, umumiy
+  `ub_login`, istalgan akkaunt; sessiya `music_userbot` da shifrlangan). Ijro: py-tgcalls 3 (`music_ensure` → `PyTgCalls(client)`,
+  StreamEnded → `music_on_end`, ChatUpdate kicked/left/closed → `music_clear`). Guruhda `/play nomi|havola` yoki audio/ovozli xabarga reply:
+  manba `_music_fetch_sync` (yt-dlp: ytsearch1 → zaxira scsearch1; havola faqat `MUSIC_URL_HOSTS` youtube/soundcloud; YouTube havolasi
+  yiqilsa oEmbed sarlavhasi bilan SoundCloud — `_music_targets`), Telegram audio `music_from_tg` (≤20 MB); fayllar `MUSIC_DIR`
+  (volume/music_cache, `music_cache_trim` 800 MB). `music_join`: yordamchi guruhda bo'lmasa — public → JoinChannel, yopiq → bot
+  `create_chat_invite_link(member_limit=1)` → ImportChatInvite (join-request → `approve_chat_join_request`). Ovozli chat yo'q/huquq yo'q →
+  bot yordamchiga `can_manage_video_chats` beradi va qayta uriniladi. Navbat `MUSIC_Q` (xotirada, `MUSIC_QUEUE_MAX` 25), trek ≤
+  `MUSIC_MAX_DURATION` (env, 1800 s), /play `MUSIC_USER_RATE` 30 s da 3 ta. Boshqaruv `/skip /next /pause /resume /end /mstop /queue /navbat`
+  (`cmd_music_ctl`) va tugmalar `mu:pause|resume|skip|end|q` (`cb_music`) — so'ragan odam, guruh adminlari, bot egalari.
+  Server: ffmpeg+ffprobe (`nixpacks.toml` / `railpack.json`), `deno` (yt-dlp YouTube JS), ixtiyoriy env `YTDLP_COOKIES` (cookies.txt matni —
+  datacenter IP'da YouTube "bot emasligini tasdiqlang" deydi; cookies'siz SoundCloud ishlaydi).

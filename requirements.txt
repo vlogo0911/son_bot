@@ -2,3 +2,6 @@ python-telegram-bot>=22,<23
 Pillow
 telethon==1.45.0
 cryptography==50.0.1
+py-tgcalls==3.0.0
+yt-dlp[default]>=2026.10.26
+deno>=2.9

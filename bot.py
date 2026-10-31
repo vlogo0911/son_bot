@@ -36,8 +36,10 @@ from telegram import (
     InlineQueryResultArticle,
     InputFile,
     InputTextMessageContent,
+    KeyboardButton,
     LabeledPrice,
     MenuButtonWebApp,
+    ReplyKeyboardMarkup,
     Update,
     WebAppInfo,
 )
@@ -1968,6 +1970,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "birja": lambda: birja_home_view(user.id, user.id),
             "kids": lambda: kid_list_view(user.id),
             "exch": lambda: exchange_menu_view(user.id),
+            "utag": lambda: utag_card(user.id),
         }.get(payload)
         if section:
             text, kb = section()
@@ -2004,13 +2007,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        username = context.bot.username
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                t(chat.id, "btn_add_group"),
-                url=f"https://t.me/{username}?startgroup=true",
-            )
-        ]])
+        # Shaxsiy chatda asosiy menyu — doimiy pastki klaviatura (➕ Guruhga qo'shish ham shu yerda)
+        kb = private_menu_kb()
 
     else:
         kb = InlineKeyboardMarkup([[
@@ -3282,7 +3280,7 @@ async def cmd_emps(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type == ChatType.PRIVATE:
-        await msg.reply_text(t(chat.id, "use_group"))
+        await msg.reply_text(t(chat.id, "use_group") + "\n👇 Menyu:", reply_markup=private_menu_kb())
         return
 
     game = GAMES.get(chat.id)
@@ -8882,6 +8880,7 @@ async def post_init(application: Application):
     application.create_task(para_sync_initial(application), name="para-sync-initial")   # 💞 bir martalik: juftliklar → Empire
     application.create_task(vip_sync_initial(application), name="vip-sync-initial")     # 👑 bir martalik: VIP'lar → Empire
     application.create_task(nft_rs_worker(application), name="nft-resale-worker")      # 🤖 NFT userbot: ulanish + resale sinxron
+    application.create_task(utag_worker(application), name="utag-worker")              # 🏷 UTag: tinglovchilar + to'lovlar
     sets = {
         None: [
             ("emps", "🎮 O‘yin tanlash"), ("stop", "🛑 O‘yinni to‘xtatish"),
@@ -8951,6 +8950,11 @@ async def post_init(application: Application):
 
 
 async def post_shutdown(application: Application):
+    for _uid in list(UTAG_CLIENTS):      # 🏷 UTag tinglovchilari (sessiyalar DB'da qoladi)
+        try:
+            await utag_stop_client(_uid)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         web_crash_refund_open()   # web Crash: yechilmagan tikishlar qaytadi
         web_kami_settle_open()    # web Kamikaze: o'rtadagi o'yinlar hisoblanadi
@@ -17435,13 +17439,17 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
             coro = web_news_admin(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/owner/flag":
             coro = web_owner_flag(uid, body.get("key"))
+        elif path.startswith("/app/api/utag/") and path.rsplit("/", 1)[1] in UTAG_ACTS:
+            coro = web_utag(uid, path.rsplit("/", 1)[1], body)
         elif path == "/app/api/kid":
             coro = web_kid_action(uid, body.get("kid"), body.get("act"), body.get("item"))
         else:
             self._send(404, {"ok": False})
             return
         try:
-            res = asyncio.run_coroutine_threadsafe(coro, _EXCHANGE_LOOP).result(timeout=10)
+            # Telegram login (userbot) va Empire bilan to'lov sekinroq bo'lishi mumkin — ularga ko'proq vaqt
+            slow = path.startswith("/app/api/utag/") or "/market/ub_" in path or path.endswith("/market/rs_sync")
+            res = asyncio.run_coroutine_threadsafe(coro, _EXCHANGE_LOOP).result(timeout=18 if slow else 10)   # klient api() 20 s da uzadi
         except Exception as e:  # noqa: BLE001
             logger.warning("WebApp API %s xato: %s", path, e)
             self._send(500, {"ok": False, "error": "internal"})
@@ -18873,6 +18881,7 @@ def init_webapp():
             UNIQUE(cat, vid))""")
         # 🏪 Empire Market: sozlamalar, NFT ro'yxati, buyurtmalar
         init_market(c)
+        init_utag(c)
 
 
 # ── 🧍 Realistik 3D avatar (web app) — test: standart faqat ownerlar ──
@@ -19476,7 +19485,7 @@ MARKET_BAL_TTL = 30              # getMyStarBalance keshi
 MARKET_MAX_STARS = 100_000
 MARKET_TEXT_MAX = 120
 MARKET_ACTS = ("catalog", "order", "state", "config", "nft_add", "nft_update", "nft_toggle", "nft_delete", "deliver", "refund",
-               "balance", "ub_status", "ub_send_code", "ub_code", "ub_password", "ub_cancel", "ub_logout",
+               "balance", "ub_status", "ub_send_code", "ub_resend", "ub_code", "ub_password", "ub_cancel", "ub_logout",
                "rs_sync", "rs_follow", "rs_price", "rs_bulk", "rs_toggle")
 _MARKET_GIFTS = {"at": 0.0, "items": []}
 _MARKET_BAL = {"at": 0.0, "v": None}
@@ -20374,10 +20383,25 @@ TG_API_ID = _env_int("TG_API_ID", 0)
 TG_API_HASH = (os.getenv("TG_API_HASH") or "").strip()
 USERBOT_SESSION_KEY = (os.getenv("USERBOT_SESSION_KEY") or "").strip()
 UB_ENC_PREFIX = "f1:"
-UB_ERR = {"PhoneNumberInvalidError": "phone", "PhoneNumberBannedError": "phone", "PhoneNumberUnoccupiedError": "phone",
+# Telethon xato klassi → qisqa kod (UI har biriga alohida o'zbekcha matn chiqaradi; "phone" — faqat format xatosi, bizning tekshiruv)
+UB_ERR = {"PhoneNumberInvalidError": "phone_invalid", "PhoneNumberBannedError": "phone_banned",
+          "PhoneNumberUnoccupiedError": "phone_unoccupied", "PhoneNumberFloodError": "flood",
           "PhoneCodeInvalidError": "code", "PhoneCodeEmptyError": "code", "PhoneCodeExpiredError": "code_expired",
-          "PasswordHashInvalidError": "password", "FloodWaitError": "flood", "FloodError": "flood",
-          "SessionPasswordNeededError": "need_password"}
+          "PhoneCodeHashEmptyError": "code_expired", "PasswordHashInvalidError": "password", "PasswordEmptyError": "password",
+          "FloodWaitError": "flood", "FloodError": "flood", "FloodPremiumWaitError": "flood", "PhonePasswordFloodError": "flood",
+          "ApiIdInvalidError": "api_id_invalid", "ApiIdPublishedFloodError": "api_id_invalid",
+          "SendCodeUnavailableError": "send_code_unavailable", "EmailUnconfirmedError": "email_setup",
+          "EmailNotSetupError": "email_setup", "UpdateAppToLoginError": "update_app",
+          "SessionPasswordNeededError": "need_password", "AuthRestartError": "restart"}
+# auth.sentCode turi → yetkazish usuli (UI ko'rsatma beradi)
+UB_SENT_TYPES = {"SentCodeTypeApp": "app", "SentCodeTypeSms": "sms", "SentCodeTypeSmsWord": "sms", "SentCodeTypeSmsPhrase": "sms",
+                 "SentCodeTypeCall": "call", "SentCodeTypeFlashCall": "flash_call", "SentCodeTypeMissedCall": "missed_call",
+                 "SentCodeTypeEmailCode": "email", "SentCodeTypeSetUpEmailRequired": "email_setup",
+                 "SentCodeTypeFragmentSms": "fragment_sms", "SentCodeTypeFirebaseSms": "firebase"}
+UB_NEXT_TYPES = {"CodeTypeSms": "sms", "CodeTypeCall": "call", "CodeTypeFlashCall": "flash_call",
+                 "CodeTypeMissedCall": "missed_call", "CodeTypeFragmentSms": "fragment_sms"}
+UB_PHONE_HINT = "Raqamni xalqaro formatda kiriting: +7…, +1…, +44…, +998…"
+_UB_PHONE_JUNK = re.compile(r"[\s.\-()\[\]/ ‐-―−​-‏⁠﻿]")
 _UB_TLC = []
 _UB_FERNET = []
 
@@ -20392,9 +20416,11 @@ def ub_tl():
         return _UB_TLC[0]
     from telethon import TelegramClient
     from telethon.sessions import StringSession
+    from telethon import events as EV
     from telethon.tl import functions as F, types as T
     tl = types.SimpleNamespace(
-        TelegramClient=TelegramClient, StringSession=StringSession,
+        TelegramClient=TelegramClient, StringSession=StringSession, NewMessage=EV.NewMessage,
+        InputUser=T.InputUser, MentionName=T.InputMessageEntityMentionName, ResendCode=F.auth.ResendCodeRequest,
         GetStarGifts=F.payments.GetStarGiftsRequest, GetResale=F.payments.GetResaleStarGiftsRequest,
         GetUnique=F.payments.GetUniqueStarGiftRequest, GetForm=F.payments.GetPaymentFormRequest,
         SendStarsForm=F.payments.SendStarsFormRequest, GetStarsStatus=F.payments.GetStarsStatusRequest,
@@ -20452,16 +20478,217 @@ def ub_session_decrypt(blob):
         return ""
 
 
-def ub_make_client(session="", device="Empire Market"):
+def ub_make_client(session="", device="Empire Market", updates=False):
+    """updates=True — kiruvchi/chiquvchi xabarlarni tinglash uchun (UTag); standart o'chiq."""
     tl = ub_tl()
     return tl.TelegramClient(tl.StringSession(session or ""), TG_API_ID, TG_API_HASH, device_model=device,
                              system_version="Linux", app_version="1.0", lang_code="uz", system_lang_code="uz",
-                             receive_updates=False, flood_sleep_threshold=5)
+                             receive_updates=bool(updates), flood_sleep_threshold=5)
 
 
 def ub_err(e):
     """Telethon xatosi → qisqa kod (klass nomi bo'yicha; sessiya/telefon matni qaytarilmaydi)."""
     return UB_ERR.get(type(e).__name__, "")
+
+
+def ub_err_info(e):
+    """→ (kod, kutish soniyasi). FloodWait/PhoneNumberFlood uchun `seconds` (bo'lmasa 0)."""
+    code = ub_err(e)
+    secs = 0
+    if code == "flood":
+        try:
+            secs = max(0, int(getattr(e, "seconds", 0) or 0))
+        except (TypeError, ValueError):
+            secs = 0
+    return code, secs
+
+
+def ub_log_err(where, e):
+    """Logga FAQAT klass nomi + RPC xabari (masalan PHONE_NUMBER_INVALID) — telefon/kod/sessiya hech qachon."""
+    msg = getattr(e, "message", "")
+    msg = msg if isinstance(msg, str) and re.fullmatch(r"[A-Z0-9_]{1,64}", msg or "") else ""
+    logger.warning("%s: %s %s", where, type(e).__name__, msg)
+
+
+def _ub_ascii_digits(s):
+    import unicodedata
+    out = []
+    for ch in str(s or ""):
+        if ch.isdigit() and not ("0" <= ch <= "9"):
+            try:
+                ch = str(unicodedata.digit(ch))
+            except (TypeError, ValueError):
+                pass
+        elif ch in "＋﹢":
+            ch = "+"
+        out.append(ch)
+    return "".join(out)
+
+
+def ub_norm_phone(raw):
+    """Telefon → (E.164 '+<8–15 raqam>', None) yoki (None, 'phone'|'phone_local').
+    Bo'shliq/nuqta/chiziqcha/qavslar olib tashlanadi, unicode raqamlar → ASCII, '00<cc>' → '+<cc>'.
+    Mamlakat kodi bo'lmasa (masalan 901234567 yoki 89991234567) — 'phone_local' (hech qachon +998 deb taxmin qilinmaydi)."""
+    s = _UB_PHONE_JUNK.sub("", _ub_ascii_digits(raw))
+    if s.startswith("00"):
+        s = "+" + s[2:]
+    if not s:
+        return None, "phone"
+    if not s.startswith("+"):
+        return None, ("phone_local" if s.isdigit() else "phone")
+    d = s[1:]
+    if not d.isdigit() or not d.isascii():
+        return None, "phone"
+    if d.startswith("0"):
+        return None, "phone_local"
+    if not 8 <= len(d) <= 15:
+        return None, "phone"
+    return "+" + d, None
+
+
+def ub_norm_code(raw, want_len=0):
+    """Kod: bo'shliq/chiziqcha/nuqta olib tashlanadi, unicode raqamlar → ASCII; 5–6 raqam (yoki Telegram aytgan uzunlik)."""
+    s = _UB_PHONE_JUNK.sub("", _ub_ascii_digits(raw))
+    if not s.isdigit() or not s.isascii():
+        return None
+    if 5 <= len(s) <= 6 or (want_len and len(s) == int(want_len) and 4 <= len(s) <= 8):
+        return s
+    return None
+
+
+def ub_sent_info(sent):
+    """auth.SentCode → {delivery, len, next, timeout} (yo'q maydonlar — bo'sh)."""
+    st = getattr(sent, "type", None)
+    nt = getattr(sent, "next_type", None)
+    try:
+        ln = int(getattr(st, "length", 0) or 0)
+    except (TypeError, ValueError):
+        ln = 0
+    try:
+        to = int(getattr(sent, "timeout", 0) or 0)
+    except (TypeError, ValueError):
+        to = 0
+    return {"delivery": UB_SENT_TYPES.get(type(st).__name__, "app" if st is None else "other"), "len": ln,
+            "next": UB_NEXT_TYPES.get(type(nt).__name__, "") if nt is not None else "", "timeout": to}
+
+
+async def ub_call_migrate(cl, fn):
+    """fn() ni bajaradi; Telethon PhoneMigrate/NetworkMigrate ni o'zi hal qilmasa — DC almashtirib BIR marta qayta uriniladi."""
+    try:
+        return await fn()
+    except Exception as e:  # noqa: BLE001
+        if type(e).__name__ not in ("PhoneMigrateError", "NetworkMigrateError") or not hasattr(cl, "_switch_dc"):
+            raise
+        logger.info("Userbot login: DC %s ga ko'chirildi", getattr(e, "new_dc", "?"))
+        await cl._switch_dc(e.new_dc)
+        return await fn()
+
+
+# ── Umumiy login (NFT owner userbot va 🏷 UTag): telefon → kod → (2FA) → get_me().id == expect_id ──
+# Holat chaqiruvchining lug'atida (store[uid] = {client, phone, hash, at, step, delivery, len, next}); muvaffaqiyatda
+# (natija, client, me) — sessiyani chaqiruvchi shifrlab saqlaydi. Boshqa akkaunt → log_out + 'wrong_account'.
+UB_LOGIN_TTL = 600
+
+
+async def ub_login_drop(store, uid, keep=None):
+    L = store.pop(uid, None)
+    if L and L.get("client") is not None and L["client"] is not keep:
+        await ub_disconnect(L["client"])
+
+
+def ub_login_view(store, uid):
+    L = store.get(uid)
+    if not L or time.time() - L["at"] > UB_LOGIN_TTL or L.get("step") not in ("code", "password"):
+        return None
+    p = L.get("phone") or ""
+    return {"step": L["step"], "delivery": L.get("delivery") or "", "len": L.get("len") or 0, "next": L.get("next") or "",
+            "phone": (p[:4] + "•••" + p[-2:]) if p else ""}
+
+
+async def ub_login(store, uid, act, body, expect_id=None, device="Empire Market"):
+    """act: send_code | resend | code | password | cancel. Qaytaradi (javob dict, client|None, me|None).
+    client faqat muvaffaqiyatli kirishda (expect_id mos) qaytadi — uni chaqiruvchi saqlaydi/uzadi."""
+    if act == "cancel":
+        await ub_login_drop(store, uid)
+        return {"result": "ok"}, None, None
+    if not ub_api_ready():
+        return {"error": "ub_api"}, None, None
+    if not ub_crypto_ready():
+        return {"error": "ub_key"}, None, None
+    L = None
+    try:
+        if act == "send_code":
+            phone, perr = ub_norm_phone(body.get("phone"))
+            if perr:
+                return {"error": perr, "hint": UB_PHONE_HINT}, None, None
+            await ub_login_drop(store, uid)
+            cl = ub_make_client("", device)
+            store[uid] = L = {"client": cl, "phone": phone, "hash": "", "at": time.time(), "step": "sending"}
+            await cl.connect()
+            sent = await ub_call_migrate(cl, lambda: cl.send_code_request(phone))
+            info = ub_sent_info(sent)
+            if info["delivery"] == "email_setup":
+                await ub_login_drop(store, uid)
+                return {"error": "email_setup"}, None, None
+            L.update(hash=getattr(sent, "phone_code_hash", "") or "", step="code", **{k: info[k] for k in ("delivery", "len", "next")})
+            return {"result": "code_sent", **info}, None, None
+        L = store.get(uid)
+        if not L or time.time() - L["at"] > UB_LOGIN_TTL or L["step"] not in ("code", "password"):
+            await ub_login_drop(store, uid)
+            return {"error": "login"}, None, None
+        cl = L["client"]
+        if act == "resend":
+            if L["step"] != "code" or not L.get("next"):
+                return {"error": "no_resend"}, None, None
+            tl = ub_tl()
+            sent = await ub_call_migrate(cl, lambda: cl(tl.ResendCode(phone_number=L["phone"], phone_code_hash=L["hash"])))
+            info = ub_sent_info(sent)
+            L.update(hash=getattr(sent, "phone_code_hash", "") or L["hash"], at=time.time(),
+                     **{k: info[k] for k in ("delivery", "len", "next")})
+            return {"result": "code_sent", **info}, None, None
+        if act == "code":
+            code = ub_norm_code(body.get("code"), L.get("len") or 0)
+            if L["step"] != "code" or not code:
+                return {"error": "code"}, None, None
+            try:
+                await ub_call_migrate(cl, lambda: cl.sign_in(phone=L["phone"], code=code, phone_code_hash=L["hash"]))
+            except Exception as e:  # noqa: BLE001
+                if ub_err(e) == "need_password":
+                    L["step"] = "password"
+                    return {"result": "need_password"}, None, None
+                raise
+        elif act == "password":
+            pw = str(body.get("password") or "")[:256]
+            if L["step"] != "password" or not pw:
+                return {"error": "password"}, None, None
+            await cl.sign_in(password=pw)
+        else:
+            return {"error": "act"}, None, None
+        me = await cl.get_me()
+    except ImportError:
+        await ub_login_drop(store, uid)
+        return {"error": "telethon"}, None, None
+    except Exception as e:  # noqa: BLE001
+        code, secs = ub_err_info(e)
+        ub_log_err("Userbot login", e)
+        if code in ("code_expired", "phone_invalid", "phone_banned", "phone_unoccupied", "flood", "api_id_invalid",
+                    "send_code_unavailable", "email_setup", "update_app", "restart") or not code:
+            await ub_login_drop(store, uid)
+        out = {"error": code or "login_fail"}
+        if secs:
+            out["wait"] = secs
+        if code == "email_setup":
+            out["hint"] = "Telegram sozlamalarida Login email o'rnating"
+        return out, None, None
+    store.pop(uid, None)
+    if expect_id is not None and int(getattr(me, "id", 0) or 0) != int(expect_id):
+        try:
+            await cl.log_out()           # boshqa akkaunt — sessiya darhol bekor qilinadi, saqlanmaydi
+        except Exception:  # noqa: BLE001
+            pass
+        await ub_disconnect(cl)
+        return {"error": "wrong_account"}, None, None
+    return {"result": "connected"}, cl, me
 
 
 def ub_me(me):
@@ -20477,13 +20704,13 @@ async def ub_disconnect(cl):
             pass
 
 
-async def ub_connect(session, expect_id=None):
+async def ub_connect(session, expect_id=None, device="Empire Market", updates=False):
     """StringSession → (client, me, None) yoki (None, None, xato: api|telethon|unauthorized|connect|wrong_account)."""
     if not ub_api_ready():
         return None, None, "api"
     cl = None
     try:
-        cl = ub_make_client(session)
+        cl = ub_make_client(session, device, updates=True) if updates else ub_make_client(session, device)
         await cl.connect()
         if not await cl.is_user_authorized():
             await ub_disconnect(cl)
@@ -20676,12 +20903,11 @@ def nft_rs_public(mk):
 
 def nft_ub_view(uid):
     sess, src = _nft_ub_session()
-    L = _NFT_UB_LOGIN.get(uid)
-    step = L["step"] if L and time.time() - L["at"] < NFT_UB_LOGIN_TTL else None
+    LV = ub_login_view(_NFT_UB_LOGIN, uid)
     return {"id": NFT_USERBOT_ID, "api": ub_api_ready(), "key": ub_crypto_ready(), "session": bool(sess), "env": src == "env",
             "ok": _NFT_UB["ok"], "me": _NFT_UB["me"] if _NFT_UB["ok"] else None, "bal": _NFT_UB["bal"] if _NFT_UB["ok"] else None,
-            "err": _NFT_UB["err"], "login": step,
-            "phone": (L["phone"][:4] + "•••" + L["phone"][-2:]) if step else None}
+            "err": _NFT_UB["err"], "login": LV["step"] if LV else None, "phone": LV["phone"] if LV else None,
+            "delivery": LV["delivery"] if LV else "", "len": LV["len"] if LV else 0, "next": LV["next"] if LV else ""}
 
 
 def nft_rs_admin():
@@ -21007,16 +21233,11 @@ def _nft_ub_rate(uid, n, win):
 
 
 async def _nft_login_drop(uid):
-    L = _NFT_UB_LOGIN.pop(uid, None)
-    if L and L.get("client") is not None and L["client"] is not _NFT_UB["client"]:
-        try:
-            await L["client"].disconnect()
-        except Exception:  # noqa: BLE001
-            pass
+    await ub_login_drop(_NFT_UB_LOGIN, uid, keep=_NFT_UB["client"])
 
 
 async def nft_ub_login(uid, act, body):
-    """Owner login: telefon → kod → (2FA) → get_me().id == NFT_USERBOT_ID bo'lmasa log_out + rad."""
+    """Owner login (umumiy `ub_login`): telefon → kod → (2FA) → get_me().id == NFT_USERBOT_ID bo'lmasa log_out + rad."""
     if act == "ub_cancel":
         await _nft_login_drop(uid)
         return {"result": "ok"}
@@ -21026,58 +21247,9 @@ async def nft_ub_login(uid, act, body):
         return {"error": "ub_key"}
     if not _nft_ub_rate(uid, *NFT_UB_RATE):
         return {"error": "rate"}
-    try:
-        if act == "ub_send_code":
-            phone = re.sub(r"[\s()\-]", "", str(body.get("phone") or ""))
-            if not re.fullmatch(r"\+?[0-9]{7,15}", phone):
-                return {"error": "phone"}
-            await _nft_login_drop(uid)
-            cl = ub_make_client("")
-            await cl.connect()
-            _NFT_UB_LOGIN[uid] = {"client": cl, "phone": phone, "hash": "", "at": time.time(), "step": "sending"}
-            sent = await cl.send_code_request(phone)
-            _NFT_UB_LOGIN[uid].update(hash=getattr(sent, "phone_code_hash", ""), step="code")
-            return {"result": "code_sent"}
-        L = _NFT_UB_LOGIN.get(uid)
-        if not L or time.time() - L["at"] > NFT_UB_LOGIN_TTL or L["step"] not in ("code", "password"):
-            await _nft_login_drop(uid)
-            return {"error": "login"}
-        if act == "ub_code":
-            code = re.sub(r"[^0-9]", "", str(body.get("code") or ""))[:8]
-            if L["step"] != "code" or len(code) < 4:
-                return {"error": "code"}
-            try:
-                await L["client"].sign_in(phone=L["phone"], code=code, phone_code_hash=L["hash"])
-            except Exception as e:  # noqa: BLE001
-                if ub_err(e) == "need_password":
-                    L["step"] = "password"
-                    return {"result": "need_password"}
-                raise
-        elif act == "ub_password":
-            pw = str(body.get("password") or "")[:256]
-            if L["step"] != "password" or not pw:
-                return {"error": "password"}
-            await L["client"].sign_in(password=pw)
-        else:
-            return {"error": "act"}
-        cl = L["client"]
-        me = await cl.get_me()
-    except ImportError:
-        await _nft_login_drop(uid)
-        return {"error": "telethon"}
-    except Exception as e:  # noqa: BLE001
-        code = ub_err(e)
-        logger.warning("NFT userbot login: %s", type(e).__name__)
-        if code in ("code_expired", "phone", "flood") or not code:
-            await _nft_login_drop(uid)
-        return {"error": code or "login_fail"}
-    if int(getattr(me, "id", 0) or 0) != NFT_USERBOT_ID:
-        try:
-            await cl.log_out()           # boshqa akkaunt — sessiya darhol bekor qilinadi, saqlanmaydi
-        except Exception:  # noqa: BLE001
-            pass
-        _NFT_UB_LOGIN.pop(uid, None)
-        return {"error": "wrong_account"}
+    res, cl, me = await ub_login(_NFT_UB_LOGIN, uid, act[3:], body, expect_id=NFT_USERBOT_ID)
+    if cl is None:
+        return res
     try:
         sess = ub_session_encrypt(cl.session.save())       # DB'da faqat shifrlangan
     except UbKeyMissing:
@@ -21109,7 +21281,7 @@ async def nft_admin_action(uid, act, body):
     """Faqat ownerlar (web_market chaqirishdan oldin tekshiradi): userbot login/holat va resale boshqaruvi."""
     if uid not in CAREER_OWNER_IDS:
         return {"error": "owner"}
-    if act in ("ub_send_code", "ub_code", "ub_password", "ub_cancel"):
+    if act in ("ub_send_code", "ub_resend", "ub_code", "ub_password", "ub_cancel"):
         return await nft_ub_login(uid, act, body)
     c = db()
     if act == "ub_status":
@@ -21202,6 +21374,804 @@ async def nft_admin_action(uid, act, body):
         return {"result": "ok", "n": n}
     return {"error": "act"}
 # ── 🏪 /EMPIRE MARKET ──
+
+
+# ── 🏷 UTAG ──
+# Foydalanuvchi O'Z Telegram akkauntini ulaydi (faqat web app'da: telefon → kod → 2FA, umumiy `ub_login`, expect_id = o'zi) va
+# guruhda o'z akkauntidan ".tag <matn>" yozsa — buyruq o'chadi, har bir a'zo alohida xabarda (matn + ism-mention) belgilanadi;
+# ".stop" to'xtatadi. Obuna: 10 💎 (Empire Mafia olmosi) / 30 kun — son_bot → Empire `POST /exchange/debit_asset` (HMAC),
+# yozib bo'lmasa `refund_asset`; tarmoq noaniq bo'lsa pending + `utag_worker` qayta uriniladi (idempotent txid).
+# Sessiya `utag_accounts` da FAQAT shifrlangan (Fernet), payload/logga chiqmaydi.
+UTAG_PRICE_DIAMONDS = 10
+UTAG_DAYS = 30
+UTAG_SPEED_MIN, UTAG_SPEED_MAX, UTAG_SPEED_DEFAULT = 0.3, 1.5, 0.7
+UTAG_MAX_MEMBERS = 300            # bir yurishda ko'pi bilan
+UTAG_GROUP_COOLDOWN = 60          # bir guruhda .tag lar orasidagi minimal vaqt (s)
+UTAG_MAX_CLIENTS = 300            # bir vaqtda ishlaydigan Telethon klientlar
+UTAG_FLOOD_MAX = 60               # FloodWait shundan uzun bo'lsa — to'xtatiladi
+UTAG_LOGIN_RATE = (8, 600)        # login urinishlari: 10 daqiqada 8 ta
+UTAG_TICK = 30                    # utag_worker davri
+UTAG_PAY_MAX_RETRY = 60
+UTAG_HTTP_TIMEOUT = 8
+UTAG_MAX_TEXT = 3800              # .tag matni (UTF-16 birlik) — ism bilan 4096 dan oshmasin
+UTAG_DEVICE = "Empire UTag"
+UTAG_CMD_RE = re.compile(r"^\.(tag|stop)(?=\s|$)", re.I)
+UTAG_FATAL = {"ChatWriteForbiddenError", "ChatAdminRequiredError", "ChannelPrivateError", "UserBannedInChannelError",
+              "ChatRestrictedError", "ChatSendPlainForbiddenError", "ChatGuestSendForbiddenError", "AuthKeyUnregisteredError",
+              "SessionRevokedError", "UserDeactivatedError", "UserDeactivatedBanError"}
+_UTAG_LOGIN = {}                  # uid → login holati (ub_login)
+_UTAG_HITS = {}
+UTAG_CLIENTS = {}                 # uid → {"client", "me_id", "at"}
+UTAG_RUNS = {}                    # uid → {"chat", "stop", "task", "cl"}
+UTAG_LAST = {}                    # (uid, chat_id) → oxirgi .tag vaqti
+_UTAG_STARTING = set()
+_UTAG_PAY_LOCKS = {}
+_utag_sleep = asyncio.sleep       # testlarda almashtiriladi
+
+
+def init_utag(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS utag_accounts(user_id INTEGER PRIMARY KEY, session TEXT NOT NULL,
+                 tg_name TEXT, tg_username TEXT, connected_at INTEGER)""")
+    c.execute("CREATE TABLE IF NOT EXISTS utag_settings(user_id INTEGER PRIMARY KEY, speed REAL)")
+    c.execute("CREATE TABLE IF NOT EXISTS utag_subs(user_id INTEGER PRIMARY KEY, until INTEGER NOT NULL, updated_at INTEGER)")
+    c.execute("""CREATE TABLE IF NOT EXISTS utag_payments(txid TEXT PRIMARY KEY, user_id INTEGER NOT NULL, amount INTEGER NOT NULL,
+                 status TEXT NOT NULL, refund_txid TEXT, err TEXT, balance INTEGER, retries INTEGER DEFAULT 0,
+                 created_at INTEGER, updated_at INTEGER)""")
+    c.execute("CREATE INDEX IF NOT EXISTS utag_pay_st ON utag_payments(status)")
+
+
+def u16len(s):
+    return len(str(s).encode("utf-16-le")) // 2
+
+
+def utag_speed(uid):
+    r = db().execute("SELECT speed FROM utag_settings WHERE user_id=?", (uid,)).fetchone()
+    try:
+        v = float(r[0]) if r and r[0] is not None else UTAG_SPEED_DEFAULT
+    except (TypeError, ValueError):
+        v = UTAG_SPEED_DEFAULT
+    return round(min(UTAG_SPEED_MAX, max(UTAG_SPEED_MIN, v)), 1)
+
+
+def utag_set_speed(uid, value=None, delta=None):
+    """Tezlik 0.3–1.5 s, qadam 0.1. delta (±0.1) yoki aniq qiymat."""
+    try:
+        v = utag_speed(uid) + float(delta) if delta is not None else float(value)
+    except (TypeError, ValueError):
+        return utag_speed(uid)
+    if v != v:     # NaN
+        return utag_speed(uid)
+    v = round(min(UTAG_SPEED_MAX, max(UTAG_SPEED_MIN, round(v * 10) / 10)), 1)
+    with db() as c:
+        c.execute("INSERT INTO utag_settings(user_id, speed) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET speed=excluded.speed",
+                  (uid, v))
+    return v
+
+
+def utag_sub_until(uid):
+    r = db().execute("SELECT until FROM utag_subs WHERE user_id=?", (uid,)).fetchone()
+    return int(r[0] or 0) if r else 0
+
+
+def utag_sub_active(uid):
+    return utag_sub_until(uid) > time.time()
+
+
+def utag_account(uid):
+    """Ulangan akkaunt (ism/username) — sessiyasiz."""
+    r = db().execute("SELECT tg_name, tg_username, connected_at FROM utag_accounts WHERE user_id=?", (uid,)).fetchone()
+    return {"name": r[0] or "", "username": r[1] or None, "at": int(r[2] or 0)} if r else None
+
+
+def utag_left_text(until):
+    left = max(0, int(until - time.time()))
+    d, h, m = left // 86400, left % 86400 // 3600, left % 3600 // 60
+    return f"{d} kun {h} soat" if d else (f"{h} soat {m} daq" if h else f"{max(1, m)} daq")
+
+
+def utag_bridge_ready():
+    return bool(EXCHANGE_SECRET and EXCHANGE_PARTNER_URL)
+
+
+def utag_payload(uid):
+    """Web app uchun (sessiya HECH QACHON kirmaydi)."""
+    until = utag_sub_until(uid)
+    acc = utag_account(uid)
+    pend = db().execute("SELECT 1 FROM utag_payments WHERE user_id=? AND status IN ('pending','refund_pending')", (uid,)).fetchone()
+    run = UTAG_RUNS.get(uid)
+    return {"connected": bool(acc), "me": {"name": acc["name"], "username": acc["username"]} if acc else None,
+            "speed": utag_speed(uid), "min": UTAG_SPEED_MIN, "max": UTAG_SPEED_MAX,
+            "sub": {"active": until > time.time(), "until": tashkent_dt(until) if until else None,
+                    "left": utag_left_text(until) if until > time.time() else None},
+            "price": UTAG_PRICE_DIAMONDS, "days": UTAG_DAYS, "pending": bool(pend),
+            "login": ub_login_view(_UTAG_LOGIN, uid), "api": ub_api_ready(), "key": ub_crypto_ready(),
+            "bridge": utag_bridge_ready(), "online": uid in UTAG_CLIENTS, "running": bool(run),
+            "max_members": UTAG_MAX_MEMBERS, "cooldown": UTAG_GROUP_COOLDOWN}
+
+
+async def utag_notify(uid, text, kb=None):
+    bot = _EXCHANGE_LOOP_BOT
+    if bot is None:
+        return False
+    try:
+        await bot.send_message(uid, text, reply_markup=kb)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.info("UTag xabar yetmadi %s: %s", uid, type(e).__name__)
+        return False
+
+
+# ── 💎 To'lov: son_bot → Empire (HMAC ko'prik) ──
+def _utag_post(path, obj):
+    """Hamkorga imzolangan so'rov (alohida ipda). → (HTTP holat | 0 tarmoq xatosi, javob dict)."""
+    body = json.dumps(obj).encode()
+    req = urllib.request.Request(EXCHANGE_PARTNER_URL + path, data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "X-Signature": exch_sign(body)})
+    try:
+        with urllib.request.urlopen(req, timeout=UTAG_HTTP_TIMEOUT) as resp:
+            try:
+                return resp.status, json.loads(resp.read().decode() or "{}")
+            except ValueError:
+                return 0, {}
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode() or "{}")
+        except Exception:  # noqa: BLE001
+            return e.code, {}
+    except Exception:  # noqa: BLE001 — tarmoq/timeout: noaniq
+        return 0, {}
+
+
+def utag_debit_outcome(st, js):
+    """debited | insufficient | no_user | rejected (4xx — pul yechilmagan) | unknown (qayta urinish kerak)."""
+    js = js if isinstance(js, dict) else {}
+    if st == 200 and js.get("ok") is True and js.get("result") == "debited":
+        return "debited"
+    if st == 200 and js.get("ok") is False and js.get("error") in ("insufficient", "no_user"):
+        return js["error"]
+    if st == 200 and js.get("ok") is False:
+        return "rejected"
+    if 400 <= int(st or 0) < 500:
+        return "rejected"
+    return "unknown"
+
+
+def _utag_pay_set(txid, **kw):
+    kw["updated_at"] = int(time.time())
+    with db() as c:
+        c.execute(f"UPDATE utag_payments SET {', '.join(k + '=?' for k in kw)} WHERE txid=?", (*kw.values(), txid))
+
+
+def utag_record(txid, uid):
+    """Yechilgan to'lovni obunaga aylantiradi (atomik, bir marta). → yangi until yoki None (allaqachon yozilgan)."""
+    now = int(time.time())
+    with db() as c:
+        if c.execute("UPDATE utag_payments SET status='done', updated_at=? WHERE txid=? AND status='pending'",
+                     (now, txid)).rowcount != 1:
+            return None
+        r = c.execute("SELECT until FROM utag_subs WHERE user_id=?", (uid,)).fetchone()
+        until = max(now, int(r[0] or 0) if r else 0) + UTAG_DAYS * 86400
+        c.execute("INSERT INTO utag_subs(user_id, until, updated_at) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET "
+                  "until=excluded.until, updated_at=excluded.updated_at", (uid, until, now))
+    return until
+
+
+async def utag_refund(txid, uid, notify=True):
+    """Yechilgan, lekin yozilmagan to'lovni qaytarish (refund_asset). True — qaytarildi."""
+    r = db().execute("SELECT refund_txid, amount, status FROM utag_payments WHERE txid=?", (txid,)).fetchone()
+    if not r or r[2] == "refunded":
+        return bool(r)
+    rtx = r[0] or ("utagr-" + secrets.token_hex(12))
+    _utag_pay_set(txid, status="refund_pending", refund_txid=rtx)
+    st, js = await asyncio.to_thread(_utag_post, "/exchange/refund_asset",
+                                     {"txid": rtx, "orig_txid": txid, "user_id": int(uid), "asset": "diamond",
+                                      "amount": int(r[1]), "ts": int(time.time())})
+    if st == 200 and isinstance(js, dict) and js.get("ok") is True:
+        _utag_pay_set(txid, status="refunded")
+        if notify:
+            await utag_notify(uid, f"↩️ <b>UTag</b>: obunani yozishda xatolik — {r[1]} 💎 olmos qaytarildi.")
+        return True
+    with db() as c:
+        c.execute("UPDATE utag_payments SET retries=retries+1, err=?, updated_at=? WHERE txid=?",
+                  (f"refund_http_{st}", int(time.time()), txid))
+    return False
+
+
+async def utag_pay_attempt(txid, uid, notify=False):
+    st, js = await asyncio.to_thread(_utag_post, "/exchange/debit_asset",
+                                     {"txid": txid, "user_id": int(uid), "asset": "diamond", "amount": UTAG_PRICE_DIAMONDS,
+                                      "reason": "utag", "ts": int(time.time())})
+    out = utag_debit_outcome(st, js)
+    bal = js.get("balance") if isinstance(js, dict) else None
+    bal = bal if isinstance(bal, (int, float)) and not isinstance(bal, bool) else None
+    if out == "debited":
+        try:
+            until = utag_record(txid, uid)
+        except Exception:  # noqa: BLE001 — olmos yechildi, lekin yozilmadi → qaytaramiz
+            logger.exception("UTag: to'lovni yozib bo'lmadi (%s)", txid)
+            ok = await utag_refund(txid, uid, notify=notify)
+            return {"error": "record_failed", "refunded": ok}
+        if until is None:
+            until = utag_sub_until(uid)
+        _utag_bg(utag_ensure_client(uid))      # Telegram'ga ulanish — web so'rov vaqtini cho'zmasin
+        if notify:
+            await utag_notify(uid, f"✅ <b>UTag</b> obunasi faollashdi: {tashkent_dt(until)} gacha.")
+        return {"result": "bought", "until": tashkent_dt(until), "balance": bal}
+    if out in ("insufficient", "no_user"):
+        _utag_pay_set(txid, status="failed", err=out, balance=bal)
+        if notify:
+            await utag_notify(uid, "❌ <b>UTag</b>: " + ("💎 olmos yetarli emas." if out == "insufficient"
+                                                       else "Empire Mafia botida hisobingiz topilmadi."))
+        return {"error": out, "balance": bal, "price": UTAG_PRICE_DIAMONDS}
+    if out == "rejected":
+        err = str((js or {}).get("error") or f"http_{st}")[:40]
+        _utag_pay_set(txid, status="failed", err=err)
+        logger.warning("UTag to'lov rad etildi: %s %s", st, err)
+        return {"error": "bridge", "detail": err}
+    with db() as c:
+        c.execute("UPDATE utag_payments SET retries=retries+1, err=?, updated_at=? WHERE txid=?",
+                  (f"http_{st}", int(time.time()), txid))
+    return {"result": "pending"}
+
+
+async def utag_buy(uid):
+    """10 💎 / 30 kun (faol bo'lsa uzaytiriladi)."""
+    if not utag_bridge_ready():
+        return {"error": "bridge_off"}
+    lock = _UTAG_PAY_LOCKS.setdefault(uid, asyncio.Lock())
+    if lock.locked():
+        return {"error": "busy"}
+    async with lock:
+        c = db()
+        if c.execute("SELECT 1 FROM utag_payments WHERE user_id=? AND status IN ('pending','refund_pending')", (uid,)).fetchone():
+            return {"error": "pending"}
+        txid = "utag-" + secrets.token_hex(12)
+        now = int(time.time())
+        with c:
+            c.execute("INSERT INTO utag_payments(txid, user_id, amount, status, created_at, updated_at) VALUES (?,?,?,'pending',?,?)",
+                      (txid, uid, UTAG_PRICE_DIAMONDS, now, now))
+        return await utag_pay_attempt(txid, uid)
+
+
+async def utag_settle_payments(min_age=20):
+    """Osilib qolgan to'lovlar: pending → qayta debit (o'sha txid — idempotent), refund_pending → qayta refund."""
+    now = int(time.time())
+    rows = db().execute("SELECT txid, user_id, status, retries FROM utag_payments WHERE status IN ('pending','refund_pending') "
+                        "AND updated_at<=?", (now - min_age,)).fetchall()
+    for txid, uid, status, retries in rows:
+        if retries >= UTAG_PAY_MAX_RETRY:
+            _utag_pay_set(txid, status="stuck")
+            try:
+                await log_money_event(_EXCHANGE_LOOP_BOT, f"⚠️ <b>UTAG TO'LOVI OSILIB QOLDI</b>\n{person_name(uid)}: "
+                                                          f"{UTAG_PRICE_DIAMONDS} 💎 (txid {escape(txid)}, {status}) — qo‘lda tekshiring.")
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        lock = _UTAG_PAY_LOCKS.setdefault(uid, asyncio.Lock())
+        if lock.locked():
+            continue
+        async with lock:
+            if status == "pending":
+                await utag_pay_attempt(txid, uid, notify=True)
+            else:
+                await utag_refund(txid, uid)
+
+
+# ── 🤖 Telethon: tinglovchi klientlar va belgilash ──
+def utag_strip_command(text, entities):
+    """'.tag <matn>' → (matn, entitylar) — offsetlar UTF-16 bo'yicha siljitiladi, chegaradan chiqqanlari kesiladi."""
+    import copy
+    text = str(text or "")
+    m = re.match(r"^\.tag[^\S\n]*\n?", text, re.I)
+    start = m.end() if m else 0
+    payload = text[start:].rstrip()
+    s16, l16 = u16len(text[:start]), u16len(payload)
+    out = []
+    for e in entities or ():
+        try:
+            o, ln = int(e.offset) - s16, int(e.length)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        a, b = max(0, o), min(l16, o + ln)
+        if b <= a:
+            continue
+        ne = copy.copy(e)
+        ne.offset, ne.length = a, b - a
+        out.append(ne)
+    return payload, out
+
+
+def utag_member_name(p):
+    name = " ".join(x for x in (getattr(p, "first_name", None), getattr(p, "last_name", None)) if x).strip()
+    name = re.sub(r"\s+", " ", name)[:64].strip()
+    return name or "👤"
+
+
+def utag_build(payload, ents, p):
+    """Bitta a'zo uchun xabar: matn (+ yangi qator) + ism, ismga InputMessageEntityMentionName (UTF-16 offset)."""
+    tl = ub_tl()
+    name = utag_member_name(p)
+    head = payload + ("\n" if payload else "")
+    mention = tl.MentionName(offset=u16len(head), length=u16len(name),
+                             user_id=tl.InputUser(user_id=int(p.id), access_hash=int(getattr(p, "access_hash", 0) or 0)))
+    return head + name, list(ents) + [mention]
+
+
+async def utag_fix_entities(cl, ents):
+    """Kelgan MessageEntityMentionName (user_id int) → InputMessageEntityMentionName (yuborish uchun); topilmasa olib tashlanadi."""
+    tl = ub_tl()
+    out = []
+    for e in ents:
+        if type(e).__name__ == "MessageEntityMentionName":
+            try:
+                ip = await cl.get_input_entity(int(e.user_id))
+                out.append(tl.MentionName(offset=e.offset, length=e.length,
+                                          user_id=tl.InputUser(user_id=int(ip.user_id), access_hash=int(ip.access_hash))))
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            out.append(e)
+    return out
+
+
+def _utag_bg(coro):
+    async def _wrap():
+        try:
+            await coro
+        except Exception:  # noqa: BLE001
+            logger.exception("UTag fon vazifasi xato")
+    return asyncio.get_running_loop().create_task(_wrap())
+
+
+def utag_stop_reason(uid, run):
+    if run.get("stop"):
+        return run["stop"] if run["stop"] in UTAG_END_TEXT else "stop"
+    if not utag_sub_active(uid):
+        return "expired"
+    info = UTAG_CLIENTS.get(uid)
+    if not info or info["client"] is not run["cl"]:
+        return "disconnected"
+    try:
+        if not run["cl"].is_connected():
+            return "disconnected"
+    except Exception:  # noqa: BLE001
+        return "disconnected"
+    return None
+
+
+UTAG_END_TEXT = {
+    "done": "✅ <b>UTag</b>: {n} ta a'zo belgilandi.",
+    "stop": "🛑 <b>UTag</b> to'xtatildi ({n} ta belgilandi).",
+    "expired": "⌛ <b>UTag</b> obunasi tugadi — belgilash to'xtadi ({n} ta). Davom ettirish uchun obunani yangilang.",
+    "disconnected": "🔌 <b>UTag</b>: akkaunt uzildi — belgilash to'xtadi ({n} ta).",
+    "flood": "⏳ <b>UTag</b>: Telegram cheklovi ({wait} s) — belgilash to'xtatildi ({n} ta). Keyinroq va sekinroq tezlikda urinib ko'ring.",
+    "forbidden": "⛔ <b>UTag</b>: bu guruhda yozish huquqingiz yo'q — to'xtatildi ({n} ta).",
+    "errors": "⚠️ <b>UTag</b>: ketma-ket xatolar — to'xtatildi ({n} ta).",
+    "error": "⚠️ <b>UTag</b>: xatolik — to'xtatildi ({n} ta).",
+}
+
+
+async def utag_run(uid, run, chat, payload, ents, me_id):
+    cl = run["cl"]
+    sent, errs, wait, reason = 0, 0, 0, "done"
+    try:
+        ents = await utag_fix_entities(cl, ents)
+        members = []
+        async for p in cl.iter_participants(chat):
+            if getattr(p, "bot", False) or getattr(p, "deleted", False) or getattr(p, "is_self", False) or int(p.id) == int(me_id):
+                continue
+            members.append(p)
+            if len(members) >= UTAG_MAX_MEMBERS:
+                break
+        for p in members:
+            why = utag_stop_reason(uid, run)
+            if why:
+                reason = why
+                break
+            text, e2 = utag_build(payload, ents, p)
+            for attempt in (0, 1):
+                try:
+                    await cl.send_message(chat, text, formatting_entities=e2, link_preview=False)
+                    sent += 1
+                    errs = 0
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    name = type(e).__name__
+                    code, secs = ub_err_info(e)
+                    if name == "SlowModeWaitError":
+                        code, secs = "flood", int(getattr(e, "seconds", 0) or 0)
+                    if code == "flood":
+                        if secs <= UTAG_FLOOD_MAX and attempt == 0:
+                            await _utag_sleep(secs + 1)
+                            if utag_stop_reason(uid, run):
+                                break
+                            continue
+                        reason, wait = "flood", secs
+                    elif name in UTAG_FATAL:
+                        reason = "forbidden"
+                    else:
+                        errs += 1
+                        ub_log_err("UTag send", e)
+                        if errs >= 5:
+                            reason = "errors"
+                    break
+            if reason in ("flood", "forbidden", "errors"):
+                break
+            await _utag_sleep(utag_speed(uid))
+    except asyncio.CancelledError:
+        reason = "stop"
+    except Exception as e:  # noqa: BLE001
+        ub_log_err("UTag run", e)
+        reason = "error"
+    finally:
+        if UTAG_RUNS.get(uid) is run:
+            UTAG_RUNS.pop(uid, None)
+    run["result"] = {"reason": reason, "sent": sent, "wait": wait}
+    await utag_notify(uid, UTAG_END_TEXT[reason].format(n=sent, wait=wait))
+    return run["result"]
+
+
+async def _utag_is_group(event):
+    g = getattr(event, "is_group", None)
+    if g is None:
+        try:
+            ch = await event.get_chat()
+            g = bool(getattr(ch, "megagroup", False))
+        except Exception:  # noqa: BLE001
+            g = False
+    return bool(g)
+
+
+async def utag_on_message(uid, event):
+    """Foydalanuvchining O'Z chiquvchi xabari: guruhda '.tag …' / '.stop'."""
+    msg = getattr(event, "message", None)
+    text = getattr(msg, "message", None) or ""
+    m = UTAG_CMD_RE.match(text)
+    if not m or not await _utag_is_group(event):
+        return
+    cmd = m.group(1).lower()
+    info = UTAG_CLIENTS.get(uid)
+    if not info:
+        return
+    try:
+        await event.delete()
+    except Exception as e:  # noqa: BLE001
+        ub_log_err("UTag delete", e)
+    if cmd == "stop":
+        utag_stop_runs(uid)
+        return
+    if not utag_sub_active(uid):
+        await utag_notify(uid, "⌛ <b>UTag</b> obunangiz faol emas — /start → 🏷 UTag.")
+        await utag_stop_client(uid, why="expired")
+        return
+    if uid in UTAG_RUNS:
+        await utag_notify(uid, "⏳ <b>UTag</b> allaqachon ishlayapti — to'xtatish uchun guruhda <code>.stop</code> yozing.")
+        return
+    chat_id = getattr(event, "chat_id", None)
+    now = time.time()
+    last = UTAG_LAST.get((uid, chat_id), 0)
+    if now - last < UTAG_GROUP_COOLDOWN:
+        await utag_notify(uid, f"⏳ <b>UTag</b>: bu guruhda {int(UTAG_GROUP_COOLDOWN - (now - last)) + 1} s dan keyin qayta urinib ko'ring.")
+        return
+    payload, ents = utag_strip_command(text, getattr(msg, "entities", None))
+    if u16len(payload) > UTAG_MAX_TEXT:
+        await utag_notify(uid, "⚠️ <b>UTag</b>: matn juda uzun.")
+        return
+    try:
+        chat = await event.get_input_chat()
+    except Exception:  # noqa: BLE001
+        chat = chat_id
+    UTAG_LAST[(uid, chat_id)] = now
+    run = {"chat": chat_id, "stop": False, "cl": info["client"]}
+    UTAG_RUNS[uid] = run
+    run["task"] = asyncio.get_running_loop().create_task(utag_run(uid, run, chat, payload, ents, info["me_id"]))
+
+
+def utag_stop_runs(uid, why="stop"):
+    run = UTAG_RUNS.get(uid)
+    if run and not run.get("stop"):
+        run["stop"] = why
+    return bool(run)
+
+
+async def utag_ensure_client(uid):
+    """Faol obuna + ulangan akkaunt bo'lsa tinglovchi klientni ishga tushiradi. True — ishlayapti."""
+    info = UTAG_CLIENTS.get(uid)
+    if info:
+        try:
+            if info["client"].is_connected():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        await utag_stop_client(uid)
+    if uid in _UTAG_STARTING or not utag_sub_active(uid):
+        return False
+    r = db().execute("SELECT session FROM utag_accounts WHERE user_id=?", (uid,)).fetchone()
+    if not r:
+        return False
+    if len(UTAG_CLIENTS) >= UTAG_MAX_CLIENTS:
+        logger.warning("UTag: klientlar chegarasi (%s) — %s kutadi", UTAG_MAX_CLIENTS, uid)
+        return False
+    sess = ub_session_decrypt(r[0])
+    if not sess:
+        return False
+    _UTAG_STARTING.add(uid)
+    try:
+        cl, me, err = await ub_connect(sess, expect_id=uid, device=UTAG_DEVICE, updates=True)
+        if err in ("unauthorized", "wrong_account"):
+            with db() as c:
+                c.execute("DELETE FROM utag_accounts WHERE user_id=?", (uid,))
+            await utag_notify(uid, "🔌 <b>UTag</b>: akkaunt sessiyasi bekor qilingan — web app'da qayta ulang.")
+            return False
+        if cl is None:
+            return False
+        tl = ub_tl()
+
+        async def _handler(event, _uid=uid):
+            try:
+                await utag_on_message(_uid, event)
+            except Exception as e:  # noqa: BLE001
+                ub_log_err("UTag handler", e)
+
+        cl.add_event_handler(_handler, tl.NewMessage(outgoing=True))
+        UTAG_CLIENTS[uid] = {"client": cl, "me_id": int(me.id), "at": time.time()}
+        return True
+    finally:
+        _UTAG_STARTING.discard(uid)
+
+
+async def utag_stop_client(uid, notify=None, why="disconnected"):
+    if utag_stop_runs(uid, why):
+        notify = None                      # yurish o'zi yakuniy xabar beradi
+    info = UTAG_CLIENTS.pop(uid, None)
+    if info:
+        await ub_disconnect(info["client"])
+    if notify:
+        await utag_notify(uid, notify)
+    return bool(info)
+
+
+async def utag_logout(uid):
+    """🔌 Uzish: Telegram'dan log_out (sessiya bekor) + DB'dan o'chirish."""
+    info = UTAG_CLIENTS.get(uid)
+    cl = info["client"] if info else None
+    utag_stop_runs(uid)
+    UTAG_CLIENTS.pop(uid, None)
+    if cl is None:
+        r = db().execute("SELECT session FROM utag_accounts WHERE user_id=?", (uid,)).fetchone()
+        sess = ub_session_decrypt(r[0]) if r else ""
+        if sess:
+            cl, _me, _err = await ub_connect(sess, expect_id=uid, device=UTAG_DEVICE)
+    if cl is not None:
+        try:
+            await cl.log_out()
+        except Exception as e:  # noqa: BLE001
+            ub_log_err("UTag log_out", e)
+        await ub_disconnect(cl)
+    with db() as c:
+        c.execute("DELETE FROM utag_accounts WHERE user_id=?", (uid,))
+    return True
+
+
+async def utag_worker(application):
+    """Har UTAG_TICK: muddati tugaganlar to'xtaydi, faol obunachilar ulanadi, osilgan to'lovlar hal qilinadi."""
+    await asyncio.sleep(15)
+    while True:
+        try:
+            await utag_tick()
+        except Exception:  # noqa: BLE001
+            logger.exception("UTag worker xato")
+        await asyncio.sleep(UTAG_TICK)
+
+
+async def utag_tick():
+    now = time.time()
+    for uid in list(UTAG_CLIENTS):
+        if not utag_sub_active(uid):
+            await utag_stop_client(uid, notify="⌛ <b>UTag</b> obunasi tugadi — akkauntingiz tinglanmaydi. Yangilash: /start → 🏷 UTag.",
+                                   why="expired")
+    for uid, L in list(_UTAG_LOGIN.items()):
+        if now - L.get("at", 0) > UB_LOGIN_TTL:
+            await ub_login_drop(_UTAG_LOGIN, uid)
+    if ub_api_ready() and ub_crypto_ready():
+        for (uid,) in db().execute("SELECT a.user_id FROM utag_accounts a JOIN utag_subs s ON s.user_id=a.user_id "
+                                   "WHERE s.until>? ORDER BY s.until DESC LIMIT ?", (int(now), UTAG_MAX_CLIENTS)).fetchall():
+            if len(UTAG_CLIENTS) >= UTAG_MAX_CLIENTS:
+                break
+            await utag_ensure_client(uid)
+    if utag_bridge_ready():
+        await utag_settle_payments()
+
+
+# ── 🌐 Web app: /app/api/utag/<act> ──
+UTAG_ACTS = ("state", "send_code", "resend", "code", "password", "cancel", "logout", "speed", "buy")
+
+
+def _utag_rate(uid):
+    n, win = UTAG_LOGIN_RATE
+    hits = [t for t in _UTAG_HITS.get(uid, ()) if time.time() - t < win]
+    if len(hits) >= n:
+        _UTAG_HITS[uid] = hits
+        return False
+    hits.append(time.time())
+    _UTAG_HITS[uid] = hits
+    return True
+
+
+async def web_utag(uid, act, body):
+    body = body if isinstance(body, dict) else {}
+    res = {"result": "ok"}
+    if act == "state":
+        pass
+    elif act == "speed":
+        res = {"result": "ok", "speed": utag_set_speed(uid, body.get("value"), body.get("delta"))}
+    elif act == "buy":
+        res = await utag_buy(uid)
+    elif act == "logout":
+        await ub_login_drop(_UTAG_LOGIN, uid)
+        await utag_logout(uid)
+        res = {"result": "logged_out"}
+    elif act in ("send_code", "resend", "code", "password", "cancel"):
+        if act == "send_code":
+            if not body.get("consent"):
+                return {"error": "consent", "utag": utag_payload(uid)}
+            if utag_account(uid):
+                return {"error": "connected", "utag": utag_payload(uid)}
+        if act != "cancel" and not _utag_rate(uid):
+            return {"error": "rate", "utag": utag_payload(uid)}
+        res, cl, me = await ub_login(_UTAG_LOGIN, uid, act, body, expect_id=uid, device=UTAG_DEVICE)
+        if cl is not None:
+            res = await utag_save_login(uid, cl, me)
+    else:
+        res = {"error": "act"}
+    return dict(res, utag=utag_payload(uid))
+
+
+async def utag_save_login(uid, cl, me):
+    try:
+        sess = ub_session_encrypt(cl.session.save())       # DB'da faqat shifrlangan
+    except UbKeyMissing:
+        try:
+            await cl.log_out()
+        except Exception:  # noqa: BLE001
+            pass
+        await ub_disconnect(cl)
+        return {"error": "ub_key"}
+    mi = ub_me(me)
+    with db() as c:
+        c.execute("""INSERT INTO utag_accounts(user_id, session, tg_name, tg_username, connected_at) VALUES (?,?,?,?,?)
+                     ON CONFLICT(user_id) DO UPDATE SET session=excluded.session, tg_name=excluded.tg_name,
+                     tg_username=excluded.tg_username, connected_at=excluded.connected_at""",
+                  (uid, sess, mi["name"], mi["username"], int(time.time())))
+    await ub_disconnect(cl)          # login klienti yangilanishlarsiz — tinglovchi alohida ochiladi
+    await utag_stop_client(uid)
+    started = await utag_ensure_client(uid)
+    await utag_notify(uid, "✅ <b>UTag</b>: akkauntingiz ulandi." + (
+        "\nGuruhda o'z akkauntingizdan <code>.tag so'z</code> yozing." if started else
+        f"\n💎 Ishlashi uchun obuna kerak: {UTAG_PRICE_DIAMONDS} olmos / {UTAG_DAYS} kun (/start → 🏷 UTag)."))
+    return {"result": "connected", "online": started}
+
+
+# ── 🤖 Bot: 🏷 UTag sozlamalar kartasi (ut:<uid>:<amal>) ──
+UTAG_HELP = ("ℹ️ <b>Foydalanish:</b> guruhda o'z akkauntingizdan <code>.tag so'z</code> yozing — buyruq o'chadi va har bir a'zo "
+             f"alohida xabarda belgilanadi (ko'pi bilan {UTAG_MAX_MEMBERS} ta). To'xtatish: <code>.stop</code>.\n"
+             "⚠️ Kichik kutish vaqti Telegram cheklovlari (spam) xavfini oshiradi.")
+
+
+def utag_card(uid, confirm=False):
+    acc = utag_account(uid)
+    until = utag_sub_until(uid)
+    sp = utag_speed(uid)
+    who = (escape(acc["name"] or "—") + (f" (@{escape(acc['username'])})" if acc["username"] else "")) if acc else "ulanmagan"
+    sub = f"{tashkent_dt(until)} gacha ({utag_left_text(until)} qoldi)" if until > time.time() else "yo'q"
+    text = (f"🏷 <b>UTag</b> — o'z akkauntingizdan guruhda hammani belgilash\n\n"
+            f"👤 Akkaunt: {who}{' 🟢' if uid in UTAG_CLIENTS else ''}\n"
+            f"⏱ Tezlik: <b>{sp:.1f} s</b> (har bir a'zo orasida)\n"
+            f"💎 Obuna: {sub}\n\n{UTAG_HELP}")
+    if confirm:
+        text += (f"\n\n❓ <b>{UTAG_PRICE_DIAMONDS} 💎 olmos</b> Empire Mafia hisobingizdan yechilsinmi? Obuna {UTAG_DAYS} kunga "
+                 + ("uzaytiriladi." if until > time.time() else "faollashadi."))
+        rows = [[InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"ut:{uid}:ok"),
+                 InlineKeyboardButton("✖ Bekor", callback_data=f"ut:{uid}:card")]]
+        return text, InlineKeyboardMarkup(rows)
+    rows = [[InlineKeyboardButton("➖", callback_data=f"ut:{uid}:m"),
+             InlineKeyboardButton(f"{sp:.1f} s", callback_data=f"ut:{uid}:card"),
+             InlineKeyboardButton("➕", callback_data=f"ut:{uid}:p")],
+            [InlineKeyboardButton(f"💎 Obuna olish — {UTAG_PRICE_DIAMONDS} olmos / {UTAG_DAYS} kun", callback_data=f"ut:{uid}:buy")]]
+    if WEBAPP_URL and WEBAPP_URL.startswith("https://"):
+        rows.append([InlineKeyboardButton("🔗 Ulash / boshqarish", web_app=WebAppInfo(WEBAPP_URL + "/app#utag"))])
+    rows.append([InlineKeyboardButton("🔄 Yangilash", callback_data=f"ut:{uid}:card")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+UTAG_BUY_TEXT = {"bought": "✅ Obuna faollashdi: {until} gacha.", "pending": "⏳ To'lov tekshirilmoqda — natija xabar qilinadi.",
+                 "insufficient": "💎 Olmos yetarli emas{bal}.", "no_user": "Empire Mafia botida hisobingiz topilmadi — avval u botda /start bosing.",
+                 "bridge_off": "⚙️ Empire bilan ko'prik sozlanmagan.", "bridge": "⚠️ Empire to'lovni rad etdi.",
+                 "pending_exists": "⏳ Oldingi to'lov hali tekshirilmoqda.", "busy": "⏳ Kuting…",
+                 "record_failed": "⚠️ Xatolik — olmos qaytarildi."}
+
+
+def utag_buy_text(res):
+    key = res.get("result") if res.get("result") in ("bought", "pending") else res.get("error")
+    key = "pending_exists" if key == "pending" and res.get("error") else key
+    bal = res.get("balance")
+    return UTAG_BUY_TEXT.get(key, "⚠️ Xatolik").format(until=res.get("until") or "", bal=f" (balans: {bal} 💎)" if bal is not None else "")
+
+
+async def cb_utag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = (q.data or "").split(":")
+    if len(parts) != 3 or not parts[1].isdigit():
+        await q.answer()
+        return
+    uid, act = int(parts[1]), parts[2]
+    if q.from_user.id != uid:
+        await q.answer("Bu sizning menyuingiz emas", show_alert=True)
+        return
+    alert = None
+    if act in ("m", "p"):
+        utag_set_speed(uid, delta=-0.1 if act == "m" else 0.1)
+    elif act == "ok":
+        res = await utag_buy(uid)
+        alert = utag_buy_text(res)
+    if alert:
+        await q.answer(alert, show_alert=True)
+    else:
+        await q.answer()
+    text, kb = utag_card(uid, confirm=(act == "buy"))
+    try:
+        await q.edit_message_text(text, reply_markup=kb)
+    except TelegramError:
+        pass
+
+
+# ── 📋 Shaxsiy chat: doimiy pastki menyu (ReplyKeyboard) — har tugma mavjud handlerga yo'naltiriladi ──
+PRIVATE_MENU = [
+    [("👤 Profil", "profil"), ("👨‍👩‍👧 Oila", "oila"), ("👶 Farzandlarim", "kids")],
+    [("🏦 Banklar", "bank"), ("📈 Birja", "birja"), ("💱 Almashuv", "exch")],
+    [("🛍 Do‘kon", "shop"), ("🏆 Reyting", "reyting"), ("🎯 Missiyalar", "missions")],
+    [("🎮 O‘yinlar", "games"), ("🏷 UTag", "utag"), ("📱 Ilova", "app")],
+    [("➕ Guruhga qo‘shish", "addgroup"), ("🌐 Til", "lang"), ("❓ Yordam", "help")],
+]
+PRIVATE_MENU_MAP = {txt: key for row in PRIVATE_MENU for txt, key in row}
+
+
+def private_menu_kb():
+    return ReplyKeyboardMarkup([[KeyboardButton(txt) for txt, _ in row] for row in PRIVATE_MENU],
+                               resize_keyboard=True, is_persistent=True)
+
+
+async def on_private_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user or update.effective_chat.type != ChatType.PRIVATE:
+        return
+    key = PRIVATE_MENU_MAP.get((msg.text or "").strip())
+    if not key:
+        return
+    context.args = []
+    cmds = {"profil": cmd_profil, "oila": cmd_oila, "kids": cmd_farzand, "shop": cmd_shop, "reyting": cmd_reyting,
+            "missions": cmd_missiyalar, "app": cmd_app, "lang": cmd_lang, "help": cmd_help}
+    if key in cmds:
+        await cmds[key](update, context)
+        return
+    views = {"bank": lambda: bank_banks_view(user.id, user.id), "birja": lambda: birja_home_view(user.id, user.id),
+             "exch": lambda: exchange_menu_view(user.id), "utag": lambda: utag_card(user.id)}
+    if key in views:
+        text, kb = views[key]()
+        await msg.reply_text(text, reply_markup=kb)
+        return
+    add = InlineKeyboardMarkup([[InlineKeyboardButton(t(user.id, "btn_add_group"),
+                                                      url=f"https://t.me/{context.bot.username}?startgroup=true")]])
+    if key == "games":
+        names = [t(user.id, "btn_number"), t(user.id, "btn_rsp"), t(user.id, "btn_xo"), memory_t(user.id, "btn"),
+                 croc_t(user.id, "btn"), casino_t(user.id, "btn")]
+        await msg.reply_text(t(user.id, "use_group") + "\n\n" + "\n".join("• " + escape(n) for n in names), reply_markup=add)
+    else:
+        await msg.reply_text(t(user.id, "start_text"), reply_markup=add)
+# ── 🏷 /UTAG ──
 
 
 # ── 👛 O'tkazmalar: $ va 🪙 EMP — web (ID/@username), guruhda /pul va /coin (reply), ownerlar /coins ──
@@ -22609,6 +23579,7 @@ async def webapp_payload(user_id):
         "judges": judge_list() if is_owner else None,
         "tops": tops_payload(user_id),
         "is_tester": is_tester(user_id),
+        "utag": utag_payload(user_id),
         "news_unread": news_unread(user_id),
         "owner_flags": owner_flags_payload() if is_owner else None,
         "amnesty": amnesty_preview() if is_owner else None,
@@ -24681,6 +25652,15 @@ WEBAPP_HTML = r"""<!doctype html>
   .viplock .big{font-size:44px}
   /* ───── 📝 Arizalar ───── */
   .reqc{margin-top:12px}
+  /* 🏷 UTag */
+  .utc{display:flex;align-items:center;gap:12px;margin-top:12px;cursor:pointer}.utc .uti{font-size:30px}
+  .utbox .lbl{margin-top:4px}.utrow{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+  .utrow input[type=tel],.utrow input[type=text],.utrow input[type=password]{flex:1;min-width:150px;padding:11px 12px;border-radius:12px;border:1px solid rgba(255,210,74,.25);background:#120f1e;color:var(--txt);font-size:15px}
+  .utwarn{margin-top:10px;padding:10px 12px;border-radius:12px;background:rgba(255,107,107,.09);border:1px solid rgba(255,107,107,.3);color:#ffc2c2;font-size:12.5px;line-height:1.45}
+  .uthint{margin-top:8px;padding:8px 10px;border-radius:10px;background:rgba(255,210,74,.08);color:#ffe7a8;font-size:12.5px}
+  .utcons{display:flex;gap:10px;align-items:flex-start;margin-top:10px;font-size:13px;line-height:1.4}.utcons input{margin-top:3px;width:18px;height:18px;flex:none}
+  .utsp{display:flex;align-items:center;gap:10px;margin-top:8px}.utsp b{min-width:64px;text-align:center;font-size:20px}
+  .utsp .btn{width:48px;padding:10px 0}
   .rqg{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
   .rqt{display:flex;flex-direction:column;align-items:center;gap:3px;padding:12px 6px 10px;border-radius:14px;cursor:pointer;text-align:center;min-width:0;
     background:rgba(0,0,0,.3);box-shadow:inset 0 0 0 1px rgba(255,210,74,.28)}
@@ -25400,6 +26380,9 @@ function render(res){
     ec.onclick=()=>openEmpShop(d); p.appendChild(ec);
   }
   if(d.requests){ const rc=$('<div class="card full reqc" id="reqc"></div>'); drawReqCard(rc,d); p.appendChild(rc); }
+  if(d.utag){ const u=d.utag, uc=$('<div class="card full utc" data-tap="1"><div class="uti">🏷</div><div><div class="lbl">UTag</div>'+
+      '<div class="hsub">'+(u.connected?'🟢 '+esc((u.me||{}).name||'')+' · ':'Akkaunt ulanmagan · ')+(u.sub&&u.sub.active?'obuna '+esc(u.sub.until)+' gacha':'obuna yo‘q')+'</div></div></div>');
+    uc.onclick=()=>setTab('utag'); p.appendChild(uc); }
   if(d.avatar3d){
     const av=$('<div class="card full avcard" data-tap="1"><div class="avi">🧍</div><div><div class="lbl">3D avatarim'+(d.avatar_test?' <span class="avtest">TEST</span>':'')+'</div>'+
       '<div class="hsub">Realistik 3D model · kiyim, soch, teri rangi va fonni tanlang</div></div></div>');
@@ -25700,6 +26683,8 @@ function render(res){
   if((d.vip||{}).open) app.appendChild(vipPage(d));
   if(d.media) app.appendChild(mediaPage(d));
   if(d.market) app.appendChild(marketPage(d));
+  if(d.utag) app.appendChild(utagPage(d));
+  if(/(^|#)utag\b/.test(location.hash||'') && d.utag && !window.UTOPENED){ window.UTOPENED=1; TAB='utag'; }
 
   // KAZINO — o'yinlar lobbisi
   const cz=$('<div class="sec" id="s-casino"></div>');
@@ -25897,8 +26882,8 @@ function render(res){
     if(n&&t&&!t.querySelector('.tbadge')){ const b=document.createElement('span'); b.className='tbadge'; b.textContent=n; t.appendChild(b); } })();
   if(/(^|#)req\b/.test(location.hash||'') && !window.RQOPENED){ window.RQOPENED=1; TAB='profil';
     setTimeout(()=>{ const e=document.getElementById('reqc'); if(e) e.scrollIntoView({behavior:'smooth',block:'center'}); },400); }
-  app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':b.dataset.back==='games'?'games':'casino'));
-  setTab(defs.some(x=>x[0]===TAB)||TAB==='bank'||TAB==='birja'||TAB==='casino'||(TAB==='vip'&&(d.vip||{}).open)||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
+  app.querySelectorAll('.gback').forEach(b=>b.onclick=()=>setTab(b.dataset.back==='moliya'?'moliya':b.dataset.back==='games'?'games':b.dataset.back==='profil'?'profil':'casino'));
+  setTab(defs.some(x=>x[0]===TAB)||(TAB==='utag'&&d.utag)||TAB==='bank'||TAB==='birja'||TAB==='casino'||(TAB==='vip'&&(d.vip||{}).open)||TAB==='crash'||TAB==='frog'||(TAB==='kami'&&d.kami)?TAB:'profil');
   ['s-crash','s-frog','s-kami'].forEach(id=>{ const sc=document.getElementById(id); if(!sc) return;
     sc.insertAdjacentHTML('afterbegin','<div class="sndbar"><span data-snd="m">🎵</span><span data-snd="s">🔊</span></div>');
     sc.querySelectorAll('.sndbar span').forEach(b=>b.onclick=()=>SND.toggle(b.dataset.snd)); });
@@ -28449,15 +29434,35 @@ function kidErr(e,wait){
 }
 // ---- 🏪 EMPIRE MARKET: Telegram Premium / Gifts (avtomatik) · Stars / NFT (qo'lda) — ⭐ Stars yoki 🪙 EMP ----
 const MKST={pending:'⏳ To‘lov kutilmoqda',paid:'🧾 Navbatda',buying:'⏳ Sotib olinmoqda',delivered:'✅ Yetkazildi',refunded:'↩️ Qaytarildi',failed:'⚠️ Muammo',expired:'⌛ Eskirgan',cancelled:'✖ Bekor'};
+// 🔐 Userbot login (NFT owner + 🏷 UTag) — umumiy xato matnlari va kod yetkazish ko'rsatmasi
+const UBERR={phone:'📱 Raqam noto‘g‘ri. Raqamni xalqaro formatda kiriting: +7…, +1…, +44…, +998…',
+  phone_local:'🌍 Mamlakat kodi yo‘q. Raqamni xalqaro formatda kiriting: +7…, +1…, +44…, +998…',
+  phone_invalid:'📱 Telegram bu raqamni qabul qilmadi — mamlakat kodi va raqamni tekshiring',
+  phone_banned:'⛔ Bu raqam Telegram tomonidan bloklangan',phone_unoccupied:'❔ Bu raqamda Telegram akkaunti yo‘q',
+  flood:'⏳ Telegram cheklovi — keyinroq urinib ko‘ring',api_id_invalid:'⚙️ Telegram API kaliti yaroqsiz — bot egasi TG_API_ID / TG_API_HASH ni tekshirsin',
+  send_code_unavailable:'📵 Telegram hozir kod yubora olmaydi — keyinroq urinib ko‘ring',
+  email_setup:'📧 Telegram sozlamalarida Login email o‘rnating, so‘ng qayta urinib ko‘ring',update_app:'📲 Telegram ilovasini yangilab, qayta urinib ko‘ring',
+  restart:'🔄 Telegram loginni qayta boshlashni so‘radi — qaytadan kod yuboring',
+  code:'🔢 Kod noto‘g‘ri (5–6 raqam)',code_expired:'⌛ Kod eskirdi — qaytadan yuboring',password:'🔐 2FA parol noto‘g‘ri',
+  no_resend:'⚠️ Qayta yuborish usuli yo‘q — biroz kuting yoki qaytadan boshlang',
+  login:'⚠️ Login seansi tugagan — qaytadan boshlang',login_fail:'⚠️ Kirib bo‘lmadi',rate:'⏳ Juda tez — biroz kuting',
+  ub_api:'⚙️ TG_API_ID / TG_API_HASH env o‘rnatilmagan',ub_key:'🔐 USERBOT_SESSION_KEY env o‘rnatilmagan — sessiya saqlanmaydi',
+  telethon:'⚙️ telethon o‘rnatilmagan'};
+function ubErr(r){ const m=UBERR[r.error]; return m?(m+(r.wait?' ('+Math.ceil(r.wait/60)+' daq)':'')):null; }
+const UBDLV={app:'📲 Kod Telegram ilovangizga («Telegram» rasmiy chatiga) yuborildi',sms:'💬 Kod SMS orqali yuborildi',
+  call:'📞 Kod qo‘ng‘iroq orqali aytiladi',flash_call:'📞 Qisqa qo‘ng‘iroq keladi — kod qo‘ng‘iroq qilgan raqamning oxirgi raqamlari',
+  missed_call:'📞 Javobsiz qo‘ng‘iroq keladi — kod qo‘ng‘iroq qilgan raqamning oxirgi raqamlari',email:'📧 Kod Login email manzilingizga yuborildi',
+  fragment_sms:'💎 Kod Fragment (anonim raqam) orqali yuborildi',firebase:'💬 Kod SMS orqali yuborildi',other:'📲 Kod yuborildi'};
+const UBNEXT={sms:'💬 SMS orqali qayta yuborish',call:'📞 Qo‘ng‘iroq orqali qayta yuborish',flash_call:'📞 Qo‘ng‘iroq orqali qayta yuborish',
+  missed_call:'📞 Qo‘ng‘iroq orqali qayta yuborish',fragment_sms:'💎 Fragment orqali qayta yuborish'};
+function ubDeliveryHint(L){ L=L||{}; return (UBDLV[L.delivery]||UBDLV.other)+(L.len?' · '+L.len+' raqam':'')+' — kodni hech kimga bermang!'; }
 const MKERR={disabled:'🏪 Market hozircha yopiq',kind:'🏪 Bu bo‘lim yopiq',not_found:'🔎 Qabul qiluvchi topilmadi (u botni ishlatgan bo‘lishi kerak)',
   item:'⚠️ Mahsulot mavjud emas',unavailable:'⏳ Vaqtincha mavjud emas — keyinroq urinib ko‘ring',too_many:'⚠️ To‘lanmagan buyurtmalar ko‘p — birozdan keyin',
   emp_off:'🪙 EMP bilan to‘lash yopiq',emp_funds:'💸 EMP yetarli emas',invoice:'⚠️ Invoys yaratilmadi',bot:'⚠️ Bot band',values:'⚠️ Qiymatlar noto‘g‘ri',
   image:'⚠️ Rasm noto‘g‘ri (fayl yoki https havola)',nft_slug:'⚠️ NFT havolasi noto‘g‘ri — masalan t.me/nft/PlushPepe-1',nft_fetch:'⚠️ Fragment’da bu NFT topilmadi',order:'⚠️ Buyurtma topilmadi',refund:'⚠️ Qaytarib bo‘lmadi',owner:'👑 Faqat ownerlar',
   no_username:'🔎 Qabul qiluvchining Telegram @username’i kerak (NFT avtomatik yuboriladi)',ub_api:'⚙️ TG_API_ID / TG_API_HASH env o‘rnatilmagan',
-  ub_key:'🔐 USERBOT_SESSION_KEY env o‘rnatilmagan — sessiya saqlanmaydi',ub_off:'🤖 Userbot ulanmagan',telethon:'⚙️ telethon o‘rnatilmagan',
-  wrong_account:'⛔ Faqat 1150777456 akkaunti ulanishi mumkin',phone:'📱 Telefon raqami noto‘g‘ri',code:'🔢 Kod noto‘g‘ri',
-  code_expired:'⌛ Kod eskirdi — qaytadan yuboring',password:'🔐 2FA parol noto‘g‘ri',flood:'⏳ Telegram cheklovi — keyinroq urinib ko‘ring',
-  login:'⚠️ Login seansi tugagan — qaytadan boshlang',login_fail:'⚠️ Kirib bo‘lmadi',rate:'⏳ Juda tez — biroz kuting',busy:'⏳ Sinxron davom etmoqda',
+  ub_off:'🤖 Userbot ulanmagan',
+  wrong_account:'⛔ Faqat 1150777456 akkaunti ulanishi mumkin',busy:'⏳ Sinxron davom etmoqda',
   rs:'⚠️ Listing topilmadi yoki sotilgan',price:'⚠️ Narx 1–100 000 ⭐ (0 — sotuvdan olish)',act:'⚠️ Noma’lum amal'};
 const MKRS={gone:'Sotuvda yo‘q',reapprove:'Sotuvda yo‘q',offline:'Sotuvda yo‘q',sold:'Sotilgan',reserved:'⏳ Band',hidden:'Yashirin',no_price:'Narxsiz'};
 // 🎞 Market animatsiyalari (rasmiy TGS/WEBM): faqat ko'rinayotganlar o'ynaydi, bir vaqtda ≤ MK_ANIM_MAX; lottie-web kerak bo'lganda yuklanadi.
@@ -28621,12 +29626,13 @@ function mkUbHtml(A){ const U=A.ub||{}, R=A.rs||{colls:[],list:[],log:[],sync:{}
     h+='<div class="chips"><span class="chip">🟢 '+esc(me.name||'')+(me.username?' @'+esc(me.username):'')+'</span><span class="chip">⭐ '+(U.bal==null?'?':fmtMoney(U.bal))+'</span>'+
       (U.env?'<span class="chip">env sessiya</span>':'')+'<span class="chip" id="ubSt" style="cursor:pointer">🔄 Holat</span><span class="chip" id="ubOut" style="cursor:pointer">🚪 Chiqish</span></div>';
   } else if(U.login==='code'||U.login==='password'){
-    h+='<div class="hsub">'+esc(U.phone||'')+(U.login==='code'?' — Telegram’dagi kodni kiriting (hech kimga yubormang!)':' — 2FA parol')+'</div><div class="mkrow">'+
-      (U.login==='code'?'<input id="ubCode" inputmode="numeric" maxlength="8" placeholder="Kod">':'<input id="ubPw" type="password" maxlength="256" placeholder="2FA parol">')+
-      '<button class="btn go" id="ubGo">'+(U.login==='code'?'✅ Kirish':'🔐 Tasdiqlash')+'</button><button class="btn" id="ubCx">✖</button></div>';
+    h+='<div class="hsub">'+esc(U.phone||'')+' — '+(U.login==='code'?esc(ubDeliveryHint(U)):'2FA parol')+'</div><div class="mkrow">'+
+      (U.login==='code'?'<input id="ubCode" inputmode="numeric" autocomplete="one-time-code" maxlength="12" placeholder="Kod">':'<input id="ubPw" type="password" maxlength="256" placeholder="2FA parol">')+
+      '<button class="btn go" id="ubGo">'+(U.login==='code'?'✅ Kirish':'🔐 Tasdiqlash')+'</button><button class="btn" id="ubCx">✖</button></div>'+
+      (U.login==='code'&&U.next?'<span class="chip" id="ubRs" style="cursor:pointer">'+esc(UBNEXT[U.next]||'🔁 Qayta yuborish')+'</span>':'');
   } else {
     h+='<div class="hsub">Holat: '+esc(MKUBE[U.err]||U.err||'ulanmagan')+'. Faqat '+U.id+' akkaunti qabul qilinadi.</div>'+
-      '<div class="mkrow"><input id="ubPh" inputmode="tel" maxlength="20" placeholder="+998…"><button class="btn go" id="ubSend"'+(U.api&&U.key?'':' disabled')+'>📲 Kod yuborish</button></div>';
+      '<div class="mkrow"><input id="ubPh" inputmode="tel" maxlength="32" placeholder="+7… / +1… / +44… / +998…"><button class="btn go" id="ubSend"'+(U.api&&U.key?'':' disabled')+'>📲 Kod yuborish</button></div>';
   }
   const sy=R.sync||{};
   h+='<div class="lbl" style="margin-top:16px">💎 Resale (Telegram bozori)</div><div class="chips">'+
@@ -28652,6 +29658,7 @@ function mkUbBind(box,A,save){ const $q=s=>box.querySelector(s);
   on('#ubSend',()=>save({act:'ub_send_code',phone:$q('#ubPh').value.trim()}));
   on('#ubGo',()=>{ const c=$q('#ubCode'); if(c) save({act:'ub_code',code:c.value.trim()}); else save({act:'ub_password',password:$q('#ubPw').value}); });
   on('#ubCx',()=>save({act:'ub_cancel'}));
+  on('#ubRs',()=>save({act:'ub_resend'}));
   on('#ubSt',()=>save({act:'ub_status'}));
   on('#ubOut',()=>{ if(confirm('Userbot sessiyasi yopilsinmi (log out)? NFT avto-sotuv to‘xtaydi.')) save({act:'ub_logout'}); });
   on('#rsSync',()=>save({act:'rs_sync'}));
@@ -28664,10 +29671,10 @@ function mkUbBind(box,A,save){ const $q=s=>box.querySelector(s);
     r.querySelector('.rtg').onclick=()=>save({act:'rs_toggle',id:id}); }); }
 function marketAdmin(d){
   const box=$('<div class="card full mkadm"></div>');
-  const MKOK={code_sent:'📲 Kod Telegram’ga yuborildi',need_password:'🔐 2FA parolini kiriting',connected:'🤖 Userbot ulandi',sync_started:'🔄 Sinxron boshlandi — 1–2 daqiqadan keyin yangilang'};
+  const MKOK={code_sent:'📲 Kod yuborildi',need_password:'🔐 2FA parolini kiriting',connected:'🤖 Userbot ulandi',sync_started:'🔄 Sinxron boshlandi — 1–2 daqiqadan keyin yangilang'};
   const save=p=>api('/app/api/market/'+p.act,p).then(r=>{ if(r.market){ d.market=r.market; if(window.DD) window.DD.market=r.market; draw(); MARKET.draw();
       toast(MKOK[r.result]||(r.n!=null?'✅ '+r.n+' ta listing narxlandi':'✅ Saqlandi')); }
-    else toast(MKERR[r.error]||'⚠️ Xatolik'); }).catch(()=>toast('⚠️ Aloqa xatosi'));
+    else toast(MKERR[r.error]||ubErr(r)||'⚠️ Xatolik'); }).catch(()=>toast('⚠️ Aloqa xatosi'));
   function draw(){ const m=d.market||{}, A=m.admin; if(!A){ box.innerHTML='<div class="hsub">🏪 Market ma’lumoti yo‘q</div>'; return; }
     const c=A.cfg, K=[['premium','⭐ Premium (avto)'],['gift','🎁 Gifts (avto)'],['stars','🌟 Stars (qo‘lda)'],['nft','💎 NFT (qo‘lda)']];
     const q=o=>'<div class="mkq"><b>#'+o.id+' · '+esc(o.title)+'</b> · '+(o.pay==='emp'?fmtMoney(o.emp)+' EMP':'⭐ '+fmtMoney(o.price))+
@@ -28714,10 +29721,70 @@ function marketAdmin(d){
   window.MKADM=()=>{ d.market=(window.DD||d).market; draw(); };
   draw(); return box;
 }
+// ---- 🏷 UTag: o'z Telegram akkauntidan guruhda hammani belgilash (ulanish faqat shu yerda — kod chatga yozilmaydi) ----
+const UTERR={consent:'☑️ Avval roziligingizni belgilang',connected:'🔌 Akkaunt allaqachon ulangan',wrong_account:'⛔ Faqat O‘Z akkauntingizni (web app ochilgan) ulash mumkin — boshqa akkaunt rad etildi',
+  bridge_off:'⚙️ Empire bilan ko‘prik sozlanmagan',bridge:'⚠️ Empire to‘lovni rad etdi',insufficient:'💎 Olmos yetarli emas',
+  no_user:'🔎 Empire Mafia botida hisobingiz topilmadi — avval u botda /start bosing',pending:'⏳ Oldingi to‘lov tekshirilmoqda',busy:'⏳ Kuting…',
+  record_failed:'⚠️ Xatolik — olmos qaytarildi',act:'⚠️ Noma’lum amal'};
+function utagPage(d){
+  const sec=$('<div class="sec" id="s-utag"></div>');
+  sec.appendChild($('<div class="gback" data-back="profil">‹ Profil</div>'));
+  sec.appendChild($('<h2>🏷 UTag</h2>'));
+  const box=$('<div class="card full utbox"></div>'); sec.appendChild(box);
+  let busy=false;
+  const call=(act,body)=>{ if(busy) return; busy=true;
+    return api('/app/api/utag/'+act,body||{}).then(r=>{ busy=false; if(r&&r.utag){ d.utag=r.utag; if(window.DD) window.DD.utag=r.utag; draw(); }
+      if(!r||!r.ok){ toast('⚠️ Xatolik'); return r; }
+      if(r.error){ toast((UTERR[r.error]||ubErr(r)||'⚠️ Xatolik')+(r.error==='insufficient'&&r.balance!=null?' (balans: '+r.balance+' 💎)':'')); haptic('error'); return r; }
+      const ok={code_sent:ubDeliveryHint(r),need_password:'🔐 2FA parolini kiriting',connected:'✅ Akkaunt ulandi',logged_out:'🔌 Akkaunt uzildi',
+        bought:'✅ Obuna faollashdi: '+(r.until||'')+' gacha',pending:'⏳ To‘lov tekshirilmoqda — natija botda xabar qilinadi'}[r.result];
+      if(ok){ toast(ok); haptic('success'); } return r; }).catch(()=>{ busy=false; toast('⚠️ Aloqa xatosi'); }); };
+  function draw(){ const u=d.utag||{}, L=u.login, s=u.sub||{};
+    let h='<div class="lbl">👤 Akkaunt</div>';
+    if(u.connected){ const me=u.me||{};
+      h+='<div class="chips"><span class="chip">'+(u.online?'🟢':'⚪')+' '+esc(me.name||'')+(me.username?' @'+esc(me.username):'')+'</span>'+(u.running?'<span class="chip">⏳ Belgilash ketmoqda</span>':'')+'</div>'+
+        '<div class="hsub" style="margin-top:6px">'+(u.online?'Tinglanmoqda — guruhda <code>.tag so‘z</code> yozing.':(s.active?'Ulanmoqda…':'Obuna faol bo‘lganda ishlaydi.'))+'</div>'+
+        '<button class="btn full" id="utOut" style="margin-top:10px">🔌 Uzish</button>';
+    } else if(L&&(L.step==='code'||L.step==='password')){
+      h+='<div class="hsub">'+esc(L.phone||'')+' — '+(L.step==='code'?esc(ubDeliveryHint(L)):'2FA (bulutli parol) yoqilgan — parolni kiriting')+'</div>'+
+        '<div class="utrow">'+(L.step==='code'?'<input id="utCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" placeholder="Kod (5–6 raqam)">'
+          :'<input id="utPw" type="password" maxlength="256" placeholder="2FA parol">')+
+        '<button class="btn go" id="utGo">'+(L.step==='code'?'✅ Kirish':'🔐 Tasdiqlash')+'</button><button class="btn" id="utCx">✖</button></div>'+
+        (L.step==='code'&&L.next?'<div class="chips"><span class="chip" id="utRs" style="cursor:pointer">'+esc(UBNEXT[L.next]||'🔁 Kodni qayta yuborish')+'</span></div>':'');
+    } else {
+      h+='<div class="hsub">Ulanmagan. O‘zingizning Telegram akkauntingizni ulang (web app ochilgan akkaunt).</div>'+
+        '<div class="utwarn">⚠️ Ulanganda bot akkauntingizga kirish huquqini oladi (sessiya shifrlangan holda saqlanadi) va faqat siz guruhda yozgan <code>.tag</code> / <code>.stop</code> buyruqlarini bajaradi. '+
+        'Ko‘p belgilash Telegram tomonidan spam deb cheklanishi (vaqtincha yozish taqiqi) mumkin — javobgarlik sizda. Istalgan payt “🔌 Uzish” bilan sessiyani bekor qilasiz.</div>'+
+        '<label class="utcons"><input type="checkbox" id="utOk"><span>Roziman: akkauntimga kirish va mening nomimdan xabar yuborishga ruxsat beraman.</span></label>'+
+        '<div class="utrow"><input id="utPh" type="tel" inputmode="tel" maxlength="32" placeholder="+7… / +1… / +44… / +998…"><button class="btn go" id="utSend"'+(u.api&&u.key?'':' disabled')+'>📲 Kod yuborish</button></div>'+
+        '<div class="uthint">🌍 Raqamni xalqaro formatda kiriting: +7…, +1…, +44…, +998… Kod Telegram ilovangizga keladi — uni hech kimga, hatto botga chatda ham yubormang, faqat shu yerga kiriting.</div>'+
+        (!u.api||!u.key?'<div class="uthint">⚙️ Ulanish hozircha yopiq (server sozlanmagan).</div>':'');
+    }
+    h+='<div class="lbl" style="margin-top:16px">⏱ Tezlik (har bir a’zo orasida)</div>'+
+      '<div class="utsp"><button class="btn" id="utM">➖</button><b>'+Number(u.speed||0.7).toFixed(1)+' s</b><button class="btn" id="utP">➕</button></div>'+
+      '<div class="hsub">'+u.min+'–'+u.max+' s. Kichik kutish Telegram cheklovlari xavfini oshiradi.</div>';
+    h+='<div class="lbl" style="margin-top:16px">💎 Obuna</div>'+
+      '<div class="hsub">'+(s.active?'✅ '+esc(s.until)+' gacha ('+esc(s.left)+' qoldi)':'Yo‘q')+(u.pending?' · ⏳ to‘lov tekshirilmoqda':'')+'</div>'+
+      '<button class="btn go full" id="utBuy" style="margin-top:10px"'+(u.bridge?'':' disabled')+'>💎 '+(s.active?'Uzaytirish':'Obuna olish')+' — '+u.price+' olmos / '+u.days+' kun</button>';
+    h+='<div class="lbl" style="margin-top:16px">ℹ️ Foydalanish</div><div class="hsub">Guruhda o‘z akkauntingizdan <code>.tag so‘z</code> yozing — buyruq o‘chadi va har bir a’zo alohida xabarda belgilanadi (ko‘pi bilan '+u.max_members+' ta, bir guruhda '+u.cooldown+' s da bir marta). Emoji, premium emoji va formatlash saqlanadi. To‘xtatish: <code>.stop</code>.</div>';
+    box.innerHTML=h;
+    const q=x=>box.querySelector(x), on=(x,f)=>{ const e=q(x); if(e) e.onclick=f; };
+    on('#utSend',()=>{ if(!q('#utOk').checked){ toast(UTERR.consent); return; } call('send_code',{phone:q('#utPh').value.trim(),consent:1}); });
+    on('#utGo',()=>{ const c=q('#utCode'); if(c) call('code',{code:c.value.trim()}); else call('password',{password:q('#utPw').value}); });
+    on('#utCx',()=>call('cancel'));
+    on('#utRs',()=>call('resend'));
+    on('#utOut',()=>{ if(confirm('Akkaunt uzilsinmi? Sessiya Telegram’da bekor qilinadi.')) call('logout'); });
+    on('#utM',()=>call('speed',{delta:-0.1}));
+    on('#utP',()=>call('speed',{delta:0.1}));
+    on('#utBuy',()=>{ if(confirm(u.price+' 💎 olmos Empire Mafia hisobingizdan yechilsinmi? Obuna '+u.days+' kunga '+(s.active?'uzaytiriladi':'faollashadi')+'.')) call('buy'); });
+  }
+  draw();
+  return sec;
+}
 function setTab(k){
   TAB=k;
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==='s-'+k));
-  const tk=(k==='crash'||k==='frog'||k==='kami'||k==='casino'||k==='vip'||k==='media'||k==='market')?'games':(k==='bank'||k==='birja')?'moliya':k;
+  const tk=(k==='crash'||k==='frog'||k==='kami'||k==='casino'||k==='vip'||k==='media'||k==='market')?'games':(k==='bank'||k==='birja')?'moliya':k==='utag'?'profil':k;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.k===tk));
   if(k==='crash' && window.CR) window.CR.poke();
   if(k==='news' && window.DD) newsSeen(window.DD);
@@ -28887,7 +29954,11 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_relationship, pattern=r"^(rel:|family:)"))
     app.add_handler(CallbackQueryHandler(cb_sticker_pack, pattern=r"^stk:[gu]:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_crash, pattern=r"^cr:"))
+    app.add_handler(CallbackQueryHandler(cb_utag, pattern=r"^ut:\d+:(m|p|buy|ok|card)$"))
     app.add_handler(CallbackQueryHandler(cb_noop))
+    # 📋 Shaxsiy chat pastki menyusi (ReplyKeyboard) — aniq tugma matnlari mavjud handlerlarga
+    app.add_handler(MessageHandler(filters.Text(list(PRIVATE_MENU_MAP)) & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE,
+                                   on_private_menu))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, career_private_text))
     app.add_handler(MessageHandler(filters.Sticker.ALL & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, on_private_sticker))
     app.add_handler(PreCheckoutQueryHandler(on_pre_checkout))

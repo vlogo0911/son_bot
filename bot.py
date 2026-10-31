@@ -8929,7 +8929,7 @@ async def post_init(application: Application):
         ("rules", "📜 Guruh qoidalari"), ("badmute", "🔇 Taqiq. so‘z mute muddati"),
         ("setlog", "📋 Log kanal"), ("report", "📣 Adminlarga shikoyat"),
         ("info", "🪪 Foydalanuvchi ma’lumoti"), ("id", "🆔 ID"), ("admins", "👮 Adminlar"),
-        ("play", "🎵 Musiqa qo‘yish (nomi yoki havola)"), ("skip", "⏭ Keyingi trek"), ("pause", "⏸ Pauza"),
+        ("play", "🎵 Musiqa qo‘yish (nomi yoki havola)"), ("vplay", "🎬 Video qo‘yish (video faylga reply)"), ("skip", "⏭ Keyingi trek"), ("pause", "⏸ Pauza"),
         ("resume", "▶️ Davom ettirish"), ("end", "⏹ Musiqani to‘xtatish"), ("queue", "📃 Musiqa navbati"),
         ("help", "❓ Yordam"),
     ]
@@ -22204,6 +22204,14 @@ MUSIC_USER_RATE = (3, 30)                                  # bitta odam: 30 s da
 MUSIC_LOGIN_RATE = (8, 600)
 MUSIC_URL_HOSTS = ("youtube.com", "youtu.be", "soundcloud.com")
 MUSIC_COOKIES = os.getenv("YTDLP_COOKIES", "").strip()    # ixtiyoriy: YouTube cookies.txt (Netscape) matni — "bot emasligingizni tasdiqlang" uchun
+# 🎬 Video (/vplay): faqat guruh adminlari / bot egalari; bir vaqtda VIDEO_MAX_CHATS guruhda (har oqim ~1 vCPU)
+VIDEO_MAX_DUR = _env_int("VIDEO_MAX_DURATION", 3 * 3600)
+VIDEO_FILE_MAX = _env_int("VIDEO_FILE_MAX_MB", 1024) * 1024 * 1024    # Telegram fayl — yordamchi akkaunt yuklaydi (2 GB gacha)
+VIDEO_MAX_CHATS = _env_int("VIDEO_MAX_CHATS", 2)
+VIDEO_QUALITIES = (360, 480, 720)
+VIDEO_QUALITY = _env_int("VIDEO_QUALITY", 480) if _env_int("VIDEO_QUALITY", 480) in (360, 480, 720) else 480
+VIDEO_DISK_RESERVE = 300 * 1024 * 1024
+MUSIC_SEEK = 30
 MUSIC_ACTS = ("state", "send_code", "resend", "code", "password", "cancel", "logout", "reconnect")
 _MUSIC = {"client": None, "calls": None, "me": None, "err": "", "lock": None}
 _MUSIC_LOGIN = {}
@@ -22290,7 +22298,9 @@ async def music_ensure():
             async def _upd(_client, update):
                 try:
                     if isinstance(update, StreamEnded):
-                        if update.stream_type == StreamEnded.Type.AUDIO:
+                        q = MUSIC_Q.get(int(update.chat_id))
+                        want = StreamEnded.Type.VIDEO if q and (q.get("now") or {}).get("video") else StreamEnded.Type.AUDIO
+                        if update.stream_type == want:
                             await music_on_end(int(update.chat_id))
                     elif isinstance(update, ChatUpdate) and update.status & (
                             ChatUpdate.Status.KICKED | ChatUpdate.Status.LEFT_GROUP | ChatUpdate.Status.CLOSED_VOICE_CHAT):
@@ -22312,13 +22322,36 @@ async def music_ensure():
 async def music_drop_client():
     cl = _MUSIC.get("client")
     _MUSIC.update(client=None, calls=None)
-    MUSIC_Q.clear()
+    for cid in list(MUSIC_Q):
+        music_clear(cid)
     await ub_disconnect(cl)
+
+
+def music_discard(*tracks):
+    """Video fayllar keshlanmaydi — trek tugashi/o'tkazilishi bilan o'chiriladi (disk to'lmasin)."""
+    for t in tracks:
+        if t and t.get("video") and t.get("file"):
+            try:
+                os.remove(t["file"])
+            except OSError:
+                pass
 
 
 def music_clear(chat_id):
     q = MUSIC_Q.pop(chat_id, None)
+    if q:
+        music_discard(q.get("now"), *q.get("queue", []))
     return q
+
+
+def music_cleanup_videos():
+    """Ishga tushganda: oldingi sessiyadan qolgan video fayllar o'chadi."""
+    try:
+        for e in os.scandir(MUSIC_DIR):
+            if e.is_file() and e.name.startswith("V_"):
+                os.remove(e.path)
+    except OSError:
+        pass
 
 
 # ── 🔎 Manba: yt-dlp (qidiruv/havola) ──
@@ -22381,22 +22414,26 @@ def _music_targets(targets):
             yield f"scsearch1:{t[:120]}"
 
 
-def _music_fetch_sync(query):
-    """→ (trek dict, None) yoki (None, xato kodi). Bloklovchi — asyncio.to_thread da."""
+def _music_fetch_sync(query, video=False):
+    """→ (trek dict, None) yoki (None, xato kodi). Bloklovchi — asyncio.to_thread da. video=True — YouTube video (≤ VIDEO_QUALITY)."""
     import yt_dlp
     os.makedirs(MUSIC_DIR, exist_ok=True)
     opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True, "socket_timeout": 15,
             "outtmpl": os.path.join(MUSIC_DIR, "%(extractor_key)s_%(id)s.%(ext)s"), "max_filesize": MUSIC_FILE_MAX,
             "restrictfilenames": True, "noprogress": True, "cachedir": False}
+    if video:
+        h = VIDEO_QUALITY
+        opts.update(format=f"bv*[height<={h}]+ba/b[height<={h}]/b", merge_output_format="mp4", max_filesize=VIDEO_FILE_MAX,
+                    outtmpl=os.path.join(MUSIC_DIR, f"V_%(extractor_key)s_%(id)s_{h}.%(ext)s"))
     ck = _music_cookiefile()
     if ck:
         opts["cookiefile"] = ck
     is_url = query.startswith(("http://", "https://"))
     if is_url and not music_url_ok(query):
         return None, "url"
-    targets = [query] if is_url else [f"ytsearch1:{query}", f"scsearch1:{query}"]
+    targets = [query] if is_url else [f"ytsearch1:{query}"] + ([] if video else [f"scsearch1:{query}"])
     last = "not_found"
-    for tgt in _music_targets(targets):
+    for tgt in (targets if video else _music_targets(targets)):
         try:
             with yt_dlp.YoutubeDL(opts) as y:
                 info = y.extract_info(tgt, download=False)
@@ -22407,17 +22444,19 @@ def _music_fetch_sync(query):
                 if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):
                     return None, "live"
                 dur = int(info.get("duration") or 0)
-                if dur > MUSIC_MAX_DUR:
-                    return None, "long"
+                if dur > (VIDEO_MAX_DUR if video else MUSIC_MAX_DUR):
+                    return None, "vlong" if video else "long"
                 path = y.prepare_filename(info)
                 if not os.path.exists(path):
                     info = y.process_ie_result(info, download=True)
                     path = y.prepare_filename(info)
+                    if video and not os.path.exists(path):          # birlashtirilgan fayl .mp4 bo'ladi
+                        path = os.path.splitext(path)[0] + ".mp4"
                 if not os.path.exists(path):
                     last = "download"
                     continue
                 os.utime(path, None)
-                return {"title": str(info.get("title") or query)[:120], "dur": dur, "file": path,
+                return {"title": str(info.get("title") or query)[:120], "dur": dur, "file": path, "video": video,
                         "url": str(info.get("webpage_url") or "")[:300],
                         "src": "SoundCloud" if "soundcloud" in str(info.get("extractor_key", "")).lower() else "YouTube"}, None
         except Exception as e:  # noqa: BLE001 — yt-dlp xatosi: keyingi manba
@@ -22515,32 +22554,58 @@ async def music_join(bot, chat_id):
 # ── ▶️ Ijro ──
 def music_kb(q):
     paused = q.get("paused")
-    return InlineKeyboardMarkup([[
+    rows = [[
         InlineKeyboardButton("▶️ Davom" if paused else "⏸ Pauza", callback_data="mu:resume" if paused else "mu:pause"),
         InlineKeyboardButton("⏭ Keyingi", callback_data="mu:skip"),
         InlineKeyboardButton("⏹ To'xtatish", callback_data="mu:end"),
-    ], [InlineKeyboardButton("📃 Navbat", callback_data="mu:q")]])
+    ], [InlineKeyboardButton(f"⏪ {MUSIC_SEEK}s", callback_data="mu:back"),
+        InlineKeyboardButton(f"{MUSIC_SEEK}s ⏩", callback_data="mu:fwd"),
+        InlineKeyboardButton("📃 Navbat", callback_data="mu:q")]]
+    if (q.get("now") or {}).get("video"):
+        rows[1].insert(2, InlineKeyboardButton(f"🎚 {q.get('vq', VIDEO_QUALITY)}p", callback_data="mu:vq"))
+    return InlineKeyboardMarkup(rows)
 
 
 def music_now_text(q):
     t = q.get("now") or {}
     link = f'<a href="{escape(t["url"], quote=True)}">{escape(t["title"])}</a>' if t.get("url") else f"<b>{escape(t.get('title', ''))}</b>"
-    return (f"{'⏸' if q.get('paused') else '🎵'} <b>Hozir:</b> {link}\n"
-            f"⏱ {music_fmt_dur(t.get('dur'))} · {escape(t.get('src', ''))} · so'radi: {escape(t.get('by_name', ''))}"
+    icon = "⏸" if q.get("paused") else ("🎬" if t.get("video") else "🎵")
+    return (f"{icon} <b>Hozir:</b> {link}\n"
+            f"⏱ {music_fmt_dur(t.get('dur'))} · {escape(t.get('src', ''))}"
+            + (f" · {q.get('vq', VIDEO_QUALITY)}p" if t.get("video") else "") + f" · so'radi: {escape(t.get('by_name', ''))}"
             + (f"\n📃 Navbatda: {len(q['queue'])} ta" if q.get("queue") else ""))
 
 
-async def music_start_track(bot, chat_id, q):
-    """q['now'] ni ovozli chatda boshlaydi. None yoki xato kodi."""
+def music_pos(q):
+    """Joriy pozitsiya (s) — server soati bo'yicha (pauza hisobga olinadi)."""
+    if q.get("paused"):
+        return q.get("pos_p", q.get("off", 0))
+    return q.get("off", 0) + max(0.0, time.time() - q.get("at", time.time()))
+
+
+def music_video_busy(chat_id):
+    return sum(1 for cid, x in MUSIC_Q.items() if cid != chat_id and (x.get("now") or {}).get("video")) >= VIDEO_MAX_CHATS
+
+
+async def music_start_track(bot, chat_id, q, offset=0):
+    """q['now'] ni ovozli/video chatda boshlaydi (offset — soniya). None yoki xato kodi."""
     calls = await music_ensure()
     if calls is None:
         return "off"
-    from pytgcalls.types import MediaStream, GroupCallConfig, AudioQuality
-    stream = MediaStream(q["now"]["file"], AudioQuality.HIGH, video_flags=MediaStream.Flags.IGNORE)
+    t = q["now"]
+    if t.get("video") and music_video_busy(chat_id):
+        return "video_busy"
+    from pytgcalls.types import MediaStream, GroupCallConfig, AudioQuality, VideoQuality
+    ff = f"-ss {int(offset)}" if offset > 0 else None
+    if t.get("video"):
+        vq = {360: VideoQuality.SD_360p, 480: VideoQuality.SD_480p, 720: VideoQuality.HD_720p}[q.get("vq", VIDEO_QUALITY)]
+        stream = MediaStream(t["file"], AudioQuality.HIGH, vq, ffmpeg_parameters=ff)
+    else:
+        stream = MediaStream(t["file"], AudioQuality.HIGH, video_flags=MediaStream.Flags.IGNORE, ffmpeg_parameters=ff)
     for attempt in (1, 2):
         try:
             await calls.play(chat_id, stream, GroupCallConfig(auto_start=True))
-            q.update(paused=False, at=time.time())
+            q.update(paused=False, at=time.time(), off=float(offset))
             return None
         except Exception as e:  # noqa: BLE001
             n = type(e).__name__
@@ -22574,7 +22639,7 @@ async def music_announce(bot, chat_id, q):
 
 
 async def music_leave(chat_id):
-    MUSIC_Q.pop(chat_id, None)
+    music_clear(chat_id)
     calls = _MUSIC.get("calls")
     if calls is not None:
         try:
@@ -22587,6 +22652,7 @@ async def music_next(bot, chat_id):
     """Navbatdagi trekka o'tadi; navbat bo'sh bo'lsa ovozli chatdan chiqadi."""
     q = MUSIC_Q.get(chat_id)
     while q and q["queue"]:
+        music_discard(q.get("now"))
         q["now"] = q["queue"].pop(0)
         err = await music_start_track(bot, chat_id, q)
         if not err:
@@ -22603,11 +22669,11 @@ async def music_next(bot, chat_id):
 async def music_on_end(chat_id):
     lock = _MUSIC_CHAT_LOCKS.setdefault(chat_id, asyncio.Lock())
     async with lock:
-        if chat_id not in MUSIC_Q:
+        q = MUSIC_Q.get(chat_id)
+        if q is None or time.time() - q.get("at", 0) < 2:      # hozirgina qayta boshlangan (seek/sifat) — eski oqim tugashi
             return
         await music_next(_EXCHANGE_LOOP_BOT, chat_id)
-        q = MUSIC_Q.get(chat_id)
-        if q is None:
+        if MUSIC_Q.get(chat_id) is None:
             try:
                 await _EXCHANGE_LOOP_BOT.send_message(chat_id, "✅ Navbat tugadi — yordamchi ovozli chatdan chiqdi.")
             except TelegramError:
@@ -22620,11 +22686,19 @@ MUSIC_ERR = {
     "ffmpeg": "⚙️ Serverda ffmpeg o'rnatilmagan.",
     "not_found": "🔎 Hech narsa topilmadi.",
     "download": "⚠️ Yuklab bo'lmadi (manba vaqtincha javob bermayapti) — boshqa nom/havola bilan urinib ko'ring yoki audio faylga reply qiling.",
+    "vdownload": "⚠️ Videoni yuklab bo'lmadi. YouTube serverni bloklagan bo'lishi mumkin (bot egalari YTDLP_COOKIES qo'yadi) — "
+                 "yoki guruhga tashlangan video faylga reply qilib /vplay yozing.",
     "url": "🔗 Faqat YouTube va SoundCloud havolalari qabul qilinadi.",
     "live": "📡 Jonli efirlar qo'yilmaydi.",
     "long": f"⏱ Juda uzun (ko'pi bilan {MUSIC_MAX_DUR // 60} daqiqa).",
+    "vlong": f"⏱ Video juda uzun (ko'pi bilan {VIDEO_MAX_DUR // 60} daqiqa).",
     "big": "📦 Fayl 20 MB dan katta.",
+    "vbig": f"📦 Video juda katta (ko'pi bilan {VIDEO_FILE_MAX // (1024 * 1024)} MB).",
+    "disk": "💽 Serverda joy yetarli emas — birozdan keyin urinib ko'ring.",
     "no_audio": "🎧 Reply qilingan xabarda audio yo'q.",
+    "no_video": "🎬 Reply qilingan xabarda video yo'q.",
+    "admin_only": "👮 Videoni faqat guruh adminlari qo'ya oladi.",
+    "video_busy": f"🎬 Hozir {VIDEO_MAX_CHATS} ta guruhda video ketyapti (server chegarasi) — keyinroq urinib ko'ring.",
     "banned": "⛔ Yordamchi akkaunt bu guruhdan chiqarilgan/bloklangan — uni bandan chiqaring.",
     "invite": "🔑 Yordamchini qo'shib bo'lmadi: botni guruhda admin qiling («Havola orqali taklif qilish» huquqi bilan).",
     "join_request": "🔑 Yordamchining qo'shilish so'rovini tasdiqlang (yoki botga «A'zolarni qo'shish» huquqini bering).",
@@ -22638,6 +22712,25 @@ MUSIC_ERR = {
 }
 
 
+async def _music_ready(msg, user):
+    """Umumiy tekshiruvlar (/play va /vplay). True — davom etish mumkin."""
+    if user.id not in CAREER_OWNER_IDS and not _music_rate(_MUSIC_HITS, user.id, *MUSIC_USER_RATE):
+        await msg.reply_text(MUSIC_ERR["rate"])
+        return False
+    for ok, err in ((music_lib_ok, "lib"), (music_ffmpeg_ok, "ffmpeg")):
+        if not ok():
+            await msg.reply_text(MUSIC_ERR[err])
+            return False
+    if await music_ensure() is None:
+        await msg.reply_text(MUSIC_ERR["off"])
+        return False
+    q = MUSIC_Q.get(msg.chat_id)
+    if q and len(q["queue"]) >= MUSIC_QUEUE_MAX:
+        await msg.reply_text(MUSIC_ERR["queue"])
+        return False
+    return True
+
+
 async def cmd_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     chat, user = update.effective_chat, update.effective_user
@@ -22645,7 +22738,8 @@ async def cmd_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if chat.type not in ("group", "supergroup"):
         await msg.reply_text("🎵 <b>/play</b> guruhda ishlaydi: <code>/play qo'shiq nomi</code>, YouTube/SoundCloud havolasi "
-                             "yoki audio faylga reply qilib <code>/play</code>.\nBotni guruhga admin qilib qo'shing — "
+                             "yoki audio faylga reply qilib <code>/play</code>.\n🎬 Video: <code>/vplay</code> (video faylga reply "
+                             "yoki nomi/havola, faqat adminlar).\nBotni guruhga admin qilib qo'shing — "
                              "musiqa yordamchisi ovozli chatga o'zi kiradi.")
         return
     query = " ".join(context.args or []).strip()[:200]
@@ -22654,21 +22748,7 @@ async def cmd_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query and not has_audio:
         await msg.reply_text("🎵 Foydalanish: <code>/play qo'shiq nomi</code> yoki havola, yoki audio faylga reply qilib <code>/play</code>.")
         return
-    if user.id not in CAREER_OWNER_IDS and not _music_rate(_MUSIC_HITS, user.id, *MUSIC_USER_RATE):
-        await msg.reply_text(MUSIC_ERR["rate"])
-        return
-    if not music_lib_ok():
-        await msg.reply_text(MUSIC_ERR["lib"])
-        return
-    if not music_ffmpeg_ok():
-        await msg.reply_text(MUSIC_ERR["ffmpeg"])
-        return
-    if await music_ensure() is None:
-        await msg.reply_text(MUSIC_ERR["off"])
-        return
-    q = MUSIC_Q.get(chat.id)
-    if q and len(q["queue"]) >= MUSIC_QUEUE_MAX:
-        await msg.reply_text(MUSIC_ERR["queue"])
+    if not await _music_ready(msg, user):
         return
     wait = await msg.reply_text("🔎 Qidirilmoqda…" if query and not has_audio else "📥 Yuklanmoqda…")
     try:
@@ -22685,33 +22765,148 @@ async def cmd_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _music_edit(wait, MUSIC_ERR.get(err, err))
         return
     track.update(by=user.id, by_name=user.full_name[:64])
-    lock = _MUSIC_CHAT_LOCKS.setdefault(chat.id, asyncio.Lock())
+    await music_enqueue(context.bot, chat.id, track, wait)
+
+
+async def music_enqueue(bot, chat_id, track, wait, joined=False):
+    """Trek navbatga yoki darhol ijroga. `wait` — holat xabari (tahrirlanadi/o'chiriladi)."""
+    lock = _MUSIC_CHAT_LOCKS.setdefault(chat_id, asyncio.Lock())
     async with lock:
-        q = MUSIC_Q.get(chat.id)
+        q = MUSIC_Q.get(chat_id)
         if q and q.get("now"):
             if len(q["queue"]) >= MUSIC_QUEUE_MAX:
+                music_discard(track)
                 await _music_edit(wait, MUSIC_ERR["queue"])
                 return
             q["queue"].append(track)
-            await _music_edit(wait, f"➕ Navbatga qo'shildi (#{len(q['queue'])}): <b>{escape(track['title'])}</b> · "
-                                    f"⏱ {music_fmt_dur(track['dur'])}")
+            await _music_edit(wait, f"➕ Navbatga qo'shildi (#{len(q['queue'])}): {'🎬' if track.get('video') else '🎵'} "
+                                    f"<b>{escape(track['title'])}</b> · ⏱ {music_fmt_dur(track['dur'])}")
             return
-        err = await music_join(context.bot, chat.id)
+        err = None if joined else await music_join(bot, chat_id)
         if err:
+            music_discard(track)
             await _music_edit(wait, MUSIC_ERR.get(err, err))
             return
-        q = MUSIC_Q[chat.id] = {"now": track, "queue": [], "paused": False, "at": time.time(), "msg": None}
-        err = await music_start_track(context.bot, chat.id, q)
+        q = MUSIC_Q[chat_id] = {"now": track, "queue": [], "paused": False, "at": time.time(), "off": 0.0, "msg": None,
+                                "vq": VIDEO_QUALITY}
+        err = await music_start_track(bot, chat_id, q)
         if err:
-            MUSIC_Q.pop(chat.id, None)
+            music_clear(chat_id)
             await _music_edit(wait, MUSIC_ERR.get(err, err))
             return
         try:
             await wait.delete()
         except TelegramError:
             pass
-        await music_announce(context.bot, chat.id, q)
+        await music_announce(bot, chat_id, q)
     music_cache_trim()
+
+
+# ── 🎬 /vplay: video (Telegram fayl — yordamchi akkaunt yuklaydi; YouTube — yt-dlp, cookies kerak bo'lishi mumkin) ──
+def _video_of(m):
+    if m is None:
+        return None
+    v = m.video or m.video_note or m.animation
+    if v is None and m.document and str(m.document.mime_type or "").startswith("video/"):
+        v = m.document
+    return v
+
+
+def music_disk_ok(need):
+    import shutil
+    try:
+        os.makedirs(MUSIC_DIR, exist_ok=True)
+        return shutil.disk_usage(MUSIC_DIR).free - VIDEO_DISK_RESERVE > need
+    except OSError:
+        return True
+
+
+async def music_video_from_tg(bot, chat_id, rep, wait):
+    """Reply qilingan video → yordamchi akkaunt (Telethon) yuklaydi (Bot API 20 MB cheklovisiz). (trek, None) | (None, xato)."""
+    v = _video_of(rep)
+    if v is None:
+        return None, "no_video"
+    size, dur = int(v.file_size or 0), int(getattr(v, "duration", 0) or 0)
+    if size > VIDEO_FILE_MAX:
+        return None, "vbig"
+    if dur > VIDEO_MAX_DUR:
+        return None, "vlong"
+    if not music_disk_ok(size):
+        return None, "disk"
+    err = await music_join(bot, chat_id)              # yordamchi xabarni ko'rishi uchun guruhda bo'lishi kerak
+    if err:
+        return None, err
+    cl = _MUSIC["client"]
+    try:
+        peer = await music_peer(cl, chat_id)
+        tm = await cl.get_messages(peer, ids=rep.message_id)
+        if tm is None or tm.media is None:
+            return None, "no_video"
+        path = os.path.join(MUSIC_DIR, f"V_TG_{re.sub(r'[^A-Za-z0-9_-]', '', v.file_unique_id)}.mp4")
+        last = [0.0]
+
+        async def _prog(done, total):
+            if total and time.time() - last[0] > 6:
+                last[0] = time.time()
+                await _music_edit(wait, f"📥 Video yuklanmoqda… {done * 100 // total}% ({done // 1048576}/{total // 1048576} MB)")
+
+        if not os.path.exists(path):
+            tmp = path + ".part"
+            await cl.download_media(tm, file=tmp, progress_callback=_prog)
+            os.replace(tmp, path)
+    except Exception as e:  # noqa: BLE001
+        ub_log_err("Video yuklash", e)
+        try:
+            os.remove(path + ".part")
+        except (OSError, UnboundLocalError):
+            pass
+        return None, "vdownload"
+    title = getattr(v, "file_name", None) or (rep.caption or "").split("\n")[0][:80] or "🎬 Video"
+    return {"title": str(title)[:120], "dur": dur, "file": path, "url": "", "src": "Telegram", "video": True}, None
+
+
+async def cmd_vplay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat, user = update.effective_chat, update.effective_user
+    if msg is None or user is None:
+        return
+    if chat.type not in ("group", "supergroup"):
+        await msg.reply_text("🎬 <b>/vplay</b> guruhda ishlaydi: video faylga reply qilib <code>/vplay</code> yoki "
+                             "<code>/vplay nomi|YouTube havola</code>. Faqat guruh adminlari.")
+        return
+    if user.id not in CAREER_OWNER_IDS and not await is_admin(context.bot, chat.id, user.id):
+        await msg.reply_text(MUSIC_ERR["admin_only"])
+        return
+    query = " ".join(context.args or []).strip()[:200]
+    rep = msg.reply_to_message
+    has_video = _video_of(rep) is not None
+    if not query and not has_video:
+        await msg.reply_text("🎬 Foydalanish: video faylga reply qilib <code>/vplay</code>, yoki <code>/vplay nomi</code> / YouTube havola.")
+        return
+    if not await _music_ready(msg, user):
+        return
+    if music_video_busy(chat.id) and not (MUSIC_Q.get(chat.id) or {}).get("now"):
+        await msg.reply_text(MUSIC_ERR["video_busy"])
+        return
+    wait = await msg.reply_text("📥 Video yuklanmoqda…" if has_video else "🔎 Video qidirilmoqda…")
+    try:
+        if has_video:
+            track, err = await asyncio.wait_for(music_video_from_tg(context.bot, chat.id, rep, wait), timeout=1800)
+        else:
+            if not music_disk_ok(VIDEO_FILE_MAX // 2):
+                track, err = None, "disk"
+            else:
+                track, err = await asyncio.wait_for(asyncio.to_thread(_music_fetch_sync, query, True), timeout=900)
+    except asyncio.TimeoutError:
+        track, err = None, "vdownload"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Video manba: %s", type(e).__name__)
+        track, err = None, "vdownload"
+    if track is None:
+        await _music_edit(wait, MUSIC_ERR.get("vdownload" if err == "download" else err, err))
+        return
+    track.update(by=user.id, by_name=user.full_name[:64])
+    await music_enqueue(context.bot, chat.id, track, wait, joined=has_video)
 
 
 async def _music_edit(m, text):
@@ -22729,7 +22924,7 @@ async def music_can_control(bot, chat_id, uid):
 
 
 async def music_control(bot, chat_id, uid, act):
-    """act: pause | resume | skip | end → (matn, alert?)"""
+    """act: pause | resume | skip | end | back | fwd | vq → (matn, alert?)"""
     q = MUSIC_Q.get(chat_id)
     if not q or not q.get("now"):
         return "🔇 Hozir hech narsa ijro etilmayapti.", True
@@ -22743,17 +22938,34 @@ async def music_control(bot, chat_id, uid, act):
         try:
             if act == "pause" and not q["paused"]:
                 await calls.pause(chat_id)
-                q["paused"] = True
+                q.update(pos_p=music_pos(q), paused=True)
                 return "⏸ Pauza", False
             if act == "resume" and q["paused"]:
                 await calls.resume(chat_id)
-                q["paused"] = False
+                q.update(off=q.get("pos_p", q.get("off", 0)), at=time.time(), paused=False)
                 return "▶️ Davom etmoqda", False
             if act in ("pause", "resume"):
                 return ("⏸ Allaqachon pauzada" if q["paused"] else "▶️ Allaqachon ijro etilmoqda"), True
         except Exception as e:  # noqa: BLE001
             ub_log_err("Musiqa control", e)
             return "⚠️ Bajarib bo'lmadi", True
+        if act in ("back", "fwd", "vq"):
+            dur = int(q["now"].get("dur") or 0)
+            pos = music_pos(q)
+            if act == "vq":
+                if not q["now"].get("video"):
+                    return "🎵 Bu audio trek", True
+                i = VIDEO_QUALITIES.index(q.get("vq", VIDEO_QUALITY)) if q.get("vq", VIDEO_QUALITY) in VIDEO_QUALITIES else 1
+                q["vq"] = VIDEO_QUALITIES[(i + 1) % len(VIDEO_QUALITIES)]
+            else:
+                pos = pos - MUSIC_SEEK if act == "back" else pos + MUSIC_SEEK
+                if dur and pos >= dur - 3:
+                    return "⏩ Trek oxiriga yaqin — ⏭ Keyingi'ni bosing", True
+            pos = max(0.0, pos)
+            err = await music_start_track(bot, chat_id, q, offset=pos)
+            if err:
+                return MUSIC_ERR.get(err, err)[:190], True
+            return (f"🎚 Sifat: {q['vq']}p" if act == "vq" else f"{'⏪' if act == 'back' else '⏩'} {music_fmt_dur(pos)}"), False
         if act == "skip":
             if await music_next(bot, chat_id):
                 return "⏭ Keyingi trek", False
@@ -22767,10 +22979,10 @@ async def music_control(bot, chat_id, uid, act):
 def music_queue_text(chat_id):
     q = MUSIC_Q.get(chat_id)
     if not q or not q.get("now"):
-        return "🔇 Navbat bo'sh. <code>/play qo'shiq nomi</code>"
-    lines = [music_now_text(q).split("\n")[0]]
+        return "🔇 Navbat bo'sh. <code>/play qo'shiq nomi</code> · <code>/vplay</code>"
+    lines = [music_now_text(q).split("\n")[0] + f" ({music_fmt_dur(music_pos(q))})"]
     for i, t in enumerate(q["queue"][:15], 1):
-        lines.append(f"{i}. {escape(t['title'])} · {music_fmt_dur(t['dur'])} — {escape(t.get('by_name', ''))}")
+        lines.append(f"{i}. {'🎬' if t.get('video') else '🎵'} {escape(t['title'])} · {music_fmt_dur(t['dur'])} — {escape(t.get('by_name', ''))}")
     if len(q["queue"]) > 15:
         lines.append(f"… yana {len(q['queue']) - 15} ta")
     return "\n".join(lines)
@@ -22808,7 +23020,7 @@ async def cb_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, alert = await music_control(context.bot, chat_id, query.from_user.id, act)
     await query.answer(text, show_alert=alert)
     q = MUSIC_Q.get(chat_id)
-    if not alert and q and act in ("pause", "resume"):
+    if not alert and q and act in ("pause", "resume", "vq"):
         try:
             await query.edit_message_text(music_now_text(q), reply_markup=music_kb(q), disable_web_page_preview=True)
         except TelegramError:
@@ -22832,7 +23044,8 @@ def music_state():
     return {"connected": bool(acc), "me": ({"id": acc["id"], "name": acc["name"], "username": acc["username"]} if acc else None),
             "online": online, "err": _MUSIC.get("err") or "", "api": ub_api_ready(), "key": ub_crypto_ready(),
             "lib": music_lib_ok(), "ffmpeg": music_ffmpeg_ok(), "cookies": bool(MUSIC_COOKIES),
-            "chats": len(MUSIC_Q), "max_min": MUSIC_MAX_DUR // 60}
+            "chats": len(MUSIC_Q), "max_min": MUSIC_MAX_DUR // 60, "video_max": VIDEO_MAX_CHATS,
+            "videos": sum(1 for x in MUSIC_Q.values() if (x.get("now") or {}).get("video"))}
 
 
 async def web_music(uid, act, body):
@@ -22909,6 +23122,7 @@ async def music_leave_all():
 async def music_worker(application):
     """Ishga tushganda yordamchini ulaydi (sessiya bo'lsa)."""
     await asyncio.sleep(20)
+    music_cleanup_videos()
     if music_account():
         await music_ensure()
 # ── 🎵 /MUSIQA ──
@@ -29091,7 +29305,9 @@ function musicAdmin(){
     }
     h+='<div class="lbl" style="margin-top:16px">ℹ️ Foydalanish</div><div class="hsub">Botni guruhga admin qiling («Havola orqali taklif», «Adminlar qo‘shish» huquqlari bilan). '+
       'Guruhda: <code>/play qo‘shiq nomi</code>, YouTube/SoundCloud havolasi yoki audio faylga reply + <code>/play</code>. '+
-      'Boshqaruv: <code>/pause /resume /skip /end /queue</code> (so‘ragan odam yoki adminlar). Trek ko‘pi bilan '+S.max_min+' daqiqa.</div>';
+      '🎬 Video (faqat adminlar): video faylga reply + <code>/vplay</code> yoki <code>/vplay nomi|YouTube havola</code> (YouTube uchun YTDLP_COOKIES). '+
+      'Bir vaqtda ko‘pi bilan '+S.video_max+' guruhda video (hozir: '+S.videos+'). '+
+      'Boshqaruv: <code>/pause /resume /skip /end /queue</code>, tugmalarda ⏪⏩ va 🎚 sifat (so‘ragan odam yoki adminlar). Trek ko‘pi bilan '+S.max_min+' daqiqa.</div>';
     box.innerHTML=h;
     const q=x=>box.querySelector(x), on=(x,f)=>{ const e=q(x); if(e) e.onclick=f; };
     on('#muSend',()=>call('send_code',{phone:q('#muPh').value.trim()}));
@@ -30686,6 +30902,7 @@ def main():
         (["help", "yordam"], cmd_help),
         (["lang"], cmd_lang),
         (["play"], cmd_play),
+        (["vplay", "video"], cmd_vplay),
         (["skip", "next", "pause", "resume", "end", "mstop", "queue", "navbat"], cmd_music_ctl),
     ]
     # Buyruqlar / belgisidan tashqari . va ! bilan ham ishlaydi (Group Help uslubi): .admin .del .mute ...
@@ -30745,7 +30962,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_sticker_pack, pattern=r"^stk:[gu]:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_crash, pattern=r"^cr:"))
     app.add_handler(CallbackQueryHandler(cb_utag, pattern=r"^ut:\d+:(m|p|buy|ok|card)$"))
-    app.add_handler(CallbackQueryHandler(cb_music, pattern=r"^mu:(pause|resume|skip|end|q)$"))
+    app.add_handler(CallbackQueryHandler(cb_music, pattern=r"^mu:(pause|resume|skip|end|q|back|fwd|vq)$"))
     app.add_handler(CallbackQueryHandler(cb_noop))
     # 📋 Shaxsiy chat pastki menyusi (ReplyKeyboard) — aniq tugma matnlari mavjud handlerlarga
     app.add_handler(MessageHandler(filters.Text(list(PRIVATE_MENU_MAP)) & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE,

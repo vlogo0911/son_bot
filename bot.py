@@ -22195,7 +22195,29 @@ async def on_private_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Boshqaruv (/skip /pause /resume /end, tugmalar `mu:<amal>`): so'ragan odam, guruh adminlari, bot egalari.
 # Server talabi: ffmpeg + ffprobe (Railway: nixpacks.toml / railpack.json), env TG_API_ID/TG_API_HASH/USERBOT_SESSION_KEY.
 MUSIC_DEVICE = "Empire Music"
-MUSIC_DIR = os.path.join(VOLUME_PATH or BASE_DIR, "music_cache")
+MUSIC_DIR_OLD = os.path.join(VOLUME_PATH or BASE_DIR, "music_cache")
+
+
+def _music_pick_dir():
+    """Musiqa/video fayllari vaqtinchalik — bazaning volume'ini to'ldirmasligi uchun avval konteynerning /tmp diski.
+    env MUSIC_DIR ustun; aks holda /tmp va volume'dan bo'sh joyi ko'progi."""
+    if os.getenv("MUSIC_DIR"):
+        return os.getenv("MUSIC_DIR")
+    import shutil
+    import tempfile
+    best, bf = None, -1
+    for d in (os.path.join(tempfile.gettempdir(), "empire_music"), MUSIC_DIR_OLD):
+        try:
+            os.makedirs(d, exist_ok=True)
+            f = shutil.disk_usage(d).free
+        except OSError:
+            continue
+        if f > bf:
+            best, bf = d, f
+    return best or MUSIC_DIR_OLD
+
+
+MUSIC_DIR = _music_pick_dir()
 MUSIC_MAX_DUR = _env_int("MUSIC_MAX_DURATION", 1800)       # bitta trek ko'pi bilan (s)
 MUSIC_FILE_MAX = 60 * 1024 * 1024
 MUSIC_CACHE_MAX = 800 * 1024 * 1024                        # kesh hajmi — oshsa eski fayllar o'chadi
@@ -22210,7 +22232,7 @@ VIDEO_FILE_MAX = _env_int("VIDEO_FILE_MAX_MB", 1024) * 1024 * 1024    # Telegram
 VIDEO_MAX_CHATS = _env_int("VIDEO_MAX_CHATS", 2)
 VIDEO_QUALITIES = (360, 480, 720)
 VIDEO_QUALITY = _env_int("VIDEO_QUALITY", 480) if _env_int("VIDEO_QUALITY", 480) in (360, 480, 720) else 480
-VIDEO_DISK_RESERVE = 300 * 1024 * 1024
+VIDEO_DISK_RESERVE = 150 * 1024 * 1024          # diskda doim shuncha bo'sh qoladi (baza va boshqalar uchun)
 MUSIC_SEEK = 30
 MUSIC_ACTS = ("state", "send_code", "resend", "code", "password", "cancel", "logout", "reconnect")
 _MUSIC = {"client": None, "calls": None, "me": None, "err": "", "lock": None}
@@ -22345,13 +22367,25 @@ def music_clear(chat_id):
 
 
 def music_cleanup_videos():
-    """Ishga tushganda: oldingi sessiyadan qolgan video fayllar o'chadi."""
+    """Ishga tushganda: oldingi sessiyadan qolgan video fayllar va (kesh /tmp'ga ko'chgan bo'lsa) volume'dagi eski musiqa keshi o'chadi."""
+    for d in {MUSIC_DIR, MUSIC_DIR_OLD}:
+        try:
+            for e in os.scandir(d):
+                if e.is_file() and (e.name.startswith("V_") or e.name.endswith(".part") or
+                                    (d == MUSIC_DIR_OLD != MUSIC_DIR and not e.name.startswith("."))):
+                    os.remove(e.path)
+        except OSError:
+            pass
+
+
+def music_free():
+    """MUSIC_DIR diskidagi bo'sh joy (bayt)."""
+    import shutil
     try:
-        for e in os.scandir(MUSIC_DIR):
-            if e.is_file() and e.name.startswith("V_"):
-                os.remove(e.path)
+        os.makedirs(MUSIC_DIR, exist_ok=True)
+        return shutil.disk_usage(MUSIC_DIR).free
     except OSError:
-        pass
+        return 1 << 40
 
 
 # ── 🔎 Manba: yt-dlp (qidiruv/havola) ──
@@ -22393,14 +22427,16 @@ def music_cache_trim():
         return
     busy = {t.get("file") for q in MUSIC_Q.values() for t in ([q.get("now")] + q.get("queue", [])) if t}
     total = sum(s for _m, s, _p in files)
+    free = music_free()
     for _m, s, p in sorted(files):
-        if total <= MUSIC_CACHE_MAX:
+        if total <= MUSIC_CACHE_MAX and free > VIDEO_DISK_RESERVE * 2:   # disk to'lib qolmasin
             break
         if p in busy:
             continue
         try:
             os.remove(p)
             total -= s
+            free += s
         except OSError:
             pass
 
@@ -22429,7 +22465,8 @@ def _music_fetch_sync(query, video=False):
             "restrictfilenames": True, "noprogress": True, "cachedir": False}
     if video:
         h = VIDEO_QUALITY
-        opts.update(format=f"bv*[height<={h}]+ba/b[height<={h}]/b", merge_output_format="mp4", max_filesize=VIDEO_FILE_MAX,
+        opts.update(format=f"bv*[height<={h}]+ba/b[height<={h}]/b", merge_output_format="mp4",
+                    max_filesize=max(20 * 1024 * 1024, min(VIDEO_FILE_MAX, music_free() - VIDEO_DISK_RESERVE)),
                     outtmpl=os.path.join(MUSIC_DIR, f"V_%(extractor_key)s_%(id)s_{h}.%(ext)s"))
     ck = _music_cookiefile()
     if ck:
@@ -22819,12 +22856,16 @@ def _video_of(m):
 
 
 def music_disk_ok(need):
-    import shutil
-    try:
-        os.makedirs(MUSIC_DIR, exist_ok=True)
-        return shutil.disk_usage(MUSIC_DIR).free - VIDEO_DISK_RESERVE > need
-    except OSError:
+    if music_free() - VIDEO_DISK_RESERVE > need:
         return True
+    music_cache_trim()                    # avval eski audio keshni bo'shatib ko'ramiz
+    return music_free() - VIDEO_DISK_RESERVE > need
+
+
+def music_disk_text(need=0):
+    mb = lambda b: max(0, b) // (1024 * 1024)  # noqa: E731
+    return (f"💽 Serverda joy yetarli emas: bo'sh {mb(music_free() - VIDEO_DISK_RESERVE)} MB"
+            + (f", kerak ~{mb(need)} MB" if need else "") + ". Kichikroq video tanlang yoki keyinroq urinib ko'ring.")
 
 
 async def music_video_from_tg(bot, chat_id, rep, wait):
@@ -22838,7 +22879,7 @@ async def music_video_from_tg(bot, chat_id, rep, wait):
     if dur > VIDEO_MAX_DUR:
         return None, "vlong"
     if not music_disk_ok(size):
-        return None, "disk"
+        return None, "disk:" + str(size)
     err = await music_join(bot, chat_id)              # yordamchi xabarni ko'rishi uchun guruhda bo'lishi kerak
     if err:
         return None, err
@@ -22899,8 +22940,8 @@ async def cmd_vplay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if has_video:
             track, err = await asyncio.wait_for(music_video_from_tg(context.bot, chat.id, rep, wait), timeout=1800)
         else:
-            if not music_disk_ok(VIDEO_FILE_MAX // 2):
-                track, err = None, "disk"
+            if not music_disk_ok(50 * 1024 * 1024):
+                track, err = None, "disk:" + str(50 * 1024 * 1024)
             else:
                 track, err = await asyncio.wait_for(asyncio.to_thread(_music_fetch_sync, query, True), timeout=900)
     except asyncio.TimeoutError:
@@ -22909,7 +22950,10 @@ async def cmd_vplay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Video manba: %s", type(e).__name__)
         track, err = None, "vdownload"
     if track is None:
-        await _music_edit(wait, MUSIC_ERR.get("vdownload" if err == "download" else err, err))
+        if str(err).startswith("disk"):
+            await _music_edit(wait, music_disk_text(int(err.split(":")[1]) if ":" in err else 0))
+        else:
+            await _music_edit(wait, MUSIC_ERR.get("vdownload" if err == "download" else err, err))
         return
     track.update(by=user.id, by_name=user.full_name[:64])
     await music_enqueue(context.bot, chat.id, track, wait, joined=has_video)
@@ -23051,6 +23095,7 @@ def music_state():
             "online": online, "err": _MUSIC.get("err") or "", "api": ub_api_ready(), "key": ub_crypto_ready(),
             "lib": music_lib_ok(), "ffmpeg": music_ffmpeg_ok(), "cookies": bool(MUSIC_COOKIES),
             "chats": len(MUSIC_Q), "max_min": MUSIC_MAX_DUR // 60, "video_max": VIDEO_MAX_CHATS,
+            "disk_free_mb": music_free() // (1024 * 1024), "disk_tmp": not MUSIC_DIR.startswith(VOLUME_PATH or "\0"),
             "videos": sum(1 for x in MUSIC_Q.values() if (x.get("now") or {}).get("video"))}
 
 
@@ -29293,7 +29338,7 @@ function musicAdmin(){
     let h='<div class="lbl">🎵 Musiqa yordamchisi</div>'+
       '<div class="chips"><span class="chip">'+(S.lib?'✅':'❌')+' kutubxonalar</span><span class="chip">'+(S.ffmpeg?'✅':'❌')+' ffmpeg</span>'+
       '<span class="chip">'+(S.api&&S.key?'✅':'❌')+' API/kalit</span><span class="chip">🍪 cookies: '+(S.cookies?'bor':'yo‘q')+'</span>'+
-      '<span class="chip">🔊 Faol guruhlar: '+S.chats+'</span></div>';
+      '<span class="chip">🔊 Faol guruhlar: '+S.chats+'</span><span class="chip">💽 Bo‘sh: '+S.disk_free_mb+' MB ('+(S.disk_tmp?'vaqtinchalik disk':'volume')+')</span></div>';
     if(S.connected){
       h+='<div class="chips" style="margin-top:8px"><span class="chip">'+(S.online?'🟢':'⚪')+' '+esc(me.name||'')+(me.username?' @'+esc(me.username):'')+' · <code>'+me.id+'</code></span></div>'+
         (S.online?'':'<div class="hsub">Ulanmagan'+(S.err?' ('+esc(S.err)+')':'')+'.</div>')+

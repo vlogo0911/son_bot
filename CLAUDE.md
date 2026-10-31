@@ -532,3 +532,12 @@
   (`cmd_music_ctl`) va tugmalar `mu:pause|resume|skip|end|q` (`cb_music`) — so'ragan odam, guruh adminlari, bot egalari.
   Server: ffmpeg+ffprobe (`nixpacks.toml` / `railpack.json`), `deno` (yt-dlp YouTube JS), ixtiyoriy env `YTDLP_COOKIES` (cookies.txt matni —
   datacenter IP'da YouTube "bot emasligini tasdiqlang" deydi; cookies'siz SoundCloud ishlaydi).
+- 🎬 Video (/vplay, `/video`; o'sha 🎵 MUSIQA bloki va yordamchi akkaunt): FAQAT guruh adminlari / bot egalari. Video faylga reply (`_video_of`:
+  video/video_note/animation/document video/*) → `music_video_from_tg`: yordamchi guruhga qo'shiladi va Telethon `download_media` bilan yuklaydi
+  (Bot API 20 MB cheklovisiz, `VIDEO_FILE_MAX_MB` 1024, foiz progress, `music_disk_ok` — bo'sh joy). `/vplay nomi|havola` → `_music_fetch_sync(q, video=True)`
+  (faqat YouTube ≤`VIDEO_QUALITY` p, mp4 merge; SoundCloud zaxirasi yo'q → cookies kerak bo'lishi mumkin). Trek `video: True`, fayllar `V_*` —
+  keshlanmaydi: `music_discard` (o'tkazish/tugash/to'xtatishda o'chadi), ishga tushganda `music_cleanup_videos`. Bir vaqtda `VIDEO_MAX_CHATS` 2
+  guruhda (`music_video_busy`), uzunlik `VIDEO_MAX_DURATION` 3 soat. Video trek tugashi VIDEO StreamEnded bo'yicha (audio — AUDIO), qayta
+  boshlangandan 2 s ichidagi tugash e'tiborsiz. Pozitsiya `music_pos` (off/at/pos_p, server soati); ⏪/⏩ `MUSIC_SEEK` 30 s va 🎚 sifat
+  (`VIDEO_QUALITIES` 360/480/720, `q["vq"]`) — `music_start_track(offset)` ffmpeg `-ss` bilan qayta boshlaydi (tugmalar `mu:back|fwd|vq`).
+  Umumiy navbat `music_enqueue` (🎵/🎬 aralash).

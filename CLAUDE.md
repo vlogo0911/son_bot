@@ -499,3 +499,23 @@
   (narx ≤ approved) → sendStarsForm (InputInvoiceStarGiftResale) → delivered/sold; xato → reserved=0 + `market_refund` + ownerlarga
   xabar; tarmoq uzilishi (noaniq) → `failed`, qaytarilmaydi, owner navbatda hal qiladi. Jurnal `nft_resale_log`. Userbot ulanmagan bo'lsa
   resale "Sotuvda yo'q" (offline), qo'lda NFT'lar ishlayveradi. Payload: `nft` ichida `rs`/`state`; ownerga `admin.ub`, `admin.rs`.
+- 🔐 Umumiy userbot login (NFT owner + UTag): `ub_login(store, uid, act, body, expect_id, device)` — act send_code/resend/code/password/cancel;
+  `ub_norm_phone` (bo'shliq/nuqta/chiziqcha/qavs, unicode raqamlar, `00<cc>`→`+<cc>`, E.164 8–15 raqam; mamlakat kodisiz → `phone_local`,
+  +998 hech qachon taxmin qilinmaydi; `UB_PHONE_HINT`), `ub_norm_code` (5–6 raqam, bo'shliq/chiziqcha), `ub_err_info` → (kod, flood soniyasi):
+  phone_invalid/phone_banned/phone_unoccupied/flood/api_id_invalid/send_code_unavailable/email_setup/code/code_expired/password;
+  `ub_sent_info` (delivery app/sms/call/flash_call/missed_call/email/fragment_sms/firebase + len + next) → UI ko'rsatma (`UBDLV`/`ubDeliveryHint`),
+  `next` bo'lsa "qayta yuborish" (`auth.resendCode`, act `resend`/`ub_resend`); `ub_call_migrate` — PhoneMigrate/NetworkMigrate'da DC almashtirib 1 marta qayta;
+  `ub_log_err` — logga faqat klass + RPC xabari. JS xatolari `UBERR`/`ubErr`. NFT login (`nft_ub_login`) shu helper ustida.
+- 🏷 UTag (o'z akkauntidan guruhda hammani belgilash; kod bloki `# ── 🏷 UTAG` … `/UTAG`): ulanish FAQAT web app'da (`#s-utag`, `/app#utag`,
+  Profil'dagi `.utc` karta; rozilik checkbox + ogohlantirish) — `/app/api/utag/{state,send_code,resend,code,password,cancel,logout,speed,buy}` →
+  `web_utag` (`ub_login`, expect_id = o'zi, `UTAG_LOGIN_RATE`), sessiya `utag_accounts` da shifrlangan. Obuna `UTAG_PRICE_DIAMONDS` 10 💎 /
+  `UTAG_DAYS` 30 kun (`utag_subs`, faol bo'lsa uzayadi): `utag_buy` → Empire `POST /exchange/debit_asset` {txid,user_id,asset:"diamond",amount,reason:"utag",ts}
+  (X-Signature HMAC); `utag_record` (atomik, bir marta) yiqilsa `/exchange/refund_asset` {txid,orig_txid,...}; tarmoq/5xx → pending, `utag_worker`
+  (30 s) o'sha txid bilan qayta (`utag_payments`, `UTAG_PAY_MAX_RETRY` → stuck + owner log). Tinglovchi: `utag_ensure_client` (Telethon updates=True,
+  `NewMessage(outgoing=True)`, maks `UTAG_MAX_CLIENTS` 300) → `utag_on_message`: guruhda `.tag <matn>` (buyruq o'chadi, `utag_strip_command` — entitylar
+  UTF-16 bo'yicha siljiydi, premium/custom emoji saqlanadi; `utag_build` + `InputMessageEntityMentionName`), a'zolar bot/deleted/o'zi'siz ≤300,
+  guruhda `UTAG_GROUP_COOLDOWN` 60 s, oraliq `utag_speed` 0.3–1.5 (`utag_settings`, standart 0.7), FloodWait ≤60 s kutadi, uzunroq → to'xtab bot xabari;
+  `.stop`, obuna tugashi (`utag_tick`), uzish yurishni to'xtatadi. Bot: `utag_card`/`cb_utag` (`ut:<uid>:m|p|buy|ok|card`), `?start=utag`. Payload `utag`.
+- 📋 Shaxsiy chat pastki menyusi: `/start` va `/emps` (shaxsiyda) doimiy `private_menu_kb()` (ReplyKeyboard, `PRIVATE_MENU`): Profil/Oila/Farzandlarim/
+  Banklar/Birja/Almashuv/Do'kon/Reyting/Missiyalar/O'yinlar (guruh o'yinlari ro'yxati + guruhga qo'shish)/🏷 UTag/Ilova/Guruhga qo'shish/Til/Yordam →
+  `on_private_menu` (`filters.Text(PRIVATE_MENU_MAP)`, career_private_text'dan oldin) mavjud handlerlarga yo'naltiradi. Guruhlar o'zgarmagan.

@@ -21407,7 +21407,28 @@ UTAG_PAY_MAX_RETRY = 60
 UTAG_HTTP_TIMEOUT = 8
 UTAG_MAX_TEXT = 3800              # .tag matni (UTF-16 birlik) — ism bilan 4096 dan oshmasin
 UTAG_DEVICE = "Empire UTag"
-UTAG_CMD_RE = re.compile(r"^\.(tag|stop)(?=\s|$)", re.I)
+UTAG_CMD_RE = re.compile(r"^\.(tags|tag|stop)(?=\s|$)", re.I)
+# .tags — har a'zo mention'i yoniga tasodifiy hazil gap qo'shiladi (ketma-ket takrorlanmaydi)
+UTAG_PHRASES = (
+    "Sen hammasini biladiganga o‘xshaysan.", "Bir oz jim tur, gapni tushunaylik.", "Ha, endi qiziq joyiga keldik.",
+    "Sen nima desang ham, baribir kulaman.", "Bunaqa paytda nima deyishni ham bilmay qolasan.", "O‘zi sen bilan zerikib bo‘lmaydi.",
+    "Meni ham chaqirsang bo‘lardi-ku.", "E, gaplaringga qoyil!", "Hozir bir narsani eslab kulib yubordim.",
+    "Sen o‘zing ham bunga ishonasanmi?", "Mayli, bu safar sendan o‘tdi.", "Menga qarshi chiqmoqchimisan? 😂",
+    "Hali ko‘rasan, men ham javob qaytaraman.", "Sen bilan alohida gaplashish kerak ekan.", "Nima desam ekan, hayronman.",
+    "Ha, mayli, seni tushundim.", "Bitta kuldirib qo‘ysang-chi endi.", "Xo‘sh, endi navbat senda, gapir!",
+)
+
+
+def utag_phrase_seq(n):
+    """n ta gap: aralashtirilgan ro'yxatdan navbat bilan, bloklar chegarasida ham ketma-ket takrorlanmaydi."""
+    out = []
+    while len(out) < n:
+        block = list(UTAG_PHRASES)
+        random.shuffle(block)
+        if out and block[0] == out[-1]:
+            block[0], block[-1] = block[-1], block[0]
+        out.extend(block)
+    return out[:n]
 UTAG_FATAL = {"ChatWriteForbiddenError", "ChatAdminRequiredError", "ChannelPrivateError", "UserBannedInChannelError",
               "ChatRestrictedError", "ChatSendPlainForbiddenError", "ChatGuestSendForbiddenError", "AuthKeyUnregisteredError",
               "SessionRevokedError", "UserDeactivatedError", "UserDeactivatedBanError"}
@@ -21674,7 +21695,7 @@ def utag_strip_command(text, entities):
     """'.tag <matn>' → (matn, entitylar) — offsetlar UTF-16 bo'yicha siljitiladi, chegaradan chiqqanlari kesiladi."""
     import copy
     text = str(text or "")
-    m = re.match(r"^\.tag[^\S\n]*\n?", text, re.I)
+    m = re.match(r"^\.tags?[^\S\n]*\n?", text, re.I)
     start = m.end() if m else 0
     payload = text[start:].rstrip()
     s16, l16 = u16len(text[:start]), u16len(payload)
@@ -21699,14 +21720,14 @@ def utag_member_name(p):
     return name or "👤"
 
 
-def utag_build(payload, ents, p):
-    """Bitta a'zo uchun xabar: matn (+ yangi qator) + ism, ismga InputMessageEntityMentionName (UTF-16 offset)."""
+def utag_build(payload, ents, p, tail=""):
+    """Bitta a'zo uchun xabar: matn (+ yangi qator) + ism (+ " " + gap — .tags), ismga InputMessageEntityMentionName (UTF-16 offset)."""
     tl = ub_tl()
     name = utag_member_name(p)
     head = payload + ("\n" if payload else "")
     mention = tl.MentionName(offset=u16len(head), length=u16len(name),
                              user_id=tl.InputUser(user_id=int(p.id), access_hash=int(getattr(p, "access_hash", 0) or 0)))
-    return head + name, list(ents) + [mention]
+    return head + name + (" " + tail if tail else ""), list(ents) + [mention]
 
 
 async def utag_fix_entities(cl, ents):
@@ -21763,7 +21784,7 @@ UTAG_END_TEXT = {
 }
 
 
-async def utag_run(uid, run, chat, payload, ents, me_id):
+async def utag_run(uid, run, chat, payload, ents, me_id, phrases=False):
     cl = run["cl"]
     sent, errs, wait, reason = 0, 0, 0, "done"
     try:
@@ -21775,12 +21796,13 @@ async def utag_run(uid, run, chat, payload, ents, me_id):
             members.append(p)
             if len(members) >= UTAG_MAX_MEMBERS:
                 break
-        for p in members:
+        tails = utag_phrase_seq(len(members)) if phrases else [""] * len(members)
+        for p, tail in zip(members, tails):
             why = utag_stop_reason(uid, run)
             if why:
                 reason = why
                 break
-            text, e2 = utag_build(payload, ents, p)
+            text, e2 = utag_build(payload, ents, p, tail)
             for attempt in (0, 1):
                 try:
                     await cl.send_message(chat, text, formatting_entities=e2, link_preview=False)
@@ -21878,7 +21900,7 @@ async def utag_on_message(uid, event):
     UTAG_LAST[(uid, chat_id)] = now
     run = {"chat": chat_id, "stop": False, "cl": info["client"]}
     UTAG_RUNS[uid] = run
-    run["task"] = asyncio.get_running_loop().create_task(utag_run(uid, run, chat, payload, ents, info["me_id"]))
+    run["task"] = asyncio.get_running_loop().create_task(utag_run(uid, run, chat, payload, ents, info["me_id"], phrases=cmd == "tags"))
 
 
 def utag_stop_runs(uid, why="stop"):
@@ -22068,7 +22090,8 @@ async def utag_save_login(uid, cl, me):
 
 # ── 🤖 Bot: 🏷 UTag sozlamalar kartasi (ut:<uid>:<amal>) ──
 UTAG_HELP = ("ℹ️ <b>Foydalanish:</b> guruhda o'z akkauntingizdan <code>.tag so'z</code> yozing — buyruq o'chadi va har bir a'zo "
-             f"alohida xabarda belgilanadi (ko'pi bilan {UTAG_MAX_MEMBERS} ta). To'xtatish: <code>.stop</code>.\n"
+             f"alohida xabarda belgilanadi (ko'pi bilan {UTAG_MAX_MEMBERS} ta). <code>.tags so'z</code> — har bir ism yoniga "
+             "kulgili gap qo'shiladi. To'xtatish: <code>.stop</code>.\n"
              "⚠️ Kichik kutish vaqti Telegram cheklovlari (spam) xavfini oshiradi.")
 
 
@@ -26661,6 +26684,7 @@ WEBAPP_HTML = r"""<!doctype html>
   .utc{display:flex;align-items:center;gap:12px;margin-top:12px;cursor:pointer}.utc .uti{font-size:30px}
   .utbox .lbl{margin-top:4px}.utrow{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
   .utrow input[type=tel],.utrow input[type=text],.utrow input[type=password]{flex:1;min-width:150px;padding:11px 12px;border-radius:12px;border:1px solid rgba(255,210,74,.25);background:#120f1e;color:var(--txt);font-size:15px}
+  .utguide{margin:6px 0 8px;padding-left:20px;font-size:13px;line-height:1.5;color:var(--txt)}.utguide li{margin:3px 0}.utguide code{color:#ffd24a}
   .utwarn{margin-top:10px;padding:10px 12px;border-radius:12px;background:rgba(255,107,107,.09);border:1px solid rgba(255,107,107,.3);color:#ffc2c2;font-size:12.5px;line-height:1.45}
   .uthint{margin-top:8px;padding:8px 10px;border-radius:10px;background:rgba(255,210,74,.08);color:#ffe7a8;font-size:12.5px}
   .utcons{display:flex;gap:10px;align-items:flex-start;margin-top:10px;font-size:13px;line-height:1.4}.utcons input{margin-top:3px;width:18px;height:18px;flex:none}
@@ -30798,7 +30822,7 @@ function utagPage(d){
     let h='<div class="lbl">👤 Akkaunt</div>';
     if(u.connected){ const me=u.me||{};
       h+='<div class="chips"><span class="chip">'+(u.online?'🟢':'⚪')+' '+esc(me.name||'')+(me.username?' @'+esc(me.username):'')+'</span>'+(u.running?'<span class="chip">⏳ Belgilash ketmoqda</span>':'')+'</div>'+
-        '<div class="hsub" style="margin-top:6px">'+(u.online?'Tinglanmoqda — guruhda <code>.tag so‘z</code> yozing.':(s.active?'Ulanmoqda…':'Obuna faol bo‘lganda ishlaydi.'))+'</div>'+
+        '<div class="hsub" style="margin-top:6px">'+(u.online?'Tinglanmoqda — guruhda <code>.tag</code> yoki <code>.tags</code> yozing.':(s.active?'Ulanmoqda…':'Obuna faol bo‘lganda ishlaydi.'))+'</div>'+
         '<button class="btn full" id="utOut" style="margin-top:10px">🔌 Uzish</button>';
     } else if(L&&(L.step==='code'||L.step==='password')){
       h+='<div class="hsub">'+esc(L.phone||'')+' — '+(L.step==='code'?esc(ubDeliveryHint(L)):'2FA (bulutli parol) yoqilgan — parolni kiriting')+'</div>'+
@@ -30808,7 +30832,7 @@ function utagPage(d){
         (L.step==='code'&&L.next?'<div class="chips"><span class="chip" id="utRs" style="cursor:pointer">'+esc(UBNEXT[L.next]||'🔁 Kodni qayta yuborish')+'</span></div>':'');
     } else {
       h+='<div class="hsub">Ulanmagan. O‘zingizning Telegram akkauntingizni ulang (web app ochilgan akkaunt).</div>'+
-        '<div class="utwarn">⚠️ Ulanganda bot akkauntingizga kirish huquqini oladi (sessiya shifrlangan holda saqlanadi) va faqat siz guruhda yozgan <code>.tag</code> / <code>.stop</code> buyruqlarini bajaradi. '+
+        '<div class="utwarn">⚠️ Ulanganda bot akkauntingizga kirish huquqini oladi (sessiya shifrlangan holda saqlanadi) va faqat siz guruhda yozgan <code>.tag</code> / <code>.tags</code> / <code>.stop</code> buyruqlarini bajaradi. '+
         'Ko‘p belgilash Telegram tomonidan spam deb cheklanishi (vaqtincha yozish taqiqi) mumkin — javobgarlik sizda. Istalgan payt “🔌 Uzish” bilan sessiyani bekor qilasiz.</div>'+
         '<label class="utcons"><input type="checkbox" id="utOk"><span>Roziman: akkauntimga kirish va mening nomimdan xabar yuborishga ruxsat beraman.</span></label>'+
         '<div class="utrow"><input id="utPh" type="tel" inputmode="tel" maxlength="32" placeholder="+7… / +1… / +44… / +998…"><button class="btn go" id="utSend"'+(u.api&&u.key?'':' disabled')+'>📲 Kod yuborish</button></div>'+
@@ -30821,7 +30845,14 @@ function utagPage(d){
     h+='<div class="lbl" style="margin-top:16px">💎 Obuna</div>'+
       '<div class="hsub">'+(s.active?'✅ '+esc(s.until)+' gacha ('+esc(s.left)+' qoldi)':'Yo‘q')+(u.pending?' · ⏳ to‘lov tekshirilmoqda':'')+'</div>'+
       '<button class="btn go full" id="utBuy" style="margin-top:10px"'+(u.bridge?'':' disabled')+'>💎 '+(s.active?'Uzaytirish':'Obuna olish')+' — '+u.price+' olmos / '+u.days+' kun</button>';
-    h+='<div class="lbl" style="margin-top:16px">ℹ️ Foydalanish</div><div class="hsub">Guruhda o‘z akkauntingizdan <code>.tag so‘z</code> yozing — buyruq o‘chadi va har bir a’zo alohida xabarda belgilanadi (ko‘pi bilan '+u.max_members+' ta, bir guruhda '+u.cooldown+' s da bir marta). Emoji, premium emoji va formatlash saqlanadi. To‘xtatish: <code>.stop</code>.</div>';
+    h+='<div class="lbl" style="margin-top:16px">📖 Qisqa yo‘riqnoma</div><ol class="utguide">'+
+      '<li><b>Ulash:</b> rozilikni belgilang → raqamingiz → Telegram’ga kelgan kod (2FA bo‘lsa parol).</li>'+
+      '<li><b>Obuna:</b> “💎 Obuna olish” — Empire Mafia olmosidan yechiladi, '+u.days+' kun ishlaydi.</li>'+
+      '<li><b>Tezlik:</b> ➖/➕ — har bir a’zo orasidagi kutish ('+u.min+'–'+u.max+' s). 1 s atrofi xavfsizroq.</li>'+
+      '<li><b>Oddiy tag:</b> guruhda o‘z akkauntingizdan <code>.tag Hamma kelsin!</code> — buyruq o‘chadi, har bir a’zo alohida xabarda matn bilan belgilanadi.</li>'+
+      '<li><b>Hazil tag:</b> <code>.tags</code> yoki <code>.tags matn</code> — har bir ism yoniga tasodifiy kulgili gap qo‘shiladi (masalan: “Ali Meni ham chaqirsang bo‘lardi-ku.”).</li>'+
+      '<li><b>To‘xtatish:</b> <code>.stop</code>.</li></ol>'+
+      '<div class="hsub">Ko‘pi bilan '+u.max_members+' a’zo, bir guruhda '+u.cooldown+' s da bir marta. Emoji, premium emoji va formatlash saqlanadi. Botlar va o‘chirilgan akkauntlar belgilanmaydi.</div>';
     box.innerHTML=h;
     const q=x=>box.querySelector(x), on=(x,f)=>{ const e=q(x); if(e) e.onclick=f; };
     on('#utSend',()=>{ if(!q('#utOk').checked){ toast(UTERR.consent); return; } call('send_code',{phone:q('#utPh').value.trim(),consent:1}); });

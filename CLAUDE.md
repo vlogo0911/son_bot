@@ -542,3 +542,6 @@
   boshlangandan 2 s ichidagi tugash e'tiborsiz. Pozitsiya `music_pos` (off/at/pos_p, server soati); ⏪/⏩ `MUSIC_SEEK` 30 s va 🎚 sifat
   (`VIDEO_QUALITIES` 360/480/720, `q["vq"]`) — `music_start_track(offset)` ffmpeg `-ss` bilan qayta boshlaydi (tugmalar `mu:back|fwd|vq`).
   Umumiy navbat `music_enqueue` (🎵/🎬 aralash).
+- 🏷 UTag `.tags [matn]` (`UTAG_CMD_RE` tags|tag|stop): `.tag` bilan bir xil, lekin har bir mention yoniga `UTAG_PHRASES` (18 ta hazil gap)
+  dan biri qo'shiladi — `utag_phrase_seq` (aralashtirilgan bloklar, ketma-ket takrorlanmaydi), `utag_build(..., tail)`, `utag_run(phrases=True)`.
+  Web app UTag bo'limida "📖 Qisqa yo'riqnoma" (`.utguide`), bot kartasida `UTAG_HELP` ham `.tags` ni aytadi.

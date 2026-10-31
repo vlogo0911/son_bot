@@ -22369,11 +22369,17 @@ def _music_cookiefile():
     if not MUSIC_COOKIES:
         return None
     p = os.path.join(MUSIC_DIR, ".cookies.txt")
+    mark = p + ".sha"
+    h = hashlib.sha256(MUSIC_COOKIES.encode()).hexdigest()
     try:
-        if not os.path.exists(p):
+        os.makedirs(MUSIC_DIR, exist_ok=True)
+        old = open(mark).read().strip() if os.path.exists(mark) else ""
+        if not os.path.exists(p) or old != h:     # env yangilansa — qayta yoziladi (yt-dlp yangilagan fayl esa saqlanadi)
             with open(p, "w", encoding="utf-8") as f:
                 f.write(MUSIC_COOKIES.replace("\\n", "\n") + "\n")
             os.chmod(p, 0o600)
+            with open(mark, "w") as f:
+                f.write(h)
         return p
     except OSError:
         return None

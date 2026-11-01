@@ -545,3 +545,5 @@
 - 🏷 UTag `.tags [matn]` (`UTAG_CMD_RE` tags|tag|stop): `.tag` bilan bir xil, lekin har bir mention yoniga `UTAG_PHRASES` (18 ta hazil gap)
   dan biri qo'shiladi — `utag_phrase_seq` (aralashtirilgan bloklar, ketma-ket takrorlanmaydi), `utag_build(..., tail)`, `utag_run(phrases=True)`.
   Web app UTag bo'limida "📖 Qisqa yo'riqnoma" (`.utguide`), bot kartasida `UTAG_HELP` ham `.tags` ni aytadi.
+- 🎵/🎬 Xabarlar tozaligi: `_music_del(chat, *mids, delay)`; trek boshlanganda uning "➕ Navbatga qo'shildi" xabari (`track["qmsg"]`) o'chadi,
+  `music_leave` (navbat tugashi, /end, ovozli chat yopilishi) "🎵 Hozir…" xabarini va navbatdagilar xabarlarini o'chiradi; "✅ Navbat tugadi" 15 s dan keyin o'chadi.

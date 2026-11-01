@@ -22349,7 +22349,7 @@ async def music_ensure():
                             await music_on_end(int(update.chat_id))
                     elif isinstance(update, ChatUpdate) and update.status & (
                             ChatUpdate.Status.KICKED | ChatUpdate.Status.LEFT_GROUP | ChatUpdate.Status.CLOSED_VOICE_CHAT):
-                        music_clear(int(update.chat_id))
+                        await music_leave(int(update.chat_id))
                 except Exception as e:  # noqa: BLE001
                     ub_log_err("Musiqa update", e)
 
@@ -22690,7 +22690,22 @@ async def music_start_track(bot, chat_id, q, offset=0):
     return "play"
 
 
+async def _music_del(chat_id, *mids, delay=0):
+    """Xabarlarni o'chirish (delay — soniyadan keyin, fonda)."""
+    mids = [m for m in mids if m]
+    if not mids or _EXCHANGE_LOOP_BOT is None:
+        return
+    if delay:
+        await asyncio.sleep(delay)
+    for mid in mids:
+        try:
+            await _EXCHANGE_LOOP_BOT.delete_message(chat_id, mid)
+        except TelegramError:
+            pass
+
+
 async def music_announce(bot, chat_id, q):
+    await _music_del(chat_id, (q.get("now") or {}).pop("qmsg", None))    # "➕ Navbatga qo'shildi" xabari
     old = q.get("msg")
     try:
         m = await bot.send_message(chat_id, music_now_text(q), reply_markup=music_kb(q), disable_web_page_preview=True)
@@ -22705,6 +22720,9 @@ async def music_announce(bot, chat_id, q):
 
 
 async def music_leave(chat_id):
+    """Ijro tugadi/to'xtatildi: "🎵 Hozir…" va navbat xabarlari o'chadi, yordamchi chatdan chiqadi."""
+    q = MUSIC_Q.get(chat_id) or {}
+    await _music_del(chat_id, q.get("msg"), *[t.get("qmsg") for t in q.get("queue", [])])
     music_clear(chat_id)
     calls = _MUSIC.get("calls")
     if calls is not None:
@@ -22741,7 +22759,8 @@ async def music_on_end(chat_id):
         await music_next(_EXCHANGE_LOOP_BOT, chat_id)
         if MUSIC_Q.get(chat_id) is None:
             try:
-                await _EXCHANGE_LOOP_BOT.send_message(chat_id, "✅ Navbat tugadi — yordamchi ovozli chatdan chiqdi.")
+                m = await _EXCHANGE_LOOP_BOT.send_message(chat_id, "✅ Navbat tugadi — yordamchi ovozli chatdan chiqdi.")
+                asyncio.get_running_loop().create_task(_music_del(chat_id, m.message_id, delay=15))
             except TelegramError:
                 pass
 
@@ -22845,6 +22864,7 @@ async def music_enqueue(bot, chat_id, track, wait, joined=False):
                 await _music_edit(wait, MUSIC_ERR["queue"])
                 return
             q["queue"].append(track)
+            track["qmsg"] = getattr(wait, "message_id", None)
             await _music_edit(wait, f"➕ Navbatga qo'shildi (#{len(q['queue'])}): {'🎬' if track.get('video') else '🎵'} "
                                     f"<b>{escape(track['title'])}</b> · ⏱ {music_fmt_dur(track['dur'])}")
             return

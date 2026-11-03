@@ -1480,6 +1480,8 @@ async def _expire(app, chat_id, game, seconds):
 
     if game["type"] == "number":
         text = t(chat_id, "number_timeout", number=game["number"])
+    elif game["type"] == "anagram":
+        text = f"⌛ Anagramma vaqt tugagani uchun yakunlandi. Javob: <b>{escape(str(game.get('word') or '').upper())}</b>"
     elif game["type"] == "croc":
         text = croc_t(chat_id, "timeout", word=escape(str(game.get("word") or ""), quote=False))
     else:
@@ -1515,6 +1517,7 @@ def menu_kb(chat_id):
         [InlineKeyboardButton(t(chat_id, "btn_xo"), callback_data="g:xo")],
         [InlineKeyboardButton(memory_t(chat_id, "btn"), callback_data="g:memory")],
         [InlineKeyboardButton(croc_t(chat_id, "btn"), callback_data="g:croc")],
+        [InlineKeyboardButton("🔤 Anagramma", callback_data="g:anagram")],
         [InlineKeyboardButton(casino_t(chat_id, "btn"), callback_data="g:casino")],
     ])
 
@@ -1948,7 +1951,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chat.type == ChatType.PRIVATE:
         user = update.effective_user
+        was_new = False
         if user and not user.is_bot:
+            _r = db().execute("SELECT started FROM users WHERE user_id=?", (user.id,)).fetchone()
+            was_new = not (_r and _r[0])
             save_user(user)
             mark_started(user.id)
         if not user:
@@ -1956,6 +1962,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_user(user)
         payload = context.args[0] if context.args else ""
+        if payload.startswith("ref_"):
+            await utag_ref_on_start(user.id, payload, was_new)
         if payload and payload.startswith("shop_"):
             if payload == "shop_catalog":
                 await cmd_shop(update, context)
@@ -4624,7 +4632,7 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Majburiy obuna: o'yin boshlash/kirish uchun kanalga a'zo bo'lish shart.
-    if kind in ("number", "rsp", "xo", "memory", "crash", "croc", "frog", "casino"):
+    if kind in ("number", "rsp", "xo", "memory", "crash", "croc", "frog", "casino", "anagram"):
         if await fsub_block_cb(q, context):
             return
 
@@ -4737,6 +4745,9 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
             crash_kb(chat_id, game),
         )
         arm(app, chat_id, game, CRASH_LOBBY_TTL)
+
+    elif kind == "anagram":
+        await anag_start(context, chat_id, user, msg.message_id)
 
     elif kind == "croc":
         game = new_game(
@@ -6333,6 +6344,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if game["type"] == "croc":
         await croc_on_text(update, context, game)
+        return
+    if game["type"] == "anagram":
+        await anag_on_text(update, context, game)
         return
 
     if game["type"] != "number":
@@ -8856,6 +8870,175 @@ async def cb_croc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arm(context.application, chat_id, game, CROC_TTL)
 
 
+# ───────────────────────────── 🔤 Anagramma (faqat guruhda; krokodil kabi — birinchi topgan yutadi) ─────────────────────────────
+ANAG_FILE = os.path.join(BASE_DIR, "anagram_uz.txt")
+ANAG_ROUNDS = 30
+ANAG_XP = 10                 # record(..., "win", points) — reyting/XP
+ANAG_MONEY = 30              # $ hamyonga
+ANAG_TTL = 600               # faolsizlik — o'yin tugaydi
+_ANAG_WORDS = []
+_ANAG_APOS = str.maketrans({"ʻ": "'", "‘": "'", "’": "'", "`": "'", "ʼ": "'", "´": "'"})
+
+
+def anag_words():
+    if not _ANAG_WORDS:
+        seen = set()
+        try:
+            for line in open(ANAG_FILE, encoding="utf-8"):
+                if "|" not in line or line.startswith("#"):
+                    continue
+                w, d = line.rstrip("\n").split("|", 1)
+                w = w.strip().lower().translate(_ANAG_APOS)
+                if " " in w or w in seen or len(anag_units(w)) < 3:
+                    continue
+                seen.add(w)
+                _ANAG_WORDS.append((w, d.strip()))
+        except OSError:
+            logger.warning("Anagramma: %s topilmadi", ANAG_FILE)
+    return _ANAG_WORDS
+
+
+def anag_units(w):
+    """o' va g' — bitta harf."""
+    return re.findall(r"[og]'|[^']", w)
+
+
+def anag_norm(text):
+    return re.sub(r"[^a-z']", "", str(text or "").lower().translate(_ANAG_APOS))
+
+
+def anag_scramble(w):
+    u = anag_units(w)
+    if len(set(u)) < 2:
+        return " ".join(x.upper() for x in u)
+    s = u[:]
+    for _ in range(20):
+        random.shuffle(s)
+        if s != u:
+            break
+    return " ".join(x.upper() for x in s)
+
+
+def anag_next(game):
+    words = anag_words()
+    pool = [i for i in range(len(words)) if i not in game["used"]] or list(range(len(words)))
+    i = random.choice(pool)
+    game["used"].add(i)
+    game["word"], game["def"] = words[i]
+    game["scr"] = anag_scramble(game["word"])
+
+
+def anag_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Javobni ko'rish", callback_data="ag:show"),
+                                  InlineKeyboardButton("To'xtatish", callback_data="ag:stop")]])
+
+
+def anag_text(game):
+    return f"<b>{game['round']}/{ANAG_ROUNDS}</b>\n<b>{escape(game['scr'])}</b>\n<i>{escape(game['def'])}</i>"
+
+
+async def anag_start(context, chat_id, user, msg_id=None):
+    if not anag_words():
+        return False
+    game = new_game(chat_id, "anagram", user.id, round=1, used=set(), word="", scr="", score={}, names={})
+    anag_next(game)
+    if msg_id:
+        await edit(context.bot, chat_id, msg_id, anag_text(game), anag_kb())
+        game["msg_id"] = msg_id
+    else:
+        m = await context.bot.send_message(chat_id, anag_text(game), reply_markup=anag_kb())
+        game["msg_id"] = m.message_id
+    arm(context.application, chat_id, game, ANAG_TTL)
+    return True
+
+
+async def anag_advance(context, chat_id, game, head):
+    """Joriy raund yopiladi (head — natija matni), keyingisi yuboriladi yoki o'yin yakunlanadi."""
+    try:
+        await context.bot.edit_message_reply_markup(chat_id, game["msg_id"], reply_markup=None)
+    except TelegramError:
+        pass
+    if game["round"] >= ANAG_ROUNDS:
+        end_game(chat_id, game)
+        top = sorted(game["score"].items(), key=lambda x: -x[1])[:10]
+        board = "\n".join(f"{i}. {game['names'][u]} — {n} ta" for i, (u, n) in enumerate(top, 1)) or "—"
+        await context.bot.send_message(chat_id, f"{head}\n\n🏁 <b>Anagramma tugadi!</b>\n{board}")
+        return
+    game["round"] += 1
+    anag_next(game)
+    m = await context.bot.send_message(chat_id, f"{head}\n\n{anag_text(game)}", reply_markup=anag_kb())
+    game["msg_id"] = m.message_id
+    arm(context.application, chat_id, game, ANAG_TTL)
+
+
+async def anag_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, game):
+    msg, user = update.effective_message, update.effective_user
+    if not game.get("word") or game.get("busy") or anag_norm(msg.text) != anag_norm(game["word"]):
+        return
+    if await fsub_block_msg(update, context):
+        return
+    game["busy"] = True
+    try:
+        chat_id = msg.chat_id
+        save_user(user)
+        record(chat_id, user.id, "win", ANAG_XP)
+        with db() as c:
+            _wallet_add(c, user.id, ANAG_MONEY)
+        name = uname(user)
+        game["score"][user.id] = game["score"].get(user.id, 0) + 1
+        game["names"][user.id] = name
+        head = (f"✅ {name} topdi: <b>{escape(game['word'].upper())}</b>\n"
+                f"🎁 +{ANAG_XP} XP · +{ANAG_MONEY}$")
+        game["word"] = ""
+        await anag_advance(context, chat_id, game, head)
+    finally:
+        game["busy"] = False
+
+
+async def cb_anagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id = q.message.chat.id
+    game = GAMES.get(chat_id)
+    if not game or game.get("type") != "anagram":
+        await q.answer(t(chat_id, "gone"), show_alert=True)
+        return
+    uid = q.from_user.id
+    if uid != game["owner"] and uid not in CAREER_OWNER_IDS and not await is_admin(context.bot, chat_id, uid):
+        await q.answer("⛔ Faqat o'yinni boshlagan odam yoki adminlar", show_alert=True)
+        return
+    await q.answer()
+    if game.get("busy") or not game.get("word"):
+        return
+    if q.data == "ag:stop":
+        end_game(chat_id, game)
+        await close_game_message(context.bot, chat_id, game, f"⏹ Anagramma to'xtatildi. Javob: <b>{escape(game['word'].upper())}</b>")
+        return
+    game["busy"] = True
+    try:
+        word = game["word"]
+        game["word"] = ""
+        await anag_advance(context, chat_id, game, f"👁 Javob: <b>{escape(word.upper())}</b>")
+    finally:
+        game["busy"] = False
+
+
+async def cmd_anagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat, msg = update.effective_chat, update.effective_message
+    if chat.type == ChatType.PRIVATE:
+        await msg.reply_text("🔤 Anagramma faqat guruhda o'ynaladi.")
+        return
+    if GAMES.get(chat.id):
+        await msg.reply_text(t(chat.id, "busy_alert", game=t(chat.id, "btn_" + GAMES[chat.id]["type"])))
+        return
+    if await fsub_block_msg(update, context):
+        return
+    await anag_start(context, chat.id, update.effective_user)
+
+
+for _code in LANGS:
+    LANGS[_code]["btn_anagram"] = "🔤 Anagramma"
+
+
 async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
 
@@ -8909,7 +9092,7 @@ async def post_init(application: Application):
 
     # Guruh "/" menyusi: o'yin + barcha admin/moderatsiya buyruqlari ko'rinadi.
     group_cmds = [
-        ("emps", "🎮 O‘yin tanlash"), ("settings", "⚙️ Guruh sozlamalari"),
+        ("emps", "🎮 O‘yin tanlash"), ("anagramma", "🔤 Anagramma o‘yini"), ("settings", "⚙️ Guruh sozlamalari"),
         ("aktiv", "📊 Eng faollar"), ("reyting", "🏆 Reyting"),
         ("warn", "⚠️ Ogohlantirish"), ("unwarn", "🧽 Ogohlantirishni olib tashlash"),
         ("warns", "📋 Ogohlantirishlar soni"),
@@ -21395,7 +21578,9 @@ async def nft_admin_action(uid, act, body):
 # ".stop" to'xtatadi. Obuna: 10 💎 (Empire Mafia olmosi) / 30 kun — son_bot → Empire `POST /exchange/debit_asset` (HMAC),
 # yozib bo'lmasa `refund_asset`; tarmoq noaniq bo'lsa pending + `utag_worker` qayta uriniladi (idempotent txid).
 # Sessiya `utag_accounts` da FAQAT shifrlangan (Fernet), payload/logga chiqmaydi.
-UTAG_PRICE_DIAMONDS = 10
+UTAG_PRICE_DIAMONDS = 5
+UTAG_REF_NEED = 3                 # shuncha do'st taklif qilsa —
+UTAG_REF_DAYS = 7                 # shuncha kun bepul UTag
 UTAG_DAYS = 30
 UTAG_SPEED_MIN, UTAG_SPEED_MAX, UTAG_SPEED_DEFAULT = 0.3, 1.5, 0.7
 UTAG_MAX_MEMBERS = 600            # bir yurishda ko'pi bilan
@@ -21452,6 +21637,8 @@ def init_utag(c):
                  status TEXT NOT NULL, refund_txid TEXT, err TEXT, balance INTEGER, retries INTEGER DEFAULT 0,
                  created_at INTEGER, updated_at INTEGER)""")
     c.execute("CREATE INDEX IF NOT EXISTS utag_pay_st ON utag_payments(status)")
+    c.execute("CREATE TABLE IF NOT EXISTS utag_refs(new_uid INTEGER PRIMARY KEY, ref_uid INTEGER NOT NULL, at INTEGER)")
+    c.execute("CREATE INDEX IF NOT EXISTS utag_refs_ref ON utag_refs(ref_uid)")
 
 
 def u16len(s):
@@ -21507,6 +21694,44 @@ def utag_bridge_ready():
     return bool(EXCHANGE_SECRET and EXCHANGE_PARTNER_URL)
 
 
+def utag_ref_count(uid):
+    return db().execute("SELECT COUNT(*) FROM utag_refs WHERE ref_uid=?", (uid,)).fetchone()[0]
+
+
+def utag_ref_link(uid):
+    un = getattr(_EXCHANGE_LOOP_BOT, "username", None) or "empire_statsbot"
+    return f"https://t.me/{un}?start=ref_{uid}"
+
+
+async def utag_ref_on_start(new_uid, payload, was_new):
+    """?start=ref_<id>: botga BIRINCHI marta kirgan odam taklif qiluvchiga sanaladi; har UTAG_REF_NEED tadan +UTAG_REF_DAYS kun UTag."""
+    m = re.fullmatch(r"ref_(\d{1,16})", payload or "")
+    if not m or not was_new:
+        return
+    ref = int(m.group(1))
+    if ref == new_uid:
+        return
+    now = int(time.time())
+    with db() as c:
+        if not c.execute("SELECT 1 FROM users WHERE user_id=? AND started=1", (ref,)).fetchone():
+            return
+        if c.execute("INSERT OR IGNORE INTO utag_refs(new_uid, ref_uid, at) VALUES (?,?,?)", (new_uid, ref, now)).rowcount != 1:
+            return
+        n = c.execute("SELECT COUNT(*) FROM utag_refs WHERE ref_uid=?", (ref,)).fetchone()[0]
+        until = None
+        if n % UTAG_REF_NEED == 0:
+            r = c.execute("SELECT until FROM utag_subs WHERE user_id=?", (ref,)).fetchone()
+            until = max(now, int(r[0] or 0) if r else 0) + UTAG_REF_DAYS * 86400
+            c.execute("INSERT INTO utag_subs(user_id, until, updated_at) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET "
+                      "until=excluded.until, updated_at=excluded.updated_at", (ref, until, now))
+    if until:
+        await utag_notify(ref, f"🎉 <b>UTag</b>: {UTAG_REF_NEED} ta do'stingiz qo'shildi — +{UTAG_REF_DAYS} kun bepul! "
+                               f"Obuna: {tashkent_dt(until)} gacha.")
+    else:
+        await utag_notify(ref, f"👥 <b>UTag referal</b>: yangi do'st qo'shildi ({n % UTAG_REF_NEED}/{UTAG_REF_NEED}). "
+                               f"Yana {UTAG_REF_NEED - n % UTAG_REF_NEED} ta — {UTAG_REF_DAYS} kun bepul UTag.")
+
+
 def utag_payload(uid):
     """Web app uchun (sessiya HECH QACHON kirmaydi)."""
     until = utag_sub_until(uid)
@@ -21520,7 +21745,8 @@ def utag_payload(uid):
             "price": UTAG_PRICE_DIAMONDS, "days": UTAG_DAYS, "pending": bool(pend),
             "login": ub_login_view(_UTAG_LOGIN, uid), "api": ub_api_ready(), "key": ub_crypto_ready(),
             "bridge": utag_bridge_ready(), "online": uid in UTAG_CLIENTS, "running": bool(run),
-            "max_members": UTAG_MAX_MEMBERS, "cooldown": UTAG_GROUP_COOLDOWN}
+            "max_members": UTAG_MAX_MEMBERS, "cooldown": UTAG_GROUP_COOLDOWN,
+            "ref": {"link": utag_ref_link(uid), "count": utag_ref_count(uid), "need": UTAG_REF_NEED, "days": UTAG_REF_DAYS}}
 
 
 async def utag_notify(uid, text, kb=None):
@@ -22105,7 +22331,9 @@ def utag_card(uid, confirm=False):
     text = (f"🏷 <b>UTag</b> — o'z akkauntingizdan guruhda hammani belgilash\n\n"
             f"👤 Akkaunt: {who}{' 🟢' if uid in UTAG_CLIENTS else ''}\n"
             f"⏱ Tezlik: <b>{sp:.1f} s</b> (har bir a'zo orasida)\n"
-            f"💎 Obuna: {sub}\n\n{UTAG_HELP}")
+            f"💎 Obuna: {sub}\n\n"
+            f"👥 <b>Referal:</b> {UTAG_REF_NEED} ta do'stingiz shu havola orqali botga kirsa — {UTAG_REF_DAYS} kun bepul UTag "
+            f"(taklif qilganlar: {utag_ref_count(uid)})\n<code>{utag_ref_link(uid)}</code>\n\n{UTAG_HELP}")
     if confirm:
         text += (f"\n\n❓ <b>{UTAG_PRICE_DIAMONDS} 💎 olmos</b> Empire Mafia hisobingizdan yechilsinmi? Obuna {UTAG_DAYS} kunga "
                  + ("uzaytiriladi." if until > time.time() else "faollashadi."))
@@ -30866,6 +31094,10 @@ function utagPage(d){
     h+='<div class="lbl" style="margin-top:16px">💎 Obuna</div>'+
       '<div class="hsub">'+(s.active?'✅ '+esc(s.until)+' gacha ('+esc(s.left)+' qoldi)':'Yo‘q')+(u.pending?' · ⏳ to‘lov tekshirilmoqda':'')+'</div>'+
       '<button class="btn go full" id="utBuy" style="margin-top:10px"'+(u.bridge?'':' disabled')+'>💎 '+(s.active?'Uzaytirish':'Obuna olish')+' — '+u.price+' olmos / '+u.days+' kun</button>';
+    const rf=u.ref||{};
+    if(rf.link){ h+='<div class="lbl" style="margin-top:16px">👥 Referal — bepul UTag</div>'+
+      '<div class="hsub">'+rf.need+' ta do‘stingiz havolangiz orqali botga birinchi marta kirsa — <b>'+rf.days+' kun</b> bepul. Taklif qilganlar: <b>'+rf.count+'</b> ('+(rf.count%rf.need)+'/'+rf.need+')</div>'+
+      '<div class="utrow"><input id="utRef" type="text" readonly value="'+esc(rf.link)+'"><button class="btn go" id="utRefC">📋 Nusxa</button><button class="btn" id="utRefS">📤</button></div>'; }
     h+='<div class="lbl" style="margin-top:16px">📖 Qisqa yo‘riqnoma</div><ol class="utguide">'+
       '<li><b>Ulash:</b> rozilikni belgilang → raqamingiz → Telegram’ga kelgan kod (2FA bo‘lsa parol).</li>'+
       '<li><b>Obuna:</b> “💎 Obuna olish” — Empire Mafia olmosidan yechiladi, '+u.days+' kun ishlaydi.</li>'+
@@ -30883,6 +31115,8 @@ function utagPage(d){
     on('#utOut',()=>{ if(confirm('Akkaunt uzilsinmi? Sessiya Telegram’da bekor qilinadi.')) call('logout'); });
     on('#utM',()=>call('speed',{delta:-0.1}));
     on('#utP',()=>call('speed',{delta:0.1}));
+    on('#utRefC',()=>{ const i=q('#utRef'); i.select(); try{ navigator.clipboard.writeText(i.value); }catch(e){ document.execCommand('copy'); } toast('📋 Havola nusxalandi'); });
+    on('#utRefS',()=>{ const l=q('#utRef').value; const url='https://t.me/share/url?url='+encodeURIComponent(l)+'&text='+encodeURIComponent('Empire botiga qo‘shil!'); try{ tg.openTelegramLink(url); }catch(e){ window.open(url); } });
     on('#utBuy',()=>{ if(confirm(u.price+' 💎 olmos Empire Mafia hisobingizdan yechilsinmi? Obuna '+u.days+' kunga '+(s.active?'uzaytiriladi':'faollashadi')+'.')) call('buy'); });
   }
   draw();
@@ -31004,6 +31238,7 @@ def main():
         (["app", "ilova"], cmd_app),
         (["help", "yordam"], cmd_help),
         (["lang"], cmd_lang),
+        (["anagramma", "anagram"], cmd_anagram),
         (["play"], cmd_play),
         (["vplay", "video"], cmd_vplay),
         (["skip", "next", "pause", "resume", "end", "mstop", "queue", "navbat"], cmd_music_ctl),
@@ -31035,7 +31270,8 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^panel:"))
     app.add_handler(CallbackQueryHandler(cb_memory, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(cb_croc, pattern=r"^croc:show$"))
-    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|croc|casino|frog|back|menu)$"))
+    app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|croc|casino|frog|anagram|back|menu)$"))
+    app.add_handler(CallbackQueryHandler(cb_anagram, pattern=r"^ag:(show|stop)$"))
     app.add_handler(CallbackQueryHandler(cb_frog, pattern=r"^fr:"))
     app.add_handler(CallbackQueryHandler(cb_bank, pattern=r"^bk:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_bank_app, pattern=r"^bka:\d+:(yes|no)$"))

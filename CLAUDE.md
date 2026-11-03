@@ -508,7 +508,7 @@
   `ub_log_err` — logga faqat klass + RPC xabari. JS xatolari `UBERR`/`ubErr`. NFT login (`nft_ub_login`) shu helper ustida.
 - 🏷 UTag (o'z akkauntidan guruhda hammani belgilash; kod bloki `# ── 🏷 UTAG` … `/UTAG`): ulanish FAQAT web app'da (`#s-utag`, `/app#utag`,
   Profil'dagi `.utc` karta; rozilik checkbox + ogohlantirish) — `/app/api/utag/{state,send_code,resend,code,password,cancel,logout,speed,buy}` →
-  `web_utag` (`ub_login`, expect_id = o'zi, `UTAG_LOGIN_RATE`), sessiya `utag_accounts` da shifrlangan. Obuna `UTAG_PRICE_DIAMONDS` 10 💎 /
+  `web_utag` (`ub_login`, expect_id = o'zi, `UTAG_LOGIN_RATE`), sessiya `utag_accounts` da shifrlangan. Obuna `UTAG_PRICE_DIAMONDS` 5 💎 /
   `UTAG_DAYS` 30 kun (`utag_subs`, faol bo'lsa uzayadi): `utag_buy` → Empire `POST /exchange/debit_asset` {txid,user_id,asset:"diamond",amount,reason:"utag",ts}
   (X-Signature HMAC); `utag_record` (atomik, bir marta) yiqilsa `/exchange/refund_asset` {txid,orig_txid,...}; tarmoq/5xx → pending, `utag_worker`
   (30 s) o'sha txid bilan qayta (`utag_payments`, `UTAG_PAY_MAX_RETRY` → stuck + owner log). Tinglovchi: `utag_ensure_client` (Telethon updates=True,
@@ -548,3 +548,10 @@
 - 🎵/🎬 Xabarlar tozaligi: `_music_del(chat, *mids, delay)`; trek boshlanganda uning "➕ Navbatga qo'shildi" xabari (`track["qmsg"]`) o'chadi,
   `music_leave` (navbat tugashi, /end, ovozli chat yopilishi) "🎵 Hozir…" xabarini va navbatdagilar xabarlarini o'chiradi; "✅ Navbat tugadi" 15 s dan keyin o'chadi.
 - 🏪 Empire Market son_bot'dan olib tashlandi (`market_enabled_for` → False: web app'da bo'lim/API yopiq). Market Empire Mafia web app'iga ko'chirildi (o'sha yerda test rejimida).
+- 👥 UTag referal: `?start=ref_<uid>` → `utag_ref_on_start` (cmd_start'da `was_new` — botga BIRINCHI marta kirgan bo'lsa; o'zini, takrorni,
+  botni ishlatmagan taklifchini sanamaydi), jadval `utag_refs` (new_uid PK, ref_uid); har `UTAG_REF_NEED` 3 tadan +`UTAG_REF_DAYS` 7 kun `utag_subs`.
+  Bot kartasi va web app UTag'da havola (`utag_ref_link`), soni, 📋 nusxa / 📤 ulashish; payload `utag.ref`.
+- 🔤 Anagramma (faqat guruh, `/anagramma` yoki /emps → "🔤 Anagramma" `g:anagram`): so'zlar `anagram_uz.txt` (so'z|ta'rif, ~596 ta, `anag_words`;
+  o'/g' bitta harf — `anag_units`), raund xabari "N/30 · HARFLAR · ta'rif" + "Javobni ko'rish"/"To'xtatish" (`ag:show|stop`, `cb_anagram` —
+  boshlagan odam/adminlar/bot egalari). Birinchi to'g'ri yozgan (`anag_norm`) — `record(..., "win", ANAG_XP 10)` + `ANAG_MONEY` 30$, keyingi raund;
+  30 raunddan keyin natijalar jadvali. `GAMES` da type `anagram`, faolsizlik `ANAG_TTL` 600 s.

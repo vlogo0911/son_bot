@@ -552,6 +552,6 @@
   botni ishlatmagan taklifchini sanamaydi), jadval `utag_refs` (new_uid PK, ref_uid); har `UTAG_REF_NEED` 3 tadan +`UTAG_REF_DAYS` 7 kun `utag_subs`.
   Bot kartasi va web app UTag'da havola (`utag_ref_link`), soni, 📋 nusxa / 📤 ulashish; payload `utag.ref`.
 - 🔤 Anagramma (faqat guruh, `/anagramma` yoki /emps → "🔤 Anagramma" `g:anagram`): so'zlar `anagram_uz.txt` (so'z|ta'rif, ~596 ta, `anag_words`;
-  o'/g' bitta harf — `anag_units`), raund xabari "N/30 · HARFLAR · ta'rif" + "Javobni ko'rish"/"To'xtatish" (`ag:show|stop`, `cb_anagram` —
+  o'/g' bitta harf — `anag_units`), raund xabari "N/30 · HARFLAR · ta'rif" + faqat "To'xtatish" tugmasi ("Javobni ko'rish" olib tashlandi; eski `ag:show` hali ishlaydi) (`cb_anagram` —
   boshlagan odam/adminlar/bot egalari). Birinchi to'g'ri yozgan (`anag_norm`) — `record(..., "win", ANAG_XP 10)` + `ANAG_MONEY` 30$, keyingi raund;
   30 raunddan keyin natijalar jadvali. `GAMES` da type `anagram`, faolsizlik `ANAG_TTL` 600 s.

@@ -19774,7 +19774,8 @@ def init_market(c):
 
 
 def market_enabled_for(uid):
-    return web_enabled_for(uid) and (bool(webapp_flags().get("market", 0)) or can_test(uid))
+    # 🏪 Empire Market son_bot'dan olib tashlandi — Empire Mafia web app'ga ko'chirildi (u yerda test rejimida).
+    return False
 
 
 def market_cfg():

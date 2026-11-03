@@ -1,0 +1,610 @@
+# Anagramma o'yini: so'z|ta'rif (o' va g' — bitta harf hisoblanadi)
+deraza|Xonaga yorug'lik va havo kirishi uchun devordagi ochiq joy
+eshik|Xonaga kirib-chiqish uchun ochiladigan yopqich
+devor|Uy xonalarini ajratib turuvchi tik qurilma
+pol|Xonaning oyoq bosib yuriladigan pastki qismi
+shift|Xonaning ustki qismi
+tom|Binoning eng ustki yopqichi
+zina|Yuqori qavatga chiqish uchun pog'onalar
+ayvon|Uyning old tomonidagi ochiq, ustki yopiq joy
+hovli|Uy atrofidagi devor bilan o'ralgan maydon
+oshxona|Ovqat tayyorlanadigan xona
+yotoqxona|Uxlash uchun mo'ljallangan xona
+mehmonxona|Mehmonlar qabul qilinadigan xona yoki bino
+hammom|Yuvinish uchun maxsus joy
+dahliz|Uyga kirishdagi yo'lak xona
+gilam|Polga to'shaladigan naqshli to'qima
+parda|Derazani to'sib turuvchi mato
+karavot|Ustida uxlanadigan mebel
+stol|Ustida ovqatlanadigan yoki yoziladigan mebel
+stul|Bir kishi o'tiradigan suyanchiqli o'rindiq
+kreslo|Yumshoq, qo'ltiqli o'rindiq
+divan|Bir necha kishi o'tiradigan yumshoq o'rindiq
+shkaf|Kiyim yoki buyum saqlanadigan javon
+javon|Buyumlar qo'yiladigan tokchali mebel
+ko'zgu|O'zini ko'rish uchun yaltiroq oyna
+yostiq|Uxlaganda bosh qo'yiladigan yumshoq narsa
+ko'rpa|Ustga yopiladigan qalin yopinchiq
+choynak|Choy damlanadigan idish
+piyola|Choy ichiladigan kichik idish
+qoshiq|Suyuq ovqat ichiladigan asbob
+pichoq|Kesish uchun o'tkir asbob
+vilka|Ovqatni sanchib olish uchun asbob
+likopcha|Kichik yassi idish
+qozon|Osh pishiriladigan katta idish
+tova|Qovurish uchun yassi idish
+kastryulka|Sho'rva qaynatiladigan dastali idish
+chelak|Suv tashiladigan dastali idish
+supurgi|Pol supuriladigan asbob
+sovun|Qo'l va tana yuviladigan ko'piklanuvchi vosita
+sochiq|Artinish uchun mato
+taroq|Soch taraladigan asbob
+qaychi|Qog'oz yoki mato kesiladigan ikki tig'li asbob
+igna|Tikish uchun ingichka o'tkir asbob
+ip|Tikishda ishlatiladigan ingichka tola
+tugma|Kiyimni qadab turuvchi kichik narsa
+chiroq|Yorug'lik beruvchi asbob
+sham|Yonib yorug'lik beradigan mum tayoqcha
+soat|Vaqtni ko'rsatuvchi asbob
+kalit|Qulfni ochadigan asbob
+qulf|Eshikni berkitadigan moslama
+televizor|Ko'rsatuvlar ko'riladigan qurilma
+muzlatgich|Ovqatni sovuq saqlaydigan qurilma
+changyutgich|Changni so'rib oladigan qurilma
+dazmol|Kiyimni tekislaydigan qizdiriluvchi asbob
+telefon|Masofadan gaplashish qurilmasi
+kompyuter|Ma'lumotlarni qayta ishlovchi elektron qurilma
+klaviatura|Harf va raqamlar teriladigan tugmalar to'plami
+ekran|Tasvir ko'rsatiladigan yuza
+naushnik|Quloqqa taqib tinglanadigan moslama
+kamera|Rasm va video oladigan qurilma
+batareya|Elektr quvvatini saqlovchi qism
+olma|Qizil yoki yashil, shirin-nordon meva
+nok|Yumaloq-cho'ziq, shirali meva
+uzum|Shingil bo'lib o'sadigan mayda mevalar
+anor|Ichi qizil donachalarga to'la meva
+anjir|Yumshoq, shirin, ichi mayda urug'li meva
+o'rik|Sariq rangli, danakli yozgi meva
+shaftoli|Tukli po'stli, shirali meva
+gilos|Mayda, qizil, uzun bandli meva
+olcha|Nordon, to'q qizil mayda meva
+qovun|O'zbekistonning mashhur shirin poliz mevasi
+tarvuz|Ichi qizil, suvli katta poliz mevasi
+limon|Juda nordon sariq sitrus meva
+apelsin|To'q sariq, shirali sitrus meva
+mandarin|Kichik, oson archiladigan sitrus meva
+banan|Uzun, sariq po'stli tropik meva
+xurmo|To'q sariq, juda shirin kuzgi meva
+behi|Sariq, qattiq, xushbo'y meva
+yong'oq|Qattiq po'choqli, ichi moyli meva
+bodom|Cho'zinchoq, mazali yong'oq turi
+pista|Yashil mag'izli mayda yong'oq
+mayiz|Quritilgan uzum
+qulupnay|Qizil, mayda urug'lari sirtida bo'lgan rezavor
+malina|Qizil, mayin rezavor meva
+sabzi|Palovga solinadigan to'q sariq ildizmeva
+piyoz|Achchiq, qavat-qavat sabzavot
+kartoshka|Yer ostida o'sadigan tuganakli sabzavot
+pomidor|Qizil, shirali salat sabzavoti
+bodring|Yashil, suvli, cho'ziq sabzavot
+karam|Barglari bosh bo'lib o'raladigan sabzavot
+sholg'om|Oq yoki binafsha yumaloq ildizmeva
+lavlagi|To'q qizil ildizmeva
+qalampir|Achchiq yoki shirin sabzavot
+baqlajon|Binafsha rangli cho'ziq sabzavot
+sarimsoq|Bo'lakchali, o'tkir hidli sabzavot
+ko'kat|Ovqatga solinadigan yashil o'tlar
+jambil|Xushbo'y dorivor o'simlik
+rayhon|Xushbo'y bargli o'simlik
+non|Undan yopiladigan asosiy ozuqa
+patir|Qatlamli, moyli non turi
+somsa|Tandirda pishiriladigan go'shtli pishiriq
+palov|Guruch va go'shtdan tayyorlanadigan milliy taom
+manti|Bug'da pishiriladigan go'shtli xamir taom
+chuchvara|Mayda tugilgan go'shtli xamir taom
+lag'mon|Cho'zma xamirdan tayyorlangan taom
+sho'rva|Suyuq, qaynatma taom
+shashlik|Sixda pishirilgan go'sht
+norin|Mayda to'g'ralgan xamir va go'shtli taom
+halim|Bug'doy va go'shtdan uzoq qaynatiladigan taom
+sumalak|Undirilgan bug'doydan bahorda pishiriladigan taom
+qatiq|Achitilgan sut mahsuloti
+sut|Sigirdan sog'iladigan oq ichimlik
+qaymoq|Sutning ustidagi yog'li qatlam
+pishloq|Sutdan tayyorlanadigan qattiq mahsulot
+sariyog'|Qaymoqdan olinadigan yog'
+tuxum|Tovuq qo'yadigan po'choqli mahsulot
+asal|Asalarilar yig'adigan shirinlik
+shakar|Choyga solinadigan shirin kristall
+tuz|Ovqatga ta'm beruvchi oq kristall
+murch|Achchiq ziravor
+zira|Palovga solinadigan xushbo'y urug'
+guruch|Palov uchun asosiy don
+bug'doy|Non uchun un tortiladigan don
+makkajo'xori|Sariq donli baland o'simlik
+un|Don tortilganda hosil bo'ladigan kukun
+yog'|Ovqat qovuriladigan moy
+murabbo|Mevadan qaynatilgan shirinlik
+pechene|Mayda quruq shirinlik
+shokolad|Kakaodan tayyorlangan shirinlik
+muzqaymoq|Muzlatilgan shirin desert
+tort|Bayramlarda kesiladigan katta pishiriq
+kompot|Mevadan qaynatilgan ichimlik
+choy|Barglari damlab ichiladigan ichimlik
+qahva|Donlari qovurilib tayyorlanadigan ichimlik
+sharbat|Mevalardan siqib olingan ichimlik
+it|Uyni qo'riqlaydigan sodiq hayvon
+mushuk|Sichqon tutuvchi uy hayvoni
+sigir|Sut beruvchi katta uy hayvoni
+qo'y|Juni va go'shti uchun boqiladigan hayvon
+echki|Shoxli, soqolli uy hayvoni
+ot|Minib yuriladigan chaqqon hayvon
+eshak|Uzun quloqli yuk tashuvchi hayvon
+tuya|Cho'l kemasi deb ataladigan o'rkachli hayvon
+tovuq|Tuxum qo'yuvchi uy parrandasi
+xo'roz|Tongda qichqiradigan parranda
+o'rdak|Suvda suzadigan yassi tumshuqli parranda
+g'oz|Uzun bo'yinli uy parrandasi
+kurka|Katta, qizil soqolli parranda
+quyon|Uzun quloqli, sakrab yuruvchi hayvon
+sichqon|Kichik kemiruvchi jonivor
+ayiq|Katta, qishda uxlaydigan yirtqich
+bo'ri|Galasi bilan yuradigan yirtqich
+tulki|Ayyorligi bilan mashhur qizg'ish yirtqich
+sher|Hayvonlar shohi
+yo'lbars|Yo'l-yo'l terili katta mushuksimon
+fil|Xartumli eng katta quruqlik hayvoni
+jirafa|Eng uzun bo'yinli hayvon
+maymun|Daraxtda yashovchi aqlli hayvon
+kiyik|Shoxli, chaqqon o'txo'r hayvon
+toshbaqa|Kosasini orqalab yuruvchi sekin jonivor
+ilon|Oyoqsiz, sudralib yuruvchi
+qurbaqa|Suvda va quruqlikda yashovchi kvakillovchi
+baliq|Suvda yashovchi, jabra bilan nafas oluvchi
+delfin|Aqlli dengiz sutemizuvchisi
+kit|Eng katta dengiz hayvoni
+akula|O'tkir tishli dengiz yirtqichi
+qisqichbaqa|Qisqichli, yonlab yuruvchi suv jonivori
+chumoli|Mehnatkash mayda hasharot
+asalari|Asal yig'uvchi hasharot
+kapalak|Rang-barang qanotli hasharot
+chivin|Qon so'ruvchi mayda hasharot
+pashsha|Uyda g'ing'illaydigan hasharot
+o'rgimchak|To'r to'quvchi sakkiz oyoqli jonivor
+chigirtka|Sakrovchi yashil hasharot
+burgut|Baland uchuvchi yirtqich qush
+qarg'a|Qora rangli qag'illovchi qush
+chumchuq|Kichik kulrang qush
+kaptar|Tinchlik ramzi bo'lgan qush
+bulbul|Chiroyli sayraydigan qush
+laylak|Uzun oyoqli, uya tomga quradigan qush
+to'tiqush|Gapirishni o'rganadigan rangli qush
+boyqush|Kechasi ov qiluvchi katta ko'zli qush
+tovus|Chiroyli dumli qush
+qaldirg'och|Bahorda uchib keluvchi qush
+ko'z|Ko'rish a'zosi
+quloq|Eshitish a'zosi
+burun|Hid bilish a'zosi
+og'iz|Gapirish va ovqatlanish a'zosi
+til|Ta'm bilish a'zosi
+tish|Ovqatni chaynaydigan qattiq a'zo
+lab|Og'izning ikki chekkasi
+qosh|Ko'z ustidagi tuklar
+kiprik|Ko'z chetidagi mayda tuklar
+soch|Boshdagi tuklar
+peshona|Yuzning yuqori qismi
+yonoq|Yuzning ikki yoni
+iyak|Yuzning eng pastki qismi
+bo'yin|Boshni tanaga ulovchi qism
+yelka|Qo'l tanaga ulanadigan joy
+qo'l|Narsalarni ushlash a'zosi
+barmoq|Qo'l va oyoqdagi beshta qism
+tirnoq|Barmoq uchidagi qattiq qatlam
+tirsak|Qo'lning bukiladigan joyi
+tizza|Oyoqning bukiladigan joyi
+oyoq|Yurish a'zosi
+tovon|Oyoq panjasining orqa qismi
+yurak|Qonni haydovchi a'zo
+o'pka|Nafas olish a'zosi
+jigar|Qonni tozalovchi katta a'zo
+buyrak|Siydik ishlab chiqaruvchi juft a'zo
+miya|Fikrlash a'zosi
+suyak|Tanani tutib turuvchi qattiq qism
+qon|Tomirlarda oqadigan qizil suyuqlik
+teri|Tanani qoplab turuvchi qatlam
+oshpaz|Ovqat tayyorlovchi kasb egasi
+shifokor|Bemorlarni davolovchi kasb egasi
+hamshira|Shifokorga yordam beruvchi kasb egasi
+o'qituvchi|Maktabda dars beruvchi kasb egasi
+haydovchi|Mashina boshqaruvchi
+uchuvchi|Samolyot boshqaruvchi
+dehqon|Yer ekib hosil oluvchi
+cho'pon|Qo'y boquvchi
+quruvchi|Bino quruvchi usta
+duradgor|Yog'ochdan buyum yasovchi usta
+temirchi|Temirni bolg'alab buyum yasovchi
+tikuvchi|Kiyim tikuvchi usta
+sartarosh|Soch oluvchi usta
+sotuvchi|Do'konda mol sotuvchi
+militsioner|Tartibni saqlovchi xodim
+o't o'chiruvchi|Yong'inni o'chiruvchi
+dasturchi|Kompyuter dasturlari yozuvchi
+rassom|Rasm chizuvchi
+shoir|She'r yozuvchi
+yozuvchi|Kitob yozuvchi ijodkor
+xonanda|Qo'shiq aytuvchi
+aktyor|Kino va sahnada rol o'ynovchi
+jurnalist|Yangiliklar tayyorlovchi
+muhandis|Texnika loyihalovchi mutaxassis
+olim|Ilm bilan shug'ullanuvchi
+talaba|Oliygohda o'quvchi
+o'quvchi|Maktabda o'qiydigan bola
+hakam|O'yinda qoidaga rioya qildiruvchi
+murabbiy|Sportchilarni tayyorlovchi
+bankir|Bankda ishlovchi mutaxassis
+advokat|Sudda himoya qiluvchi huquqshunos
+sudya|Sudda hukm chiqaruvchi
+kitob|Varaqlardan iborat o'qish manbai
+daftar|Yozish uchun varaqlar to'plami
+ruchka|Siyoh bilan yozadigan asbob
+qalam|Grafitli yozuv asbobi
+o'chirg'ich|Qalam yozuvini o'chiruvchi
+chizg'ich|To'g'ri chiziq chizish asbobi
+sumka|Narsa solib yuriladigan buyum
+portfel|O'quvchi kitoblarini soladigan sumka
+doska|Sinfda bo'r bilan yoziladigan taxta
+bo'r|Doskaga yozish uchun oq tayoqcha
+maktab|Bolalar ta'lim oladigan joy
+dars|Sinfdagi mashg'ulot
+imtihon|Bilimni sinash
+baho|Bilimga qo'yiladigan ball
+lug'at|So'zlar ma'nosi yozilgan kitob
+kutubxona|Kitoblar saqlanadigan joy
+universitet|Oliy ta'lim muassasasi
+sinf|O'quvchilar dars o'tadigan xona
+xarita|Yer yuzi tasviri
+globus|Yer sharining modeli
+alifbo|Harflar tartibi
+harf|Yozuvning eng kichik belgisi
+raqam|Sonni bildiruvchi belgi
+hikoya|Qisqa nasriy asar
+ertak|Bolalarga aytiladigan sehrli hikoya
+she'r|Qofiyali asar
+qo'shiq|Kuyga solingan she'r
+roman|Katta hajmli badiiy asar
+gazeta|Yangiliklar bosiladigan nashr
+jurnal|Davriy rangli nashr
+xat|Yozib yuboriladigan maktub
+konvert|Xat solinadigan qog'oz xalta
+marka|Konvertga yopishtiriladigan belgi
+quyosh|Yerga yorug'lik beruvchi yulduz
+oy|Kechasi osmonda ko'rinadigan yo'ldosh
+yulduz|Kechasi miltillovchi osmon jismi
+osmon|Boshimiz ustidagi moviy kenglik
+bulut|Osmondagi oq yoki kulrang bug'
+yomg'ir|Bulutdan tushadigan suv tomchilari
+qor|Qishda yog'adigan oq parchalar
+do'l|Muz donachalari yog'ishi
+shamol|Havoning harakati
+bo'ron|Kuchli shamol
+chaqmoq|Momaqaldiroqdagi yorqin uchqun
+kamalak|Yomg'irdan keyingi yetti rangli yoy
+tuman|Yerga yaqin quyuq bug'
+shudring|Tongda o'tlardagi tomchilar
+muz|Muzlagan suv
+daryo|Oqib turuvchi katta suv
+ko'l|Atrofi quruqlik bilan o'ralgan suv havzasi
+dengiz|Sho'r suvli katta havza
+okean|Eng katta suv havzasi
+buloq|Yerdan chiqib turuvchi toza suv
+sharshara|Balanddan quyiladigan suv
+tog'|Juda baland yer
+tepalik|Kichik baland yer
+vodiy|Tog'lar orasidagi pastlik
+cho'l|Qumli, suvsiz keng hudud
+o'rmon|Ko'p daraxtli joy
+orol|Atrofi suv bilan o'ralgan quruqlik
+g'or|Tog' ichidagi bo'shliq
+qum|Mayda tosh donachalari
+tosh|Qattiq tabiiy jism
+tuproq|Yerning ustki qatlami
+daraxt|Tanasi qattiq baland o'simlik
+gul|Chiroyli, xushbo'y o'simlik
+atirgul|Tikanli, xushbo'y gul
+lola|Bahorda ochiladigan qizil gul
+chinor|Uzoq yashovchi katta daraxt
+terak|Baland, tik o'suvchi daraxt
+tol|Shoxlari egilib o'suvchi daraxt
+archa|Yangi yilda bezatiladigan doim yashil daraxt
+barg|Daraxt shoxidagi yashil qism
+ildiz|O'simlikning yer ostidagi qismi
+urug'|Undan yangi o'simlik o'sadi
+o't|Yerda o'suvchi mayda yashil o'simlik
+qamish|Suv bo'yida o'suvchi baland o'simlik
+paxta|O'zbekistonning oq oltini
+bahor|Gullar ochiladigan fasl
+yoz|Eng issiq fasl
+kuz|Barglar to'kiladigan fasl
+qish|Eng sovuq fasl
+ertalab|Kunning boshlanishi
+kechqurun|Kun botgan payt
+tun|Kunning qorong'i qismi
+hafta|Yetti kun
+oy|O'ttiz kunlik vaqt
+yil|O'n ikki oy
+bayram|Quvonchli tantanali kun
+navro'z|Bahor bayrami
+to'y|Nikoh tantanasi
+mehmon|Uyga kelgan inson
+oila|Ota-ona va farzandlar
+ota|Dada
+ona|Oyi
+aka|Katta o'g'il qarindosh
+uka|Kichik o'g'il qarindosh
+opa|Katta qiz qarindosh
+singil|Kichik qiz qarindosh
+buva|Otaning yoki onaning otasi
+buvi|Otaning yoki onaning onasi
+nevara|Farzandning farzandi
+amaki|Otaning aka-ukasi
+tog'a|Onaning aka-ukasi
+xola|Onaning opa-singlisi
+amma|Otaning opa-singlisi
+kelin|O'g'ilning xotini
+kuyov|Qizning eri
+do'st|Yaqin, ishonchli inson
+qo'shni|Yonimizda yashovchi inson
+shahar|Katta aholi punkti
+qishloq|Kichik aholi punkti
+ko'cha|Uylar orasidagi yo'l
+bozor|Savdo qilinadigan joy
+do'kon|Mol sotiladigan joy
+bank|Pul saqlanadigan muassasa
+kasalxona|Bemorlar davolanadigan joy
+dorixona|Dori sotiladigan joy
+masjid|Ibodat qilinadigan joy
+bog'|Daraxtlar ekilgan joy
+istirohat|Dam olish
+stadion|Sport musobaqalari o'tadigan maydon
+kinoteatr|Film ko'rsatiladigan joy
+teatr|Spektakl qo'yiladigan bino
+muzey|Tarixiy buyumlar saqlanadigan joy
+aeroport|Samolyotlar qo'nadigan joy
+vokzal|Poyezdlar to'xtaydigan bino
+bekat|Avtobus to'xtaydigan joy
+ko'prik|Daryo ustidan o'tish inshooti
+mashina|To'rt g'ildirakli transport
+avtobus|Ko'p yo'lovchi tashuvchi transport
+poyezd|Relsda yuruvchi transport
+samolyot|Havoda uchuvchi transport
+vertolyot|Parrakli havo transporti
+kema|Dengizda suzuvchi katta transport
+qayiq|Eshkakli kichik suv transporti
+velosiped|Pedalli ikki g'ildirakli transport
+mototsikl|Motorli ikki g'ildirakli transport
+taksi|Pullik yengil mashina
+metro|Yer osti poyezdi
+tramvay|Shaharda relsda yuruvchi transport
+g'ildirak|Aylanib harakatlantiruvchi qism
+rul|Mashinani boshqaruvchi g'ildirak
+benzin|Mashina yoqilg'isi
+futbol|To'pni darvozaga kiritish o'yini
+basketbol|To'pni savatga tashlash o'yini
+voleybol|To'r ustidan to'p oshirish o'yini
+tennis|Raketka bilan o'ynaladigan o'yin
+shaxmat|Shoh va farzinli taxta o'yini
+shashka|Doira toshlar bilan taxta o'yini
+kurash|Milliy sport turi
+boks|Qo'lqop bilan musht urish sporti
+suzish|Suvda harakatlanish sporti
+yugurish|Tez harakatlanish
+to'p|O'yinda tepiladigan yumaloq narsa
+darvoza|To'p kiritiladigan joy
+medal|G'olibga beriladigan nishon
+kubok|Chempionga beriladigan sovrin
+chempion|Musobaqa g'olibi
+jamoa|Birga o'ynovchilar guruhi
+ko'ylak|Ustki kiyim
+shim|Oyoqqa kiyiladigan kiyim
+kurtka|Issiq ustki kiyim
+palto|Uzun issiq ustki kiyim
+do'ppi|O'zbek milliy bosh kiyimi
+shlyapa|Hoshiyali bosh kiyim
+etik|Uzun qo'njli poyabzal
+tufli|Oddiy poyabzal
+paypoq|Oyoqqa kiyiladigan to'qima
+qo'lqop|Qo'lga kiyiladigan kiyim
+sharf|Bo'yinga o'raladigan mato
+kamar|Belga taqiladigan tasma
+uzuk|Barmoqqa taqiladigan zargarlik buyumi
+sirg'a|Quloqqa taqiladigan bezak
+marjon|Bo'yinga taqiladigan bezak
+atlas|Rang-barang o'zbek matosi
+chopon|O'zbek milliy to'ni
+ro'mol|Boshga o'raladigan mato
+ko'zoynak|Ko'rishni yaxshilovchi oynalar
+soyabon|Yomg'irdan saqlovchi buyum
+qizil|Qon rangi
+yashil|O't rangi
+ko'k|Osmon rangi
+sariq|Quyosh rangi
+oq|Qor rangi
+qora|Tun rangi
+pushti|Och qizil rang
+jigarrang|Shokolad rangi
+kulrang|Kul rangi
+binafsha|Siyohrang
+baxt|Shodlik va quvonch holati
+sevgi|Kuchli mehr tuyg'usi
+do'stlik|Do'stlar orasidagi munosabat
+mehr|Iliq munosabat
+sabr|Chidam va bardosh
+umid|Yaxshilikka ishonch
+orzu|Erishmoqchi bo'lgan narsa
+quvonch|Xursandchilik
+qayg'u|G'am-alam
+qo'rquv|Xavfdan cho'chish
+g'azab|Kuchli jahl
+uyat|Hijolat tuyg'usi
+rahmat|Minnatdorchilik so'zi
+salom|Ko'rishganda aytiladigan so'z
+xayr|Xayrlashganda aytiladigan so'z
+vaqt|Soat ko'rsatadigan narsa
+hayot|Tirik bo'lish
+dunyo|Yer yuzi
+vatan|Tug'ilib o'sgan yurt
+tarix|O'tmish voqealari
+til|Muloqot vositasi
+ilm|Bilim
+aql|Fikrlash qobiliyati
+kuch|Quvvat
+tezlik|Harakat jadalligi
+bilim|O'rganilgan narsalar
+pul|Savdoda ishlatiladigan to'lov vositasi
+tanga|Metall pul
+hamyon|Pul solinadigan cho'ntak buyum
+narx|Mol bahosi
+savdo|Oldi-sotdi
+sovg'a|Tuhfa qilinadigan narsa
+oltin|Qimmatbaho sariq metall
+kumush|Qimmatbaho oq metall
+temir|Mustahkam metall
+mis|Qizg'ish metall
+olmos|Eng qattiq qimmatbaho tosh
+shisha|Tiniq mo'rt material
+yog'och|Daraxtdan olinadigan material
+qog'oz|Yoziladigan yupqa varaq
+plastmassa|Sun'iy yengil material
+g'isht|Qurilishda ishlatiladigan pishgan loy
+sement|Qurilish qorishmasi
+bolg'a|Mix qoqiladigan asbob
+mix|Qoqiladigan ingichka temir
+arra|Yog'och kesuvchi tishli asbob
+bolta|Daraxt chopuvchi asbob
+belkurak|Yer qaziydigan asbob
+ketmon|Yer chopuvchi asbob
+o'roq|O't o'riladigan egri asbob
+narvon|Balandga chiqish uchun zinapoya
+arqon|Yo'g'on pishiq ip
+zanjir|Halqalardan iborat bog'ich
+quti|Narsa solinadigan idish
+xalta|Mato yoki qog'oz sumka
+gugurt|Olov yoquvchi cho'pcha
+olov|Yonish natijasidagi alanga
+tutun|Yonishdan chiqadigan bulut
+kul|Yonib qolgan qoldiq
+gitara|Torli musiqa asbobi
+pianino|Klavishli musiqa asbobi
+doira|Urma cholg'u asbobi
+nay|Puflab chalinadigan cholg'u
+dutor|Ikki torli o'zbek cholg'usi
+karnay|Uzun puflanadigan milliy cholg'u
+skripka|Kamon bilan chalinadigan cholg'u
+baraban|Tayoqcha bilan uriladigan cholg'u
+kino|Ekranda ko'rsatiladigan film
+multfilm|Bolalar uchun chizma film
+o'yin|Ko'ngilochar mashg'ulot
+qo'g'irchoq|Bolalar o'yinchog'i
+rasm|Chizilgan tasvir
+haykal|Toshdan yo'nilgan tasvir
+musiqa|Ohanglar san'ati
+raqs|Musiqa ostidagi harakatlar
+sirk|Masxarabozlar va akrobatlar tomoshasi
+masxaraboz|Kuldiruvchi sirk artisti
+sehrgar|Fokuslar ko'rsatuvchi
+qahramon|Jasur inson
+podsho|Mamlakat hukmdori
+malika|Podshoning qizi
+shahzoda|Podshoning o'g'li
+qasr|Podsho saroyi
+qal'a|Mudofaa devorli qo'rg'on
+qilich|Uzun tig'li qurol
+qalqon|Himoya vositasi
+kamon|O'q otuvchi egri qurol
+xazina|Yashirilgan boylik
+sandiq|Qimmatli narsalar saqlanadigan quti
+kalendar|Kunlar ro'yxati
+budilnik|Uyg'otuvchi soat
+termometr|Haroratni o'lchovchi asbob
+tarozi|Og'irlik o'lchovchi asbob
+kompas|Yo'nalish ko'rsatuvchi asbob
+teleskop|Uzoq yulduzlarni ko'rish asbobi
+mikroskop|Mayda narsalarni kattalashtiruvchi asbob
+robot|Inson ishini bajaruvchi mashina
+raketa|Koinotga uchuvchi apparat
+sayyora|Quyosh atrofida aylanuvchi osmon jismi
+koinot|Butun olam fazosi
+kosmonavt|Koinotga uchuvchi inson
+internet|Butun dunyo kompyuter tarmog'i
+sayt|Internetdagi sahifalar to'plami
+parol|Maxfiy kirish kodi
+xabar|Yuborilgan ma'lumot
+ovoz|Eshitiladigan tovush
+sukunat|Jimjitlik
+ko'rpacha|Ustiga o'tiriladigan yumshoq to'shak
+dasturxon|Ovqat yoziladigan mato
+tandir|Non yopiladigan loy o'choq
+o'choq|Olov yoqiladigan joy
+mangal|Shashlik pishiriladigan moslama
+sandal|Qishda isinadigan milliy moslama
+beshik|Chaqaloq yotadigan tebranuvchi to'shak
+aravacha|Bola olib yuriladigan g'ildirakli moslama
+o'yinchoq|Bolalar o'ynaydigan buyum
+bog'cha|Kichik bolalar tarbiyalanadigan joy
+tabassum|Yengil kulgu
+ko'z yosh|Yig'laganda oqadigan tomchi
+tush|Uxlaganda ko'riladigan hodisa
+uyqu|Dam olish holati
+nonushta|Ertalabki ovqat
+tushlik|Kunduzgi ovqat
+kechki ovqat|Kechqurungi ovqat
+sayohat|Uzoq joylarga safar
+chamadon|Safarda kiyim solinadigan sumka
+pasport|Shaxsni tasdiqlovchi hujjat
+chipta|Transportga kirish qog'ozi
+mehmonxona|Sayohatchilar tunaydigan bino
+plyaj|Dengiz bo'yidagi qumli joy
+chodir|Ochiq havoda tunash uchun boshpana
+gulxan|Ochiq havoda yoqiladigan olov
+baliqchi|Baliq ovlovchi
+ovchi|Hayvon ovlovchi
+qarmoq|Baliq tutadigan asbob
+to'r|Baliq tutadigan to'qima
+tuxumdon|Tuxum saqlanadigan idish
+jo'ja|Tovuq bolasi
+qo'zichoq|Qo'y bolasi
+buzoq|Sigir bolasi
+toy|Ot bolasi
+kuchukcha|It bolasi
+mushukcha|Mushuk bolasi
+asalarichi|Asalari boquvchi
+pillakor|Ipak qurti boquvchi
+ipak|Pilladan olinadigan nozik tola
+jun|Qo'y yungi
+paxtakor|Paxta yetishtiruvchi
+traktor|Dalada ishlovchi og'ir mashina
+kombayn|Hosil yig'uvchi mashina
+ariq|Suv oqadigan kichik kanal
+quduq|Yer ostidan suv olinadigan chuqur
+hovuz|Suv to'ldirilgan havza
+favvora|Suv otilib turuvchi inshoot
+minora|Baland ingichka inshoot
+gumbaz|Binoning yumaloq tomi
+ravoq|Kamarsimon eshik yoki o'tish joyi
+madrasa|Qadimiy o'quv binosi
+karvonsaroy|Karvonlar to'xtaydigan joy
+registon|Samarqanddagi mashhur maydon
+samarqand|Qadimiy Amir Temur poytaxti
+buxoro|Qadimiy savdo shahri
+xiva|Ichan qal'asi bilan mashhur shahar
+toshkent|O'zbekiston poytaxti
+farg'ona|Vodiydagi yirik shahar
+andijon|Vodiyning sharqidagi shahar
+namangan|Gullar shahri deb ataladigan shahar
+termiz|Janubdagi qadimiy shahar
+navoiy|Buyuk shoir nomidagi shahar
+jizzax|Somsasi mashhur shahar
+nukus|Qoraqalpog'iston poytaxti
+qarshi|Qashqadaryo markazi
+guliston|Sirdaryo markazi
+urganch|Xorazm markazi

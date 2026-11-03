@@ -8929,8 +8929,7 @@ def anag_next(game):
 
 
 def anag_kb():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Javobni ko'rish", callback_data="ag:show"),
-                                  InlineKeyboardButton("To'xtatish", callback_data="ag:stop")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("To'xtatish", callback_data="ag:stop")]])
 
 
 def anag_text(game):

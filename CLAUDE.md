@@ -547,3 +547,4 @@
   Web app UTag bo'limida "📖 Qisqa yo'riqnoma" (`.utguide`), bot kartasida `UTAG_HELP` ham `.tags` ni aytadi.
 - 🎵/🎬 Xabarlar tozaligi: `_music_del(chat, *mids, delay)`; trek boshlanganda uning "➕ Navbatga qo'shildi" xabari (`track["qmsg"]`) o'chadi,
   `music_leave` (navbat tugashi, /end, ovozli chat yopilishi) "🎵 Hozir…" xabarini va navbatdagilar xabarlarini o'chiradi; "✅ Navbat tugadi" 15 s dan keyin o'chadi.
+- 🏪 Empire Market son_bot'dan olib tashlandi (`market_enabled_for` → False: web app'da bo'lim/API yopiq). Market Empire Mafia web app'iga ko'chirildi (o'sha yerda test rejimida).

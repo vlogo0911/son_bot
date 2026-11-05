@@ -20614,7 +20614,7 @@ def ub_tl():
     from telethon.tl import functions as F, types as T
     tl = types.SimpleNamespace(
         TelegramClient=TelegramClient, StringSession=StringSession, NewMessage=EV.NewMessage,
-        InputUser=T.InputUser, MentionName=T.InputMessageEntityMentionName, ResendCode=F.auth.ResendCodeRequest,
+        InputUser=T.InputUser, MentionName=T.InputMessageEntityMentionName, MessageEdited=EV.MessageEdited, ResendCode=F.auth.ResendCodeRequest,
         GetStarGifts=F.payments.GetStarGiftsRequest, GetResale=F.payments.GetResaleStarGiftsRequest,
         GetUnique=F.payments.GetUniqueStarGiftRequest, GetForm=F.payments.GetPaymentFormRequest,
         SendStarsForm=F.payments.SendStarsFormRequest, GetStarsStatus=F.payments.GetStarsStatusRequest,
@@ -21592,7 +21592,7 @@ UTAG_PAY_MAX_RETRY = 60
 UTAG_HTTP_TIMEOUT = 8
 UTAG_MAX_TEXT = 3800              # .tag matni (UTF-16 birlik) — ism bilan 4096 dan oshmasin
 UTAG_DEVICE = "Empire UTag"
-UTAG_CMD_RE = re.compile(r"^\.(tags|tag|stop)(?=\s|$)", re.I)
+UTAG_CMD_RE = re.compile(r"^\.(tags|tag|stop|mafia)(?=\s|$)", re.I)
 # .tags — har a'zo mention'i yoniga tasodifiy hazil gap qo'shiladi (ketma-ket takrorlanmaydi)
 UTAG_PHRASES = (
     "Sen hammasini biladiganga o‘xshaysan.", "Bir oz jim tur, gapni tushunaylik.", "Ha, endi qiziq joyiga keldik.",
@@ -22109,6 +22109,9 @@ async def utag_on_message(uid, event):
     if uid in UTAG_RUNS:
         await utag_notify(uid, "⏳ <b>UTag</b> allaqachon ishlayapti — to'xtatish uchun guruhda <code>.stop</code> yozing.")
         return
+    if cmd == "mafia":
+        await mafia_start(uid, event, info, text)
+        return
     chat_id = getattr(event, "chat_id", None)
     now = time.time()
     last = UTAG_LAST.get((uid, chat_id), 0)
@@ -22127,6 +22130,162 @@ async def utag_on_message(uid, event):
     run = {"chat": chat_id, "stop": False, "cl": info["client"]}
     UTAG_RUNS[uid] = run
     run["task"] = asyncio.get_running_loop().create_task(utag_run(uid, run, chat, payload, ents, info["me_id"], phrases=cmd == "tags"))
+
+
+# ── 🎭 .mafia <30m|1h> [min] [matn]: Empire Mafia o'yin seansi (foydalanuvchi o'zi ishga tushiradi, muddat cheklangan) ──
+# Akkaunt guruhda /game@<bot> beradi, ro'yxat ochiq turganda har MAFIA_REFRESH s da /game qayta (vaqt yangilanadi) va a'zolarni
+# MAFIA_PER_MSG tadan bitta xabarda belgilaydi (utag_speed oralig'ida). Mafia bot ro'yxatidagi "Jami: N" ≥ min bo'lsa — /start@<bot>,
+# belgilash to'xtaydi; o'yin tugashi ("O'yin tugadi"/bekor) bilan keyingi o'yin. Mafia bot kodiga tegilmaydi — faqat uning xabarlari o'qiladi.
+MAFIA_BOT = os.getenv("MAFIA_BOT_USERNAME", "").lstrip("@").strip()
+MAFIA_REFRESH = (27, 28)
+MAFIA_PER_MSG = 5
+MAFIA_MIN_DEFAULT = 15
+MAFIA_DUR_MIN, MAFIA_DUR_MAX = 10 * 60, 3 * 3600
+MAFIA_TEXT_DEFAULT = "🎭 Mafia boshlanmoqda — ro'yxatga yoziling!"
+MAFIA_COUNT_RE = re.compile(r"(?:Jami|Всего|Total|Toptan|Барлығы)\s*:\s*(\d+)", re.I)
+MAFIA_END_RE = re.compile(r"O'yin tugadi|O‘yin tugadi|Игра окончена|Game over|bekor qilindi|отменена|cancel", re.I)
+MAFIA_STARTED_RE = re.compile(r"O'yin boshlandi|O‘yin boshlandi|boshlanmoqda|Игра началась|Game started|Tun\b|Ночь", re.I)
+MAFIA_RUNS = {}                   # chat_id → run (bot xabarlari shu yerga yoziladi)
+
+
+def mafia_parse_args(text):
+    """'.mafia 1h 18 matn' → (soniya, min, matn) yoki None."""
+    m = re.match(r"^\.mafia\s+(\d{1,3})\s*(m|min|h|soat|daq)?\b\s*(\d{1,2})?\s*(.*)$", text.strip(), re.I | re.S)
+    if not m:
+        return None
+    n, unit = int(m.group(1)), (m.group(2) or "m").lower()
+    sec = n * 3600 if unit in ("h", "soat") else n * 60
+    if not MAFIA_DUR_MIN <= sec <= MAFIA_DUR_MAX:
+        return None
+    mn = int(m.group(3)) if m.group(3) else MAFIA_MIN_DEFAULT
+    return sec, max(4, min(30, mn)), (m.group(4) or "").strip()[:300] or MAFIA_TEXT_DEFAULT
+
+
+def mafia_build(text, people):
+    """Bitta xabar: matn + yangi qator + bir nechta ism (har biriga mention)."""
+    tl = ub_tl()
+    out, ents = text + "\n", []
+    for i, p in enumerate(people):
+        if i:
+            out += ", "
+        name = utag_member_name(p)
+        ents.append(tl.MentionName(offset=u16len(out), length=u16len(name),
+                                   user_id=tl.InputUser(user_id=int(p.id), access_hash=int(getattr(p, "access_hash", 0) or 0))))
+        out += name
+    return out, ents
+
+
+def mafia_on_bot_message(chat_id, sender_username, text):
+    """Mafia bot xabari (yangi yoki tahrirlangan) → seans holati."""
+    run = MAFIA_RUNS.get(chat_id)
+    if not run or (sender_username or "").lower() != MAFIA_BOT.lower():
+        return
+    m = MAFIA_COUNT_RE.search(text or "")
+    if m and run["phase"] == "reg":
+        run["count"] = int(m.group(1))
+    if run["phase"] == "play" and MAFIA_END_RE.search(text or ""):
+        run["phase"] = "ended"
+    elif run["phase"] == "reg" and MAFIA_END_RE.search(text or "") and "bekor" in (text or "").lower():
+        run["phase"] = "ended"
+    elif run["phase"] == "reg" and MAFIA_STARTED_RE.search(text or "") and "Ro'yxatdan" not in (text or ""):
+        run["phase"] = "play"
+
+
+async def mafia_run(uid, run, chat, me_id):
+    cl, cid = run["cl"], run["chat"]
+    games, sent, reason = 0, 0, "done"
+    MAFIA_RUNS[cid] = run
+    try:
+        members = []
+        async for p in cl.iter_participants(chat):
+            if getattr(p, "bot", False) or getattr(p, "deleted", False) or int(p.id) == int(me_id):
+                continue
+            members.append(p)
+            if len(members) >= UTAG_MAX_MEMBERS:
+                break
+        while time.time() < run["until"] and not utag_stop_reason(uid, run):
+            run.update(phase="reg", count=0)
+            await cl.send_message(chat, f"/game@{MAFIA_BOT}")
+            last_game, i = time.time(), 0
+            while run["phase"] == "reg" and time.time() < run["until"]:
+                why = utag_stop_reason(uid, run)
+                if why:
+                    reason = why
+                    break
+                if run["count"] >= run["min"]:
+                    await cl.send_message(chat, f"/start@{MAFIA_BOT}")
+                    run["phase"] = "play"
+                    games += 1
+                    break
+                if time.time() - last_game >= random.uniform(*MAFIA_REFRESH):
+                    await cl.send_message(chat, f"/game@{MAFIA_BOT}")      # ro'yxat vaqtini yangilash
+                    last_game = time.time()
+                if i < len(members):
+                    text, ents = mafia_build(run["text"], members[i:i + MAFIA_PER_MSG])
+                    try:
+                        await cl.send_message(chat, text, formatting_entities=ents, link_preview=False)
+                        sent += len(members[i:i + MAFIA_PER_MSG])
+                    except Exception as e:  # noqa: BLE001
+                        code, secs = ub_err_info(e)
+                        if code == "flood" and secs <= UTAG_FLOOD_MAX:
+                            await _utag_sleep(secs + 1)
+                            continue
+                        if type(e).__name__ in UTAG_FATAL:
+                            reason = "forbidden"
+                            break
+                        raise
+                    i += MAFIA_PER_MSG
+                    await _utag_sleep(max(utag_speed(uid), 0.7))
+                else:
+                    await _utag_sleep(1)
+            if reason != "done":
+                break
+            while run["phase"] == "play" and time.time() < run["until"] and not utag_stop_reason(uid, run):
+                await _utag_sleep(3)                                       # o'yin tugashini kutamiz
+            if utag_stop_reason(uid, run):
+                reason = utag_stop_reason(uid, run)
+                break
+            await _utag_sleep(10)
+    except asyncio.CancelledError:
+        reason = "stop"
+    except Exception as e:  # noqa: BLE001
+        ub_log_err("Mafia seans", e)
+        reason = "error"
+    finally:
+        if MAFIA_RUNS.get(cid) is run:
+            MAFIA_RUNS.pop(cid, None)
+        if UTAG_RUNS.get(uid) is run:
+            UTAG_RUNS.pop(uid, None)
+    await utag_notify(uid, f"🎭 <b>Mafia seansi</b> tugadi: {games} ta o'yin boshlandi, {sent} ta chaqiruv."
+                           + ("" if reason in ("done", "stop") else "\n" + UTAG_END_TEXT.get(reason, "").format(n=sent, wait=0)))
+    return {"reason": reason, "games": games, "sent": sent}
+
+
+async def mafia_start(uid, event, info, text):
+    if not MAFIA_BOT:
+        await utag_notify(uid, "⚙️ <b>.mafia</b>: serverda MAFIA_BOT_USERNAME sozlanmagan.")
+        return
+    args = mafia_parse_args(text)
+    if not args:
+        await utag_notify(uid, "🎭 Foydalanish: <code>.mafia 30m</code> yoki <code>.mafia 1h 18 matn</code> "
+                               "(10 daqiqa – 3 soat; 18 — start uchun minimal o'yinchi, standart 15).")
+        return
+    try:
+        perm = await info["client"].get_permissions(event.chat_id, "me")
+        if not (perm.is_admin or perm.is_creator):
+            await utag_notify(uid, "⛔ <b>.mafia</b> faqat siz admin bo'lgan guruhlarda ishlaydi.")
+            return
+        chat = await event.get_input_chat()
+    except Exception as e:  # noqa: BLE001
+        ub_log_err("Mafia perm", e)
+        return
+    sec, mn, txt = args
+    run = {"chat": event.chat_id, "stop": False, "cl": info["client"], "until": time.time() + sec, "min": mn,
+           "text": txt, "phase": "reg", "count": 0, "mafia": True}
+    UTAG_RUNS[uid] = run
+    run["task"] = asyncio.get_running_loop().create_task(mafia_run(uid, run, chat, info["me_id"]))
+    await utag_notify(uid, f"🎭 <b>Mafia seansi</b> boshlandi: {sec // 60} daqiqa, start — {mn} ta o'yinchidan. "
+                           f"To'xtatish: guruhda <code>.stop</code>.")
 
 
 def utag_stop_runs(uid, why="stop"):
@@ -22176,6 +22335,17 @@ async def utag_ensure_client(uid):
                 ub_log_err("UTag handler", e)
 
         cl.add_event_handler(_handler, tl.NewMessage(outgoing=True))
+
+        async def _mafia_watch(event):
+            try:
+                if event.chat_id in MAFIA_RUNS:
+                    s = await event.get_sender()
+                    mafia_on_bot_message(event.chat_id, getattr(s, "username", None), getattr(event.message, "message", ""))
+            except Exception as e:  # noqa: BLE001
+                ub_log_err("Mafia watch", e)
+
+        cl.add_event_handler(_mafia_watch, tl.NewMessage(incoming=True))
+        cl.add_event_handler(_mafia_watch, tl.MessageEdited(incoming=True))
         UTAG_CLIENTS[uid] = {"client": cl, "me_id": int(me.id), "at": time.time()}
         return True
     finally:
@@ -22317,7 +22487,8 @@ async def utag_save_login(uid, cl, me):
 # ── 🤖 Bot: 🏷 UTag sozlamalar kartasi (ut:<uid>:<amal>) ──
 UTAG_HELP = ("ℹ️ <b>Foydalanish:</b> guruhda o'z akkauntingizdan <code>.tag so'z</code> yozing — buyruq o'chadi va har bir a'zo "
              f"alohida xabarda belgilanadi (ko'pi bilan {UTAG_MAX_MEMBERS} ta). <code>.tags so'z</code> — har bir ism yoniga "
-             "kulgili gap qo'shiladi. To'xtatish: <code>.stop</code>.\n"
+             "kulgili gap qo'shiladi. <code>.mafia 30m</code> / <code>.mafia 1h 18</code> — Mafia o'yin seansi (o'zingiz admin "
+             "guruhda: /game, ro'yxatni yangilab chaqirish, 15+ o'yinchida start). To'xtatish: <code>.stop</code>.\n"
              "⚠️ Kichik kutish vaqti Telegram cheklovlari (spam) xavfini oshiradi.")
 
 
@@ -31103,6 +31274,7 @@ function utagPage(d){
       '<li><b>Tezlik:</b> ➖/➕ — har bir a’zo orasidagi kutish ('+u.min+'–'+u.max+' s). 1 s atrofi xavfsizroq.</li>'+
       '<li><b>Oddiy tag:</b> guruhda o‘z akkauntingizdan <code>.tag Hamma kelsin!</code> — buyruq o‘chadi, har bir a’zo alohida xabarda matn bilan belgilanadi.</li>'+
       '<li><b>Hazil tag:</b> <code>.tags</code> yoki <code>.tags matn</code> — har bir ism yoniga tasodifiy kulgili gap qo‘shiladi (masalan: “Ali Meni ham chaqirsang bo‘lardi-ku.”).</li>'+
+      '<li><b>Mafia seansi:</b> <code>.mafia 30m</code> yoki <code>.mafia 1h 18 matn</code> — belgilangan vaqt davomida akkauntingiz Mafia botda /game beradi, ro‘yxatni har ~27 s yangilaydi, a’zolarni 5 tadan chaqiradi va 15 (yoki siz yozgan son) o‘yinchi yig‘ilganda start qiladi. O‘yin tugagach keyingisi. Faqat siz admin bo‘lgan guruhda.</li>'+
       '<li><b>To‘xtatish:</b> <code>.stop</code>.</li></ol>'+
       '<div class="hsub">Ko‘pi bilan '+u.max_members+' a’zo, bir guruhda '+u.cooldown+' s da bir marta. Emoji, premium emoji va formatlash saqlanadi. Botlar va o‘chirilgan akkauntlar belgilanmaydi.</div>';
     box.innerHTML=h;

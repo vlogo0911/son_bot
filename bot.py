@@ -22262,6 +22262,9 @@ async def mafia_run(uid, run, chat, me_id):
 
 
 async def mafia_start(uid, event, info, text):
+    if not can_test(uid):              # 🧪 test rejimi: hozircha faqat ownerlar va testerlar
+        await utag_notify(uid, "🧪 <b>.mafia</b> hozircha test rejimida — tez orada hamma uchun ochiladi.")
+        return
     if not MAFIA_BOT:
         await utag_notify(uid, "⚙️ <b>.mafia</b>: serverda MAFIA_BOT_USERNAME sozlanmagan.")
         return

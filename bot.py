@@ -4747,7 +4747,7 @@ async def cb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         arm(app, chat_id, game, CRASH_LOBBY_TTL)
 
     elif kind == "anagram":
-        await anag_start(context, chat_id, user, msg.message_id)
+        await edit(context.bot, chat_id, msg.message_id, ANAG_MENU, anag_menu_kb())
 
     elif kind == "croc":
         game = new_game(
@@ -8871,20 +8871,33 @@ async def cb_croc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ───────────────────────────── 🔤 Anagramma (faqat guruhda; krokodil kabi — birinchi topgan yutadi) ─────────────────────────────
-ANAG_FILE = os.path.join(BASE_DIR, "anagram_uz.txt")
 ANAG_ROUNDS = 30
 ANAG_XP = 10                 # record(..., "win", points) — reyting/XP
-ANAG_MONEY = 30              # $ hamyonga
+ANAG_MONEY = 15              # $ hamyonga (to'g'ri javob uchun)
 ANAG_TTL = 600               # faolsizlik — o'yin tugaydi
-_ANAG_WORDS = []
+ANAG_CATS = {                # yo'nalish: (fayl, tugma nomi)
+    "uz":    ("anagram_uz.txt",    "🔤 Umumiy"),
+    "bio":   ("anagram_bio.txt",   "🧬 Biologiya"),
+    "tarix": ("anagram_tarix.txt", "📜 Tarix"),
+    "geo":   ("anagram_geo.txt",   "🌍 Geografiya"),
+}
+_ANAG_WORDS = {}             # cat -> [(word, def), ...]
 _ANAG_APOS = str.maketrans({"ʻ": "'", "‘": "'", "’": "'", "`": "'", "ʼ": "'", "´": "'"})
 
 
-def anag_words():
-    if not _ANAG_WORDS:
-        seen = set()
+def anag_units(w):
+    """o' va g' — bitta harf."""
+    return re.findall(r"[og]'|[^']", w)
+
+
+def anag_words(cat="uz"):
+    if cat not in ANAG_CATS:
+        cat = "uz"
+    if cat not in _ANAG_WORDS:
+        out, seen = [], set()
+        fname = os.path.join(BASE_DIR, ANAG_CATS[cat][0])
         try:
-            for line in open(ANAG_FILE, encoding="utf-8"):
+            for line in open(fname, encoding="utf-8"):
                 if "|" not in line or line.startswith("#"):
                     continue
                 w, d = line.rstrip("\n").split("|", 1)
@@ -8892,15 +8905,11 @@ def anag_words():
                 if " " in w or w in seen or len(anag_units(w)) < 3:
                     continue
                 seen.add(w)
-                _ANAG_WORDS.append((w, d.strip()))
+                out.append((w, d.strip()))
         except OSError:
-            logger.warning("Anagramma: %s topilmadi", ANAG_FILE)
-    return _ANAG_WORDS
-
-
-def anag_units(w):
-    """o' va g' — bitta harf."""
-    return re.findall(r"[og]'|[^']", w)
+            logger.warning("Anagramma: %s topilmadi", fname)
+        _ANAG_WORDS[cat] = out
+    return _ANAG_WORDS[cat]
 
 
 def anag_norm(text):
@@ -8920,7 +8929,7 @@ def anag_scramble(w):
 
 
 def anag_next(game):
-    words = anag_words()
+    words = anag_words(game["cat"])
     pool = [i for i in range(len(words)) if i not in game["used"]] or list(range(len(words)))
     i = random.choice(pool)
     game["used"].add(i)
@@ -8928,56 +8937,74 @@ def anag_next(game):
     game["scr"] = anag_scramble(game["word"])
 
 
-def anag_kb():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("To'xtatish", callback_data="ag:stop")]])
+def anag_menu_kb():
+    rows = [[InlineKeyboardButton(lbl, callback_data=f"ag:cat:{k}")] for k, (_f, lbl) in ANAG_CATS.items()]
+    return InlineKeyboardMarkup(rows)
+
+
+ANAG_MENU = "🔤 <b>Anagramma</b>\nAralashgan harflardan so'zni toping. Yo'nalishni tanlang:"
 
 
 def anag_text(game):
-    return f"<b>{game['round']}/{ANAG_ROUNDS}</b>\n<b>{escape(game['scr'])}</b>\n<i>{escape(game['def'])}</i>"
+    lbl = ANAG_CATS.get(game["cat"], ("", "🔤"))[1]
+    return (f"{lbl} · <b>{game['round']}/{ANAG_ROUNDS}</b>\n"
+            f"<b>{escape(game['scr'])}</b>\n<i>{escape(game['def'])}</i>")
 
 
-async def anag_start(context, chat_id, user, msg_id=None):
-    if not anag_words():
+async def anag_start(context, chat_id, user, cat, msg_id=None):
+    if not anag_words(cat):
+        if msg_id:
+            await edit(context.bot, chat_id, msg_id, "🔤 Anagramma: so'zlar bazasi topilmadi.")
         return False
-    game = new_game(chat_id, "anagram", user.id, round=1, used=set(), word="", scr="", score={}, names={})
+    game = new_game(chat_id, "anagram", user.id, cat=cat, round=1, used=set(),
+                    word="", scr="", score={}, names={}, busy=False)
     anag_next(game)
     if msg_id:
-        await edit(context.bot, chat_id, msg_id, anag_text(game), anag_kb())
+        await edit(context.bot, chat_id, msg_id, anag_text(game))
         game["msg_id"] = msg_id
     else:
-        m = await context.bot.send_message(chat_id, anag_text(game), reply_markup=anag_kb())
+        m = await context.bot.send_message(chat_id, anag_text(game))
         game["msg_id"] = m.message_id
     arm(context.application, chat_id, game, ANAG_TTL)
     return True
 
 
-async def anag_advance(context, chat_id, game, head):
-    """Joriy raund yopiladi (head — natija matni), keyingisi yuboriladi yoki o'yin yakunlanadi."""
+async def anag_finish(context, chat_id, game, head):
+    end_game(chat_id, game)
+    top = sorted(game["score"].items(), key=lambda x: -x[1])[:10]
+    board = "\n".join(f"{i}. {game['names'][u]} — {n} ta" for i, (u, n) in enumerate(top, 1)) or "—"
     try:
-        await context.bot.edit_message_reply_markup(chat_id, game["msg_id"], reply_markup=None)
+        await context.bot.send_message(chat_id, f"{head}\n\n🏁 <b>Anagramma tugadi!</b>\n{board}")
     except TelegramError:
         pass
+
+
+async def anag_advance(context, chat_id, game, head):
+    """Natija (head) yuboriladi, keyingi raund boshlanadi yoki o'yin yakunlanadi."""
     if game["round"] >= ANAG_ROUNDS:
-        end_game(chat_id, game)
-        top = sorted(game["score"].items(), key=lambda x: -x[1])[:10]
-        board = "\n".join(f"{i}. {game['names'][u]} — {n} ta" for i, (u, n) in enumerate(top, 1)) or "—"
-        await context.bot.send_message(chat_id, f"{head}\n\n🏁 <b>Anagramma tugadi!</b>\n{board}")
+        await anag_finish(context, chat_id, game, head)
         return
     game["round"] += 1
     anag_next(game)
-    m = await context.bot.send_message(chat_id, f"{head}\n\n{anag_text(game)}", reply_markup=anag_kb())
+    try:
+        m = await context.bot.send_message(chat_id, f"{head}\n\n{anag_text(game)}")
+    except TelegramError as e:
+        logger.warning("Anagramma: raundni yuborib bo'lmadi: %s", e)
+        end_game(chat_id, game)   # muzlab qolmasin — o'yin tugaydi
+        return
     game["msg_id"] = m.message_id
     arm(context.application, chat_id, game, ANAG_TTL)
 
 
 async def anag_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, game):
     msg, user = update.effective_message, update.effective_user
-    if not game.get("word") or game.get("busy") or anag_norm(msg.text) != anag_norm(game["word"]):
-        return
-    if await fsub_block_msg(update, context):
+    # Qulf (busy) birinchi await'dan OLDIN qo'yiladi — tez-tez to'g'ri javoblar poygaga tushib o'yin qotib qolmasin.
+    if game.get("busy") or not game.get("word") or anag_norm(msg.text) != anag_norm(game["word"]):
         return
     game["busy"] = True
     try:
+        if await fsub_block_msg(update, context):
+            return
         chat_id = msg.chat_id
         save_user(user)
         record(chat_id, user.id, "win", ANAG_XP)
@@ -8997,6 +9024,21 @@ async def anag_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, game)
 async def cb_anagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     chat_id = q.message.chat.id
+    data = q.data
+    if data.startswith("ag:cat:"):
+        cat = data.split(":", 2)[2]
+        if cat not in ANAG_CATS:
+            await q.answer()
+            return
+        if GAMES.get(chat_id):
+            await q.answer(t(chat_id, "busy_alert", game=t(chat_id, "btn_" + GAMES[chat_id]["type"])), show_alert=True)
+            return
+        if await fsub_block_cb(q, context):
+            return
+        await q.answer()
+        await anag_start(context, chat_id, q.from_user, cat, q.message.message_id)
+        return
+    # Eski xabarlardagi tugmalar (ag:stop / ag:show) — moslik uchun
     game = GAMES.get(chat_id)
     if not game or game.get("type") != "anagram":
         await q.answer(t(chat_id, "gone"), show_alert=True)
@@ -9008,9 +9050,10 @@ async def cb_anagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     if game.get("busy") or not game.get("word"):
         return
-    if q.data == "ag:stop":
+    if data == "ag:stop":
         end_game(chat_id, game)
-        await close_game_message(context.bot, chat_id, game, f"⏹ Anagramma to'xtatildi. Javob: <b>{escape(game['word'].upper())}</b>")
+        await close_game_message(context.bot, chat_id, game,
+                                 f"⏹ Anagramma to'xtatildi. Javob: <b>{escape(game['word'].upper())}</b>")
         return
     game["busy"] = True
     try:
@@ -9031,7 +9074,7 @@ async def cmd_anagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if await fsub_block_msg(update, context):
         return
-    await anag_start(context, chat.id, update.effective_user)
+    await msg.reply_text(ANAG_MENU, reply_markup=anag_menu_kb())
 
 
 for _code in LANGS:
@@ -31445,7 +31488,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_memory, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(cb_croc, pattern=r"^croc:show$"))
     app.add_handler(CallbackQueryHandler(cb_game, pattern=r"^g:(number|rsp|xo|memory|crash|croc|casino|frog|anagram|back|menu)$"))
-    app.add_handler(CallbackQueryHandler(cb_anagram, pattern=r"^ag:(show|stop)$"))
+    app.add_handler(CallbackQueryHandler(cb_anagram, pattern=r"^ag:(cat:[a-z]+|show|stop)$"))
     app.add_handler(CallbackQueryHandler(cb_frog, pattern=r"^fr:"))
     app.add_handler(CallbackQueryHandler(cb_bank, pattern=r"^bk:\d+:"))
     app.add_handler(CallbackQueryHandler(cb_bank_app, pattern=r"^bka:\d+:(yes|no)$"))

@@ -1,0 +1,519 @@
+# Anagramma — Tarix atamalari: atama|ta'rif (bir so'zli atamalar)
+tarix|O'tmish voqealarini o'rganuvchi fan
+yilnoma|Voqealar yil bo'yicha yozilgan asar
+manba|Tarixiy ma'lumot olinadigan hujjat
+arxeologiya|Qazilma yodgorliklarni o'rganuvchi fan
+etnografiya|Xalqlar turmushini o'rganuvchi fan
+numizmatika|Tangalarni o'rganuvchi soha
+geraldika|Gerblarni o'rganuvchi soha
+xronologiya|Voqealarni vaqt bo'yicha tartiblash
+asr|Yuz yillik davr
+davr|Tarixning muayyan bo'lagi
+epoxa|Katta tarixiy bosqich
+tsivilizatsiya|Yuksak rivojlangan jamiyat
+madaniyat|Xalqning moddiy va ma'naviy boyligi
+jamiyat|Birga yashovchi odamlar uyushmasi
+davlat|Hokimiyatga ega siyosiy tashkilot
+imperiya|Ko'p xalqni birlashtirgan yirik davlat
+sulola|Hukmdorlar nasli
+monarxiya|Yakka hukmdor boshqaruvi
+respublika|Saylanadigan hokimiyatli davlat
+demokratiya|Xalq hokimiyati boshqaruvi
+diktatura|Cheksiz yakka hokimiyat
+despotiya|Mutlaq zolim hukmdorlik
+oligarxiya|Bir guruh boylar hukmronligi
+anarxiya|Hokimiyatsizlik holati
+feodalizm|O'rta asr yer egaligi tuzumi
+kapitalizm|Xususiy mulk va bozor tuzumi
+sotsializm|Umumiy mulkka asoslangan tuzum
+kommunizm|Sinfsiz jamiyat g'oyasi
+qullik|Insonni mulk qilib saqlash tuzumi
+qul|Erksiz, sotiladigan inson
+dehqon|Yer ishlovchi mehnatkash
+hunarmand|Qo'l mehnati bilan buyum yasovchi
+zodagon|Oliy tabaqa vakili
+aslzoda|Nasl-nasabli yuqori tabaqa
+ruhoniy|Din peshvosi
+savdogar|Oldi-sotdi bilan shug'ullanuvchi
+karvon|Savdo yuklari qatori
+bozor|Savdo-sotiq joyi
+soliq|Davlatga to'lanadigan majburiy to'lov
+xiroj|Yer hosilidan olinadigan soliq
+zakot|Boylikdan beriladigan diniy soliq
+boj|Chegaradan o'tkazishda olinadigan to'lov
+qonun|Majburiy huquqiy me'yor
+farmon|Hukmdor buyrug'i
+nizom|Tashkilot ichki qoidasi
+konstitutsiya|Davlatning asosiy qonuni
+mustamlaka|Bosib olingan qaram hudud
+metropoliya|Mustamlakaga ega bo'lgan davlat
+protektorat|Homiylik ostidagi qaram davlat
+anneksiya|Hududni zo'rlik bilan qo'shib olish
+ekspansiya|Hududni kengaytirish siyosati
+istilo|Zo'rlik bilan bosib olish
+bosqin|Dushman hujumi
+fath|G'alaba bilan hudud egallash
+ag'darish|Hokimiyatni zo'rlik bilan olib tashlash
+inqilob|Jamiyatdagi tub o'zgarish
+isyon|Hokimiyatga qarshi qo'zg'olon
+qo'zg'olon|Ommaviy norozilik harakati
+g'alayon|Tartibsizlik va bosh ko'tarish
+reforma|Islohot, o'zgartirish
+islohot|Tuzumni yangilash tadbirlari
+modernizatsiya|Jamiyatni zamonaviylashtirish
+industrlashtirish|Sanoatni rivojlantirish siyosati
+kollektivlashtirish|Xo'jaliklarni birlashtirish siyosati
+urbanizatsiya|Shahar aholisining ko'payishi
+globallashuv|Dunyoning yaxlitlashuvi
+urush|Davlatlar o'rtasidagi qurolli to'qnashuv
+jang|Qo'shinlar to'qnashuvi
+janggoh|Jang bo'lgan maydon
+armiya|Davlat qurolli kuchlari
+qo'shin|Harbiy kuch to'plami
+lashkar|Jangchilar guruhi
+sarkarda|Qo'shin boshlig'i
+lashkarboshi|Qo'shin qo'mondoni
+jangchi|Jangda qatnashuvchi
+ritsar|O'rta asr zirhli otliq jangchisi
+samuray|Yapon jangchisi
+legioner|Rim qo'shini askari
+gladiator|Rimda arenada jang qilgan qul
+amazonka|Afsonaviy ayol jangchi
+qalqon|Himoya qurolidan biri
+qilich|Uzun tig'li jang quroli
+nayza|Uchi o'tkir uzun qurol
+kamon|O'q otuvchi egma qurol
+to'p|Portlovchi o't bilan otiladigan qurol
+miltiq|O'qotar yakka qurol
+zambarak|Katta harbiy to'p
+qal'a|Mudofaa inshooti
+istehkom|Himoya uchun qurilgan mustahkamlik
+qo'rg'on|Devor bilan o'ralgan mudofaa joyi
+saroy|Hukmdor turar joyi
+taxt|Hukmdor o'rni
+toj|Hukmdorlik ramzi
+podsho|Davlat hukmdori
+shoh|Fors-tojik hukmdori unvoni
+sulton|Musulmon hukmdori unvoni
+amir|Hukmdor yoki qo'mondon unvoni
+xon|Turkiy xalqlar hukmdori
+xoqon|Oliy turkiy hukmdor
+imperator|Imperiya hukmdori
+sezar|Rim imperatori unvoni
+qirol|Yevropa monarxi
+qirolicha|Ayol monarx
+malika|Shahzoda xotini yoki qizi
+shahzoda|Hukmdor o'g'li
+vazir|Hukmdor yordamchisi va maslahatchisi
+beklarbegi|Viloyatlar boshqaruvchisi
+hokim|Viloyat boshqaruvchisi
+noib|O'rinbosar amaldor
+elchi|Davlat vakili
+diplomat|Davlatlararo munosabat vakili
+bitim|Rasmiy kelishuv
+shartnoma|Tomonlar o'rtasidagi rasmiy ahd
+ittifoq|Davlatlar birlashmasi
+koalitsiya|Vaqtinchalik harbiy birlashma
+sulh|Urushni to'xtatuvchi kelishuv
+yarashuv|Nizoni tugatish
+ultimatum|Qattiq talab bilan ogohlantirish
+blokada|Qamal qilib yakkalash
+qamal|Shaharni o'rab qo'yish
+ekspeditsiya|Uzoqqa yurish yoki safar
+yurish|Qo'shin harbiy harakati
+bosqinchi|Istilo qiluvchi
+mustaqillik|Davlatning erkinligi
+ozodlik|Qaramlikdan xalos bo'lish
+suverenitet|Davlatning to'liq mustaqilligi
+federatsiya|Davlatlar ittifoqi
+konfederatsiya|Mustaqil davlatlar birlashmasi
+parlament|Qonun chiqaruvchi organ
+senat|Oliy kengash palatasi
+kengash|Maslahat organi
+qurultoy|Katta anjuman
+veche|Qadimgi slavyan xalq yig'ini
+agora|Qadimgi yunon maydoni
+forum|Rimdagi jamoat maydoni
+polis|Qadimgi yunon shahar-davlati
+kolonizatsiya|Yangi yerlarni o'zlashtirish
+migratsiya|Aholining ko'chishi
+diaspora|Vatandan tashqaridagi xalq
+genotsid|Xalqni ommaviy qirish
+repressiya|Siyosiy ta'qib va jazo
+surgun|Majburiy ko'chirish jazosi
+quvg'in|Yurtdan haydash
+inkvizitsiya|O'rta asr diniy sudi
+krepostnoy|Yerga biriktirilgan dehqon
+barshchina|Mehnat bilan to'lanadigan majburiyat
+obrok|Natura yoki pul bilan to'lov majburiyati
+manufaktura|Qo'l mehnatiga asoslangan korxona
+gildiya|Hunarmandlar uyushmasi
+sex|Hunarmandlar birlashmasi
+tsex|O'rta asr hunarmand uyushmasi
+burjua|Shahar boy tabaqasi
+proletariat|Ishchilar sinfi
+dvoryan|Rus zodagoni
+boyar|Qadimgi rus aslzodasi
+knyaz|Slavyan hukmdori unvoni
+tsar|Rus podshosi
+xalifa|Islom dunyosi hukmdori
+xalifalik|Xalifa boshqaradigan davlat
+imomat|Diniy rahbarlik boshqaruvi
+bek|Zodagon yoki boshqaruvchi unvoni
+bahodir|Mard jangchi unvoni
+botir|Qahramon jangchi
+qahramon|Jasorat ko'rsatgan inson
+sohibqiron|Baxtli yulduz ostida tug'ilgan hukmdor
+mirzo|Zodagon yoki shahzoda unvoni
+mang'it|Buxoro amirligi sulolasi
+shayboniy|O'zbek xonlari sulolasi
+ashtarxoniy|Buxoro hukmron sulolasi
+temuriy|Amir Temur avlodi
+chig'atoy|Chingizxon o'g'li ulusi
+oltinorda|Mo'g'ullar tuzgan davlat
+ulus|Mo'g'ul davlat bo'linmasi
+xonlik|Xon boshqaradigan davlat
+amirlik|Amir boshqaradigan davlat
+somoniylar|Movarounnahr forsiy sulolasi
+qoraxoniylar|Turkiy musulmon sulolasi
+saljuqiylar|Turkiy yirik imperiya sulolasi
+g'aznaviylar|Afg'onistonda tashkil topgan sulola
+xorazmshohlar|Xorazm hukmron sulolasi
+ahamoniylar|Qadimgi Fors sulolasi
+sosoniylar|Keyingi Fors imperiyasi sulolasi
+kushon|Qadimgi Markaziy Osiyo imperiyasi
+baqtriya|Qadimgi O'rta Osiyo davlati
+so'g'd|Qadimgi Zarafshon vohasi davlati
+xorazm|Qadimgi Amudaryo quyi davlati
+massaget|Qadimgi ko'chmanchi qabila
+sak|Qadimgi O'rta Osiyo qabilasi
+skif|Qadimgi ko'chmanchi xalq
+sarmat|Qadimgi ko'chmanchi qabila
+hun|Qadimgi ko'chmanchi turkiy xalq
+turk|Qadimgi turkiy xalq
+mo'g'ul|Chingizxon birlashtirgan xalq
+tatar|O'rta asr turkiy xalqi
+arab|Islomni tarqatgan xalq
+fors|Qadimgi Eron xalqi
+yunon|Qadimgi Gretsiya xalqi
+rim|Qadimgi imperiya poytaxti
+vizantiya|Sharqiy Rim imperiyasi
+usmoniy|Turk imperiyasi sulolasi
+mamluk|Misrdagi harbiy sulola
+krestchi|Salib yurishi jangchisi
+vikinglar|Skandinaviya dengizchi jangchilari
+normann|Shimoliy jangchi xalq
+kelt|Qadimgi Yevropa xalqi
+german|Qadimgi Yevropa qabilalari
+slavyan|Sharqiy Yevropa xalqlari guruhi
+feodal|Yer egasi aslzoda
+vassal|Feodalga qaram jangchi
+senyor|Yer egasi homiy
+piramida|Misr fir'avnlari maqbarasi
+sfenks|Odam boshli sher haykali
+firavn|Qadimgi Misr hukmdori
+mumiyo|Saqlab qolingan jasad
+ieroglif|Qadimgi suratli yozuv
+kuneyform|Mixxat yozuvi
+papirus|Misr yozuv materiali
+pergament|Teridan tayyorlangan yozuv materiali
+qo'lyozma|Qo'lda yozilgan kitob
+toshbitik|Toshga o'yilgan yozuv
+bitik|Qadimgi turkiy yozuv
+alifbo|Harflar tizimi
+ziggurat|Mesopotamiya pog'onali ibodatxonasi
+akropol|Yunon shaharining yuqori qal'asi
+kolizey|Rimdagi mashhur arena
+akveduk|Rim suv o'tkazgichi
+termalar|Rim jamoat hammomlari
+amfiteatr|Dumaloq tomoshagoh
+katakomba|Yer osti dafn yo'laklari
+mavzoley|Hashamatli maqbara
+maqbara|Dafn qilingan joy ustidagi inshoot
+madrasa|O'rta asr oliy diniy maktabi
+masjid|Musulmonlar ibodatxonasi
+minora|Baland diniy inshoot
+gumbaz|Yarim shar shaklidagi tom
+cherkov|Nasroniylar ibodatxonasi
+sobor|Katta bosh cherkov
+monastir|Rohiblar yashaydigan joy
+ibodatxona|Diniy marosim o'tkaziladigan bino
+karvonsaroy|Savdogarlar to'xtaydigan joy
+rabot|Chegara istehkomi
+shahriston|O'rta asr shahar markazi
+arkdevor|Shahar mudofaa devori
+registon|Shaharning markaziy maydoni
+madaniyatshunoslik|Madaniyatni o'rganuvchi soha
+renessans|Uyg'onish davri
+gumanizm|Insonni ulug'lash g'oyasi
+maarifat|Ma'rifatchilik davri
+reformatsiya|Cherkov islohoti harakati
+prosvetitel|Ma'rifatparvar mutafakkir
+jadid|Yangilik tarafdori islohotchi
+mujohid|Din yo'lida kurashuvchi
+qoraqalpoq|Markaziy Osiyo xalqi
+basmachi|Sovetlarga qarshi qo'zg'olonchi
+kolxoz|Jamoa xo'jaligi
+sovxoz|Davlat xo'jaligi
+industriya|Sanoat tarmog'i
+plan|Xo'jalik rejasi
+pyatiletka|Besh yillik reja
+depressiya|Iqtisodiy inqiroz davri
+inflyatsiya|Pulning qadrsizlanishi
+devalvatsiya|Valyuta qadrining tushishi
+kontributsiya|Yengilgan tomondan olinadigan to'lov
+reparatsiya|Urush zararini qoplash to'lovi
+anneksionist|Hudud bosib oluvchi siyosatchi
+pasifist|Urushga qarshi harakat tarafdori
+natsizm|Irqchi milliy mafkura
+fashizm|Zo'ravon diktator mafkura
+bolshevik|Rus inqilobchi partiyasi a'zosi
+menshevik|Mo''tadil sotsialist oqim
+revolyutsioner|Inqilobchi kurashchi
+partizan|Yashirin qarshilik jangchisi
+podpolie|Yashirin siyosiy faoliyat
+manifest|Dastur mohiyatli e'lon
+deklaratsiya|Rasmiy e'lon hujjati
+petitsiya|Rasmiy murojaatnoma
+memorandum|Rasmiy eslatma hujjati
+protokol|Majlis bayonnomasi
+traktat|Shartnoma yoki ilmiy risola
+xartiya|Huquqlar to'g'risidagi hujjat
+kodeks|Qonunlar to'plami
+indeks|Taqiqlangan kitoblar ro'yxati
+yarmarka|Davriy katta savdo ko'rgazmasi
+monopoliya|Yakka hukmron savdo huquqi
+sindikat|Korxonalar savdo uyushmasi
+trest|Yirik sanoat birlashmasi
+kartel|Narx kelishuvchi korxonalar uyushmasi
+birja|Qimmatli qog'oz va mol savdosi joyi
+veksel|Qarz majburiyati qog'ozi
+aksiya|Korxona ulush qog'ozi
+kapital|Daromad keltiruvchi boylik
+renta|Yer yoki mulkdan olinadigan daromad
+barter|Molni molga ayirboshlash
+tovar|Sotish uchun ishlab chiqarilgan mahsulot
+ipakyoli|Qadimgi Sharq-G'arb savdo yo'li
+amfora|Qadimgi suyuqlik idishi
+artefakt|Odam yasagan qadimiy buyum
+yodgorlik|Tarixiy ahamiyatli obida
+obida|Xotira inshooti
+nekropol|Qadimgi qabristan
+kurgan|Qabr ustidagi tepalik
+dolmen|Toshdan qurilgan qadimiy qabr
+menhir|Tik o'rnatilgan qadimgi tosh
+petroglif|Qoyaga o'yilgan tasvir
+oltoshkoik|Qadimgi tosh davri manzilgohi
+paleolit|Qadimgi tosh asri
+mezolit|O'rta tosh asri
+neolit|Yangi tosh asri
+eneolit|Mis-tosh davri
+bronza|Mis va qalay qotishmasi davri
+temir|Metall qurollar tarqalgan davr
+primitiv|Ibtidoiy, oddiy tuzum
+ibtidoiy|Eng qadimgi jamoa tuzumi
+urug'chilik|Qarindoshlikka asoslangan tuzum
+matriarxat|Ayol boshchiligidagi urug' tuzumi
+patriarxat|Erkak boshchiligidagi tuzum
+qabila|Bir necha urug' birlashmasi
+elat|Qabilalardan tashkil topgan xalq
+millat|Yagona til va hudud xalqi
+etnos|Umumiy madaniyatli xalq
+assimilyatsiya|Bir xalqning boshqasiga singishi
+integratsiya|Birlashish jarayoni
+dezintegratsiya|Parchalanish jarayoni
+separatizm|Ajralib chiqish harakati
+nasionalizm|Millatchilik mafkurasi
+patriotizm|Vatanparvarlik tuyg'usi
+internatsionalizm|Xalqlar birdamligi g'oyasi
+kolonializm|Mustamlakachilik siyosati
+imperializm|Bosqinchilik va kengayish siyosati
+militarizm|Harbiy kuchni ulug'lash siyosati
+totalitarizm|To'liq nazorat tuzumi
+avtoritarizm|Qattiq yakka boshqaruv
+liberalizm|Erkinlikni ulug'lovchi mafkura
+konservatizm|Eski tartiblarni saqlash mafkurasi
+radikalizm|Keskin o'zgarish tarafdorligi
+populizm|Omma kayfiyatiga moslashuv siyosati
+teokratiya|Din peshvolari boshqaruvi
+plutokratiya|Boylar hukmronligi
+meritokratiya|Qobiliyatga asoslangan boshqaruv
+monoteizm|Yakkaxudolik e'tiqodi
+politeizm|Ko'pxudolik e'tiqodi
+butparastlik|Butlarga sig'inish
+shomonizm|Qadimgi ruhlarga sig'inish
+zardushtiylik|Qadimgi Fors dini
+buddizm|Hindistonda paydo bo'lgan din
+xristianlik|Iso payg'ambar dini
+yahudiylik|Qadimgi yahudiylar dini
+islom|Muhammad payg'ambar dini
+qur'on|Islomning muqaddas kitobi
+injil|Xristianlikning muqaddas kitobi
+tavrot|Yahudiylarning muqaddas kitobi
+avesto|Zardushtiylikning muqaddas kitobi
+hadis|Payg'ambar so'zlari to'plami
+shariat|Islom huquqiy qonunlari
+fiqh|Islom huquqshunosligi
+ijtihod|Diniy masalada mustaqil fikr yuritish
+fatvo|Diniy huquqiy xulosa
+vaqf|Diniy ehtiyojga ajratilgan mulk
+hajj|Makka ziyorati marosimi
+jihod|Din yo'lidagi kurash
+xutba|Juma namozidagi va'z
+azon|Namozga chaqiruv
+qoziqalon|Oliy qozi lavozimi
+qozi|Shariat sudyasi
+mufti|Fatvo beruvchi din olimi
+mutavalli|Vaqf mulki boshqaruvchisi
+muhtasib|Bozor va axloq nazoratchisi
+mirshab|Shahar tartibini saqlovchi
+yasovul|Saroy soqchi xizmatchisi
+xazinador|Davlat xazinasi boshqaruvchisi
+muhrdor|Davlat muhrini saqlovchi amaldor
+devonbegi|Devon boshqaruvchisi amaldor
+otaliq|Shahzoda tarbiyachisi amaldori
+inoq|Hukmdor eng yaqin maslahatchisi
+qushbegi|Oliy vazir unvoni
+tamg'a|Davlat muhri yoki belgisi
+yorliq|Hukmdor farmoni yoki ruxsatnomasi
+suyurg'ol|Xizmat uchun berilgan yer
+iqto|Soliqqa beriladigan yer mulki
+tanxoh|Xizmat uchun belgilangan maosh
+mulk|Shaxsiy yer egaligi
+amlok|Davlat yer mulki
+chorva|Mol-qo'y xo'jaligi
+dehqonchilik|Yer ishlash xo'jaligi
+hunarmandchilik|Qo'l mehnati sohasi
+kosiblik|Mayda hunarmandchilik
+me'morchilik|Bino qurish san'ati
+naqqoshlik|Naqsh solish san'ati
+xattotlik|Chiroyli yozuv san'ati
+miniatyura|Qo'lyozmaga ishlangan mayda rasm
+koshin|Sirli bezak sopoli
+ganch|O'ymakor devor bezagi
+mozaika|Rangli parchalardan tasvir
+freska|Nam devorga ishlangan rasm
+qadimshunoslik|Qadimiyatni o'rganuvchi soha
+manbashunoslik|Tarixiy manbalarni o'rganuvchi fan
+muzeyshunoslik|Muzey ishi haqidagi soha
+arxivshunoslik|Arxiv hujjatlari fani
+genealogiya|Nasl-nasabni o'rganuvchi soha
+epigrafika|Qadimgi yozuvlarni o'rganuvchi soha
+diplomatika|Tarixiy hujjatlarni o'rganuvchi soha
+metrologiya|Qadimgi o'lchov birliklari fani
+toponimika|Joy nomlarini o'rganuvchi soha
+onomastika|Shaxs nomlarini o'rganuvchi soha
+inauguratsiya|Hokimiyatga tantanali kirishish
+koronatsiya|Tojni tantanali kiyish marosimi
+abdikatsiya|Taxtdan voz kechish
+restavratsiya|Eski tuzumni tiklash
+interregnum|Hokimiyatsiz oraliq davr
+plebissit|Umumxalq so'rovi
+referendum|Muhim masalada umumiy ovoz
+amnistiya|Jazodan ommaviy ozod qilish
+emigratsiya|Vatandan chet elga ketish
+immigratsiya|Chet eldan kelib joylashish
+deportatsiya|Majburiy chiqarib yuborish
+intervensiya|Chet davlat aralashuvi
+annexiya|Hududni egallab olish
+protektsionizm|Ichki sanoatni himoya siyosati
+merkantilizm|Oltin to'plashga asoslangan siyosat
+fiziokratiya|Yer boyligini asos deb bilgan oqim
+laissez|Erkin savdoni yoqlovchi tamoyil
+koteriya|Yopiq siyosiy guruh
+kamarilya|Hukmdor atrofidagi maxfiy guruh
+fronda|Hokimiyatga qarshi zodagon harakati
+jakeriya|O'rta asr dehqon qo'zg'oloni
+luddit|Mashinalarni buzgan ishchi harakati
+chartizm|Ingliz ishchilar siyosiy harakati
+dekabrist|Rus zodagon inqilobchilari
+narodnik|Xalqqa borish harakati vakili
+kadet|Rus liberal partiyasi a'zosi
+eser|Sotsialist-inqilobchi partiya a'zosi
+soviet|Ishchilar deputatlari kengashi
+komintern|Xalqaro kommunistik tashkilot
+antanta|Birinchi jahon urushi harbiy ittifoqi
+blitskrig|Chaqmoq tezligidagi urush
+front|Harbiy harakatlar chizig'i
+plasdarm|Hujum uchun egallangan hudud
+desant|Dushman ortiga tashlangan qo'shin
+flot|Dengiz harbiy kuchlari
+eskadra|Harbiy kemalar guruhi
+galera|Eshkakli qadimgi harbiy kema
+fregat|Yelkanli harbiy kema
+korvet|Kichik harbiy kema
+bronenosets|Zirhli harbiy kema
+kreyser|Tezyurar harbiy kema
+avianosets|Samolyot tashuvchi kema
+tankizm|Qurolli zirhli mashinalar taktikasi
+kavaleriya|Otliq qo'shin
+infanteriya|Piyoda qo'shin
+artilleriya|To'pchi qo'shin
+drujina|Knyazning harbiy guruhi
+opolchenie|Xalq lashkari
+rekrut|Majburan olingan askar
+dezertir|Qochoq askar
+trofey|Jangda olingan o'lja
+kontrataka|Qarshi hujum
+oborona|Mudofaa harakati
+nastuplenie|Hujum harakati
+kapitulyatsiya|Shartsiz taslim bo'lish
+peremirie|Vaqtinchalik sulh
+demarkatsiya|Chegara belgilash
+plebey|Qadimgi Rim oddiy fuqarosi
+patritsiy|Qadimgi Rim zodagoni
+konsul|Rim oliy amaldori
+tribun|Xalq huquqini himoya qiluvchi amaldor
+diktatorlik|Favqulodda cheksiz hokimiyat
+triumvirat|Uch hukmdor ittifoqi
+pretor|Rim sudya amaldori
+senturion|Rim yuzboshi
+falanga|Yunon piyoda jang tartibi
+spartanets|Sparta jangchisi
+ellinizm|Yunon madaniyati tarqalgan davr
+fir'avnlik|Misr hukmdorlik tuzumi
+nom|Qadimgi Misr viloyati
+satrapiya|Fors imperiyasi viloyati
+satrap|Fors viloyati hokimi
+vizirlik|Bosh vazir lavozimi
+yanichar|Usmoniy saroy piyoda askari
+sipoh|Usmoniy otliq jangchisi
+devshirme|Usmoniyda bolalarni jamlash tartibi
+qoraqum|Tarixiy sahro hududi
+ashina|Turk xoqonligi hukmron urug'i
+qoraxitoy|O'rta Osiyoni bosgan davlat
+jele|Mo'g'ul qonun to'plami
+noyon|Mo'g'ul harbiy zodagoni
+tumen|O'n ming kishilik qo'shin
+bakovul|Qo'shinni ta'minlovchi amaldor
+qorovulbegi|Qorovullar boshlig'i
+mingboshi|Ming kishilik qism boshlig'i
+yuzboshi|Yuz askar boshlig'i
+oqsoqol|Qishloq oqsoqoli boshqaruvchi
+mahalla|Shahar jamoasi birligi
+guzar|Mahalladagi savdo joyi
+rasta|Bozordagi savdo qatori
+tim|Usti yopiq savdo rastasi
+toqi|Gumbazli savdo chorrahasi
+chorsu|To'rt yo'lli bozor markazi
+sardoba|Yer osti suv ombori
+obanbor|Suv to'playdigan inshoot
+koriz|Yer osti suv kanali
+chig'ir|Suv chiqaruvchi charx
+tegirmon|Don tortadigan qurilma
+charxpalak|Suv bilan aylanadigan qurilma
+kemasozlik|Kema yasash sohasi
+qurolsozlik|Qurol yasash hunari
+zargarlik|Qimmatbaho buyum yasash
+kulolchilik|Sopol idish yasash hunari
+to'quvchilik|Mato to'qish sohasi
+chustiylik|Chust pichoqchilik maktabi
+zarbxona|Tanga zarb qilinadigan joy
+dirham|Qadimgi kumush tanga
+dinor|Qadimgi oltin tanga
+tanga|Metall pul birligi
+pul|Ayirboshlash vositasi
+tilla|Oltin tanga birligi
+akcha|Usmoniy kumush tangasi
+grivna|Qadimgi rus pul birligi
+rubl|Rus pul birligi

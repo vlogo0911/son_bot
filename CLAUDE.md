@@ -551,10 +551,14 @@
 - 👥 UTag referal: `?start=ref_<uid>` → `utag_ref_on_start` (cmd_start'da `was_new` — botga BIRINCHI marta kirgan bo'lsa; o'zini, takrorni,
   botni ishlatmagan taklifchini sanamaydi), jadval `utag_refs` (new_uid PK, ref_uid); har `UTAG_REF_NEED` 3 tadan +`UTAG_REF_DAYS` 7 kun `utag_subs`.
   Bot kartasi va web app UTag'da havola (`utag_ref_link`), soni, 📋 nusxa / 📤 ulashish; payload `utag.ref`.
-- 🔤 Anagramma (faqat guruh, `/anagramma` yoki /emps → "🔤 Anagramma" `g:anagram`): so'zlar `anagram_uz.txt` (so'z|ta'rif, ~596 ta, `anag_words`;
-  o'/g' bitta harf — `anag_units`), raund xabari "N/30 · HARFLAR · ta'rif" + faqat "To'xtatish" tugmasi ("Javobni ko'rish" olib tashlandi; eski `ag:show` hali ishlaydi) (`cb_anagram` —
-  boshlagan odam/adminlar/bot egalari). Birinchi to'g'ri yozgan (`anag_norm`) — `record(..., "win", ANAG_XP 10)` + `ANAG_MONEY` 30$, keyingi raund;
-  30 raunddan keyin natijalar jadvali. `GAMES` da type `anagram`, faolsizlik `ANAG_TTL` 600 s.
+- 🔤 Anagramma (faqat guruh, `/anagramma` yoki /emps → "🔤 Anagramma" `g:anagram` → yo'nalish tanlash menyusi `anag_menu_kb`
+  `ag:cat:<uz|bio|tarix|geo>`): 4 yo'nalish `ANAG_CATS` — 🔤 Umumiy / 🧬 Biologiya / 📜 Tarix / 🌍 Geografiya, har biri alohida fayl
+  (`anagram_uz.txt` ~596, `anagram_bio.txt` ~519, `anagram_tarix.txt` ~518, `anagram_geo.txt` ~516; so'z|ta'rif, bir so'zli atamalar,
+  `anag_words(cat)` per-cat kesh; o'/g' bitta harf — `anag_units`). Raund xabari "yo'nalish · N/30 · HARFLAR · ta'rif", TUGMASIZ
+  (to'xtatish tugmasi olib tashlandi; `/stop` to'xtatadi; eski `ag:show`/`ag:stop` moslik uchun qoldi). Birinchi to'g'ri yozgan
+  (`anag_norm`) — `record(..., "win", ANAG_XP 10)` + `ANAG_MONEY` **15$**, keyingi raund; 30 raunddan keyin natijalar jadvali (`anag_finish`).
+  Muzlab qolish tuzatildi: `busy` qulfi `fsub` await'idan OLDIN qo'yiladi (tez-tez javoblar poygaga tushmasin), `anag_advance` keyingi
+  raundni yuborolmasa o'yinni yakunlaydi. `GAMES` type `anagram` (cat/busy saqlanadi), faolsizlik `ANAG_TTL` 600 s.
 - 🎭 UTag `.mafia` (🧪 TEST — faqat `can_test`: ownerlar/testerlar) `.mafia <10m–3h> [min 4–30, standart 15] [matn]` (`mafia_start`/`mafia_run`, `MAFIA_RUNS`; UTAG_RUNS ichida, `.stop` to'xtatadi):
   faqat foydalanuvchi admin bo'lgan guruhda. Akkaunt `/game@MAFIA_BOT_USERNAME` (env) yuboradi, ro'yxat ochiq ekan har 27–28 s qayta /game
   (`MAFIA_REFRESH`), a'zolarni `MAFIA_PER_MSG` 5 tadan bitta xabarda (`mafia_build`, tezlik ≥0.7 s) chaqiradi; Mafia bot xabarlari (yangi/tahrir,

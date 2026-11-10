@@ -1,0 +1,518 @@
+# Anagramma — Geografiya atamalari: atama|ta'rif (bir so'zli atamalar)
+geografiya|Yer yuzini o'rganuvchi fan
+kartografiya|Xaritalar tuzish fani
+topografiya|Yer yuzi relyefini o'rganuvchi soha
+geodeziya|Yerni o'lchash fani
+globus|Yer sharining modeli
+xarita|Yer yuzining tekis tasviri
+atlas|Xaritalar to'plami
+masshtab|Xaritadagi kichraytirish nisbati
+meridian|Qutblarni tutashtiruvchi chiziq
+parallel|Ekvatorga parallel chiziq
+ekvator|Yerni teng bo'luvchi chiziq
+koordinata|Nuqta o'rnini aniqlovchi son
+kenglik|Ekvatordan burchak masofasi
+uzunlik|Bosh meridiandan burchak masofasi
+azimut|Shimoldan burchak yo'nalishi
+kompas|Yo'nalish ko'rsatuvchi asbob
+relyef|Yer yuzi ko'rinishi
+materik|Katta quruqlik massasi
+qit'a|Yirik quruqlik qismi
+okean|Eng katta suv havzasi
+dengiz|Okeanning quruqlikka kirgan qismi
+ko'rfaz|Dengizning quruqlikka kirgan qismi
+qo'ltiq|Dengizning quruqlik ichkarisidagi qismi
+bo'g'oz|Ikki suvni tutashtiruvchi tor joy
+archipelag|Orollar guruhi
+orol|Atrofi suv bilan o'ralgan quruqlik
+yarimorol|Uch tomoni suv bilan o'ralgan quruqlik
+burun|Quruqlikning dengizga chiqqan uchi
+qirg'oq|Suv va quruqlik chegarasi
+plyaj|Dengiz bo'yidagi qumli qirg'oq
+rif|Suv ostidagi marjon to'siq
+atoll|Halqasimon marjon orol
+laguna|Dengizdan ajralgan sayoz havza
+tog'|Juda baland ko'tarilma yer
+tizma|Tog'lar qatori
+cho'qqi|Tog'ning eng baland nuqtasi
+dovon|Tog'dagi o'tish joyi
+vodiy|Tog'lar orasidagi pastlik
+dara|Chuqur tor tog' vodiysi
+kanyon|Chuqur tik devorli vodiy
+plato|Baland tekis yer
+tekislik|Yalpi yassi hudud
+pasttekislik|Dengiz sathidan past tekislik
+qirlar|Pastbaland tepaliklar
+tepalik|Kichik baland yer
+qiya|Nishab yon bag'ir
+vulqon|Lava otiluvchi tog'
+krater|Vulqon og'zi
+lava|Vulqondan otilgan eritilgan jins
+magma|Yer ostidagi erigan jins
+zilzila|Yer qimirlashi
+epitsentr|Zilzila markazi ustidagi nuqta
+seysmik|Yer silkinishiga oid
+gorizont|Yer va osmon tutashgan chiziq
+daryo|Oqib turuvchi suv oqimi
+irmoq|Katta daryoga quyiluvchi daryo
+havza|Daryo suv to'playdigan hudud
+delta|Daryo quyilish joyidagi tarmoqlar
+estuariy|Daryoning dengizga keng quyilishi
+qaynar|Daryoning tez oqar joyi
+sharshara|Balanddan quyiluvchi suv
+ko'l|Atrofi quruqlik bilan o'ralgan suv
+botqoq|Suv bosib yotgan yer
+buloq|Yerdan chiqib turuvchi suv
+gheyzer|Qaynoq suv otilib chiqadigan buloq
+muzlik|Doimiy muz qatlami
+aysberg|Suzib yuruvchi muz tog'i
+cho'l|Suvsiz qurg'oqchil hudud
+sahro|Qumli issiq cho'l
+voha|Cho'l o'rtasidagi sersuv joy
+dasht|Keng o'tloqli tekislik
+savanna|Tropik o'tloqli dasht
+tundra|Sovuq daraxtsiz hudud
+tayga|Shimoliy ignabargli o'rmon
+o'rmon|Ko'p daraxtli hudud
+jungli|Qalin tropik o'rmon
+qumtepa|Shamol to'plagan qum uyumi
+barxan|Yarimoy shaklidagi qum tepa
+taqir|Sho'rlangan qattiq tuproqli yer
+iqlim|Hududning doimiy ob-havosi
+obhavo|Atmosfera holati
+atmosfera|Yerni o'rab turgan havo qobig'i
+troposfera|Atmosferaning quyi qatlami
+stratosfera|Ozon qavatli atmosfera qatlami
+ionosfera|Atmosferaning yuqori ionlashgan qatlami
+harorat|Havo issiqlik darajasi
+bosim|Atmosfera og'irlik kuchi
+namlik|Havodagi suv bug'i miqdori
+yog'in|Osmondan tushuvchi suv
+yomg'ir|Suyuq yog'in turi
+qor|Muzlagan oq yog'in
+do'l|Muz donalari yog'ishi
+shudring|Tongda tushadigan suv tomchilari
+qirov|Sovuqda muzlagan shudring
+tuman|Yerga yaqin bulut
+bulut|Osmondagi suv bug'i to'plami
+shamol|Havoning gorizontal harakati
+bo'ron|Kuchli shamolli ob-havo
+dovul|Qattiq shamol
+siklon|Past bosimli aylanma havo
+antisiklon|Yuqori bosimli havo
+musson|Mavsumiy yo'nalish o'zgartiruvchi shamol
+passat|Doimiy tropik shamol
+briz|Qirg'oq bo'yidagi kunlik shamol
+tornado|Quruqlikdagi aylanma bo'ron
+tayfun|Tropik kuchli bo'ron
+uragan|Dengiz ustidagi kuchli bo'ron
+smerch|Suv ustidagi aylanma ustun
+yashin|Momaqaldiroqdagi elektr uchquni
+kamalak|Yomg'irdan keyingi rangli yoy
+izoterma|Teng haroratli chiziq
+izobara|Teng bosimli chiziq
+amplituda|Harorat tebranish farqi
+konveksiya|Havoning ko'tarilib harakatlanishi
+kondensatsiya|Bug'ning suvga aylanishi
+bugʻlanish|Suvning gazga aylanishi
+dreykt|Suv va havo oqimi
+oqim|Okeandagi suv harakati
+toshqin|Suvning ko'tarilib yoyilishi
+qalqish|Dengiz suvining ko'tarilib-tushishi
+suvosti|Suv ostidagi relyef qismi
+shelf|Materikning suv ostidagi tokchasi
+chuqurlik|Okeanning eng pastki joyi
+botiq|Yer yuzidagi pastlik
+cho'kma|Yer cho'kkan joy
+ko'tarilma|Yuqoriga ko'tarilgan hudud
+litosfera|Yerning qattiq tashqi qobig'i
+mantiya|Yadro bilan po'st orasidagi qatlam
+yadro|Yerning markaziy qismi
+po'stloq|Yerning tashqi qattiq qavati
+plita|Litosferaning yirik bo'lagi
+drift|Materiklarning siljishi
+tog'jinsi|Yer po'stini tashkil etuvchi modda
+mineral|Tabiiy kimyoviy birikma
+magmatik|Lavadan hosil bo'lgan jins
+cho'kindi|Qatlam bo'lib yotgan jins
+metamorfik|O'zgarishga uchragan jins
+granit|Qattiq magmatik jins
+bazalt|Qora magmatik jins
+ohaktosh|Cho'kindi karbonat jinsi
+qumtosh|Qum zarralaridan hosil jins
+gil|Mayda zarrali plastik jins
+marmar|Metamorfik bezak toshi
+tuproq|Yerning unumdor ustki qatlami
+gumus|Tuproqdagi chirindi modda
+eroziya|Tuproqning yemirilishi
+denudatsiya|Yer yuzining yemirilib tekislanishi
+nurash|Jinslarning parchalanishi
+abraziya|To'lqinlarning qirg'oqni yemirishi
+akkumulyatsiya|Jinslarning to'planishi
+qatlam|Yer tuzilishidagi bir yotqiziq
+kon|Foydali qazilma joyi
+ruda|Metall olinadigan jins
+neft|Yonuvchi suyuq qazilma
+tabiiygaz|Yonuvchi gaz qazilmasi
+ko'mir|Yonuvchi qattiq qazilma
+torf|Botqoqdagi yonuvchi qazilma
+qazilma|Yer ostidan olinadigan boylik
+resurs|Tabiiy boylik zaxirasi
+landshaft|Hududning tabiiy ko'rinishi
+zona|Tabiiy o'xshash hudud belgisi
+mintaqa|Katta geografik hudud
+subtropik|Tropik va mo''tadil oraliq mintaqa
+tropik|Issiq ekvator yaqini mintaqa
+mo''tadil|O'rtacha iqlimli mintaqa
+arktika|Shimoliy qutb mintaqasi
+antarktika|Janubiy qutb hududi
+qutb|Yerning o'q uchlaridan biri
+tropikos|Quyosh tik tushadigan parallel chegarasi
+geosfera|Yerning qobiqlaridan biri
+gidrosfera|Yerning suv qobig'i
+biosfera|Tirik organizmlar qobig'i
+pedosfera|Tuproq qobig'i
+ozon|Ultrabinafsha nurdan himoya gazi
+parnik|Issiqxona effekti hodisasi
+chuchuk|Tuzsiz suv turi
+sho'r|Tuzli suv turi
+minerallashuv|Suvdagi tuzlar miqdori
+oqova|Chiqindi suv oqimi
+irrigatsiya|Yerni sun'iy sug'orish
+melioratsiya|Yerni yaxshilash tadbirlari
+kanal|Sun'iy suv o'zani
+ariq|Kichik sug'orish kanali
+to'g'on|Suvni to'suvchi inshoot
+suvombori|Suv saqlanadigan havza
+akveduk|Suv o'tkazuvchi inshoot
+drenaj|Ortiqcha suvni chiqarish tizimi
+sel|Tog'dan tusha qiya loyqa oqim
+ko'chki|Tog' yonbag'ri qulashi
+qorko'chki|Tog'dan qor qulashi
+sursilish|Jinslar pastga siljishi
+cho'lgaylanish|Yerlarning cho'lga aylanishi
+sho'rlanish|Tuproqda tuz to'planishi
+botqoqlanish|Yerning botqoqqa aylanishi
+aholishunoslik|Aholini o'rganuvchi soha
+demografiya|Aholi sonini o'rganuvchi fan
+migratsiya|Aholining ko'chib yurishi
+emigratsiya|Chet elga ketish
+immigratsiya|Chet eldan kelish
+urbanizatsiya|Shahar aholisining o'sishi
+aglomeratsiya|Qo'shni shaharlar birlashmasi
+megapolis|Juda yirik shahar
+poytaxt|Davlat bosh shahri
+shahar|Yirik aholi punkti
+qishloq|Kichik aholi punkti
+nohiya|Ma'muriy hudud birligi
+viloyat|Yirik ma'muriy hudud
+o'lka|Katta geografik hudud
+chegara|Hududlarni ajratuvchi chiziq
+anklav|Boshqa davlat ichidagi hudud
+koordinatsiya|Nuqtalar bog'lanishi tizimi
+proeksiya|Sharni tekislikka tushirish usuli
+izogipsa|Teng balandlik chizig'i
+gorizontal|Xaritadagi balandlik chizig'i
+profil|Yer yuzining ko'ndalang kesimi
+panorama|Keng ko'rinish tasviri
+makrorelyef|Yirik relyef shakllari
+mikrorelyef|Mayda relyef shakllari
+morena|Muzlik to'plagan jinslar
+flyuvial|Daryo ta'siridagi relyef
+karst|Eriydigan jinslardagi relyef
+g'or|Tog' ichidagi bo'shliq
+stalaktit|G'or shiftidan osilgan tomchi tosh
+stalagmit|G'or tubidan o'sgan tosh ustun
+voronka|Karst botig'i
+yoriq|Yer po'stidagi darz
+razlom|Litosfera plita yorig'i
+geyzerit|Issiq buloq cho'kindisi
+termal|Issiq yer osti suvi
+gidrogeologiya|Yer osti suvlari fani
+qatlamsuv|Jinslar orasidagi yer osti suvi
+grunt|Tuproq osti qatlami suvi
+sifon|Yer osti suv o'tish joyi
+daryotarmoq|Daryoning bo'linma qismi
+suvayirg'ich|Daryo havzalarini ajratuvchi chiziq
+oqimtezligi|Suvning harakat tezligi
+sarf|Daryodan oqib o'tgan suv miqdori
+rejim|Daryoning yillik suv holati
+toshqinlik|Daryo suvining ko'tarilishi
+sayozlik|Suvning kamayib qolgan holati
+morfometriya|Relyef o'lchamlarini aniqlash
+gipsometriya|Balandliklarni o'lchash
+batimetriya|Suv chuqurligini o'lchash
+izohielina|Teng chuqurlik chizig'i
+iqlimshunoslik|Iqlimni o'rganuvchi soha
+meteorologiya|Ob-havoni o'rganuvchi fan
+gidrologiya|Suvlarni o'rganuvchi fan
+okeanografiya|Okeanlarni o'rganuvchi fan
+glyatsiologiya|Muzliklarni o'rganuvchi soha
+geomorfologiya|Relyefni o'rganuvchi soha
+landshaftshunoslik|Landshaftlarni o'rganuvchi soha
+biogeografiya|Organizmlar tarqalishi fani
+geoekologiya|Tabiat va inson aloqasi fani
+pochvashunoslik|Tuproqlarni o'rganuvchi fan
+rayonlashtirish|Hududlarni bo'lish usuli
+taxsimot|Hududiy taqsimlanish
+konsentratsiya|Joylashishning zichligi
+infratuzilma|Xizmat ko'rsatuvchi tarmoqlar
+agrosanoat|Qishloq xo'jaligi-sanoat majmuasi
+tranzit|O'tkazib yuborish oqimi
+logistika|Yuk tashish tizimi
+magistral|Asosiy yo'nalish yo'li
+port|Kemalar to'xtash joyi
+pirs|Kemalar yonashadigan inshoot
+mayoq|Kemalarga yo'l ko'rsatuvchi chiroq
+fervater|Kemalar o'tadigan chuqur o'zan
+akvatoriya|Suv yuzasi hududi
+batisfera|Chuqurlikka tushuvchi apparat
+plankton|Suvda suzuvchi mayda organizmlar
+nekton|Suvda faol suzuvchi organizmlar
+benton|Suv tubida yashovchilar
+koralli|Marjon hosil qiluvchi organizm
+mangra|Tropik botqoq o'rmoni
+delpa|Yirik daryolar quyilish zonasi
+tektonika|Yer po'sti harakati haqidagi soha
+seysmologiya|Zilzilalarni o'rganuvchi fan
+vulqonshunoslik|Vulqonlarni o'rganuvchi soha
+geofizika|Yerning fizik xususiyatlari fani
+geokimyo|Yer kimyoviy tarkibi fani
+mineralogiya|Minerallarni o'rganuvchi fan
+petrografiya|Tog' jinslarini o'rganuvchi fan
+paleogeografiya|O'tmish geografiyasini o'rganuvchi soha
+stratigrafiya|Jins qatlamlarini o'rganuvchi soha
+geoxronologiya|Yer tarixi davrlari fani
+era|Yer tarixining yirik davri
+period|Era ichidagi davr
+epoxa|Period ichidagi bo'linma
+mezozoy|Dinozavrlar yashagan era
+paleozoy|Qadimgi hayot erasi
+kaynozoy|Yangi hayot erasi
+yura|Mezozoy davri bosqichi
+devon|Paleozoy davri bosqichi
+antropogen|Insoniyat paydo bo'lgan davr
+fauna|Hudud hayvonot dunyosi
+flora|Hudud o'simlik dunyosi
+endemik|Faqat bir hududdagi tur
+areal|Tur tarqalgan hudud
+qo'riqxona|Tabiat muhofaza hududi
+zakaznik|Vaqtincha himoyalangan hudud
+ekomarkaz|Tabiat muhofazasi markazi
+monitoring|Doimiy kuzatuv tizimi
+ifloslanish|Tabiatning zararli moddalarga to'lishi
+smog|Shaharlardagi tutun-tuman
+emissiya|Zararli moddalar chiqarilishi
+rekultivatsiya|Buzilgan yerni tiklash
+utilizatsiya|Chiqindilarni qayta ishlash
+tiklanuvchi|Qayta hosil bo'ladigan resurs
+tugaydigan|Tugab qoladigan resurs
+alternativ|Muqobil energiya manbai
+gidroenergiya|Suv kuchidan olinadigan energiya
+geotermal|Yer ichki issiqligidan energiya
+quyoshenergiya|Quyosh nuridan olingan energiya
+shamolenergiya|Shamoldan olingan energiya
+balans|Tabiiy jarayonlar muvozanati
+krugovorot|Tabiatdagi aylanish jarayoni
+fotoperiod|Kun uzunligi ta'siri
+vegetatsiya|O'simliklar o'sish davri
+agroiqlim|Qishloq xo'jaligi iqlimi
+mikroiqlim|Kichik hudud iqlimi
+bonitet|Yer unumdorlik ko'rsatkichi
+kadastr|Yerlar ro'yxati hujjati
+geoid|Yer shaklining aniq modeli
+ellipsoid|Yer shaklining matematik modeli
+orbita|Yerning Quyosh atrofidagi yo'li
+aylanish|Yerning o'z o'qi atrofida harakati
+perigeliy|Orbitaning Quyoshga eng yaqin nuqtasi
+afeliy|Orbitaning Quyoshdan uzoq nuqtasi
+soatmintaqasi|Bir xil vaqtli hudud
+sutka|Bir kecha-kunduz davri
+fasl|Yilning to'rt mavsumidan biri
+tropopauza|Troposfera va stratosfera chegarasi
+isitish|Yer yuzasining qizishi
+sovitish|Yer yuzasining soviishi
+radiatsiya|Quyoshdan keluvchi nur energiyasi
+albedo|Yuzaning nurni qaytarish darajasi
+insolyatsiya|Yuzaning quyosh nuri olishi
+bugʻ|Gaz holatidagi suv
+muz|Qattiq holatdagi suv
+qirproq|Qirg'oq chizig'i shakli
+chekka|Materik qirg'oq zonasi
+qatqaloq|Yuzadagi qattiq qobiq
+sho'rxok|Sho'r tuproqli taqir yer
+soz|Sersuv yopishqoq tuproq
+qumloq|Qum aralash yengil tuproq
+chirindi|Tuproqdagi organik modda
+unumdorlik|Tuproqning hosil berish qobiliyati
+gorizontlanish|Tuproq qatlamlarga bo'linishi
+podzol|Ignabargli o'rmon tuprog'i
+qora|Eng unumdor dasht tuprog'i
+qizil|Tropik hudud tuprog'i
+sur|Cho'l zonasi tuprog'i
+bo'z|O'rta Osiyo tekislik tuprog'i
+EOF
+qatiq|Yer qatlamlari yotish holati
+sinklinal|Qatlamlarning botiq burmasi
+antiklinal|Qatlamlarning bukik burmasi
+burma|Egilgan tog' jinsi qatlami
+platforma|Barqaror yer po'sti uchastkasi
+qalqon|Platformaning qadimgi yuza qismi
+orogen|Tog' hosil bo'lish zonasi
+geosinklinal|Tog' hosil bo'luvchi egik zona
+transgressiya|Dengizning quruqlikka bostirib kirishi
+regressiya|Dengizning chekinishi
+fatsiya|Cho'kindi hosil bo'lish sharoiti
+qatlamlanish|Jinslarning qavat-qavat yotishi
+yemirilish|Jinslarning parchalanib ketishi
+to'planma|To'plangan cho'kindi jinslar
+allyuviy|Daryo keltirgan cho'kindi
+delyuviy|Yon bag'irdan oqib tushgan jins
+elyuviy|Joyida hosil bo'lgan nurash jinsi
+prolyuviy|Sel keltirgan tog' etagidagi jins
+loyqa|Suv keltirgan mayda zarralar
+yotqiziq|Cho'kib to'plangan jins qatlami
+qatqatlik|Qatlamlarning navbatlashuvi
+erozion|Yemirilishga oid relyef
+akkumulyativ|To'planishdan hosil relyef
+peneplen|Yemirilib tekislangan yuza
+terrasa|Daryo yoki dengiz pog'onasi
+ovrag|Yer yuzidagi chuqur jar
+jar|Suv yemirgan chuqur o'yiq
+badlend|Qattiq yemirilgan relyef
+soy|Mavsumiy suv oqadigan o'zan
+o'zan|Daryo oqadigan chuqurlik
+qayir|Daryo bo'yidagi past tekislik
+pastqamlik|Suv to'planadigan past yer
+qirtepa|Baland pastbaland relyef
+chunqur|Yerdagi chuqur botiq
+qoyatosh|Tik yalang'och tog' jinsi
+toshloq|Tosh qoplagan yuza
+shag'al|Yumaloq mayda tosh
+qiyoshtosh|Yoriladigan qatlamli jins
+gips|Oq yumshoq cho'kindi mineral
+tuzkon|Osh tuzi olinadigan kon
+fosforit|O'g'it uchun ishlatiladigan jins
+boksit|Alyuminiy olinadigan ruda
+magnetit|Temir rudasi minerali
+kvarts|Keng tarqalgan qattiq mineral
+dala|Shpat guruhi minerali
+slyuda|Qatlamli yaltiroq mineral
+granat|Qattiq bezak minerali
+olivin|Yashil mantiya minerali
+pirit|Oltin rangli temir minerali
+grafit|Yumshoq uglerod minerali
+olmos|Eng qattiq tabiiy mineral
+asbest|Tolali chidamli mineral
+malaxit|Yashil mis minerali
+lazurit|Ko'k bezak toshi
+yashma|Rangli bezak toshi
+agat|Qatlamli bezak toshi
+yantar|Qotgan qadimiy smola
+sadaf|Yaltiroq chig'anoq qoplami
+koordinatatur|Geografik joylashuv tizimi
+latituda|Kenglik ko'rsatkichi
+altituda|Dengiz sathidan balandlik
+depressiya|Dengiz sathidan past botiq
+perevali|Tog' tizmasidagi o'tish joyi
+abris|Joyning chizma rejasi
+nivelirlash|Balandlik farqini aniqlash
+triangulyatsiya|Uchburchaklar bilan o'lchash
+poligon|Yopiq o'lchov yo'li
+teodolit|Burchak o'lchovchi asbob
+nivelir|Balandlik o'lchovchi asbob
+dalnomer|Masofa o'lchovchi asbob
+anemometr|Shamol tezligini o'lchovchi asbob
+barometr|Havo bosimini o'lchovchi asbob
+gigrometr|Havo namligini o'lchovchi asbob
+termometr|Haroratni o'lchovchi asbob
+flyuger|Shamol yo'nalishini ko'rsatuvchi asbob
+osadkomer|Yog'in miqdorini o'lchovchi asbob
+seysmograf|Zilzilani qayd etuvchi asbob
+exolot|Suv chuqurligini o'lchovchi asbob
+sputnik|Yerni kuzatuvchi sun'iy yo'ldosh
+aerofotos|Havodan olingan yer surati
+kosmik|Fazodan olingan tasvir
+monitoringlash|Doimiy kuzatib borish
+geoaxborot|Geografik ma'lumotlar tizimi
+navigatsiya|Yo'nalish aniqlash tizimi
+lotsiya|Dengiz yo'llari ko'rsatmasi
+ruza|Shamollar yo'nalish diagrammasi
+diagramma|Ma'lumotlarning grafik tasviri
+grafik|Jarayonning chiziqli tasviri
+kartogramma|Xaritada ko'rsatkich tasviri
+kartodiagramma|Xaritadagi diagrammali tasvir
+nomenklatura|Xarita varaqlari tizimi
+legenda|Xaritadagi shartli belgilar izohi
+reljef|Yer yuzasi tuzilishi ko'rinishi
+ekspozitsiya|Yon bag'irning quyoshga yo'nalishi
+insolyatsion|Quyosh nuri tushish darajasi
+mikrozona|Kichik tabiiy hudud
+geokompleks|Tabiiy komponentlar majmuasi
+komponent|Landshaft tarkibiy qismi
+substrat|Landshaft asos jinsi
+biotop|Organizmlar yashash joyi
+ekoton|Ikki hudud oraliq zonasi
+sukssesiya|Hamjamoalar almashinuvi
+kserofit|Qurg'oqchilikka chidamli o'simlik
+gigrofit|Nam joyda o'suvchi o'simlik
+galofit|Sho'r yerda o'suvchi o'simlik
+psammofit|Qumda o'suvchi o'simlik
+efemer|Qisqa umr ko'ruvchi o'simlik
+saksovul|Cho'lda o'suvchi daraxt
+yulg'un|Sho'r yerda o'suvchi buta
+qamish|Suv bo'yida o'suvchi o'simlik
+archazor|Tog'dagi archa o'rmoni
+to'qay|Daryo bo'yi o'rmoni
+adir|Tog' oldi pastbaland zonasi
+sirt|Baland tog' yaylovlari zonasi
+yaylov|Chorva boqiladigan o'tloq
+chakalak|Qalin buta o'simligi
+cho'lzona|Qurg'oqchil tabiiy zona
+dashtzona|O'tloqli tabiiy zona
+o'rmonzona|Daraxtzor tabiiy zona
+tundrazona|Sovuq daraxtsiz zona
+mintaqaviylik|Zonalarning qonuniy almashinuvi
+balandlikzonalligi|Tog'da zonalar almashinuvi
+kenglikzonalligi|Ekvatordan qutbga zonalar o'zgarishi
+azonal|Zonaga bog'liq bo'lmagan hodisa
+intrazonal|Zona ichidagi o'ziga xos hudud
+provinsiya|Tabiiy geografik hudud bo'lagi
+okrug|Geografik ma'muriy bo'linma
+kontinental|Materik ichki iqlimi
+dengizli|Dengiz ta'siridagi iqlim
+arid|Qurg'oqchil iqlim turi
+gumid|Sernam iqlim turi
+nival|Doimiy qorli iqlim
+musonli|Musson shamolli iqlim
+pasmurlik|Bulutli ob-havo holati
+ochiqlik|Bulutsiz ob-havo holati
+quruqlik|Suvsiz yer massasi
+suvlik|Suv bilan qoplangan yuza
+akvakultura|Suvda yetishtirish xo'jaligi
+dehqonchilik|Yer ishlash xo'jaligi
+chorvachilik|Mol boqish xo'jaligi
+bog'dorchilik|Mevali daraxtlar xo'jaligi
+paxtachilik|Paxta yetishtirish sohasi
+g'allachilik|Don yetishtirish sohasi
+sabzavotchilik|Sabzavot yetishtirish sohasi
+tokchilik|Uzum yetishtirish sohasi
+pillachilik|Ipak qurti boqish sohasi
+asalarichilik|Asal yetishtirish sohasi
+baliqchilik|Baliq ovlash xo'jaligi
+o'rmonchilik|O'rmonlarni parvarish sohasi
+konchilik|Qazilma qazib olish sohasi
+energetika|Energiya ishlab chiqarish sohasi
+metallurgiya|Metall eritish sanoati
+mashinasozlik|Mashina ishlab chiqarish sohasi
+kimyosanoat|Kimyoviy mahsulot sanoati
+yengilsanoat|Iste'mol mollari sanoati
+oziqsanoat|Oziq-ovqat ishlab chiqarish sohasi
+qurilish|Bino inshoot barpo etish sohasi
+transport|Yuk va yo'lovchi tashish tarmog'i
+aloqa|Axborot uzatish tarmog'i
+turizm|Sayohat xizmati sohasi
+rekreatsiya|Dam olish va sog'lomlashtirish hududi
+kurort|Davolanish va dam olish joyi
+geopolitika|Siyosatning geografik jihati
+geostrategiya|Hududiy strategik siyosat

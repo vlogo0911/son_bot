@@ -1,0 +1,521 @@
+# Anagramma — Biologiya atamalari: atama|ta'rif (bir so'zli atamalar)
+hujayra|Tirik organizmning eng kichik tuzilma birligi
+yadro|Hujayraning irsiy axborot saqlovchi markazi
+sitoplazma|Hujayra ichini to'ldiruvchi suyuq muhit
+membrana|Hujayrani o'rab turuvchi parda
+mitoxondriya|Hujayrada energiya ishlab chiqaruvchi organoid
+ribosoma|Oqsil sintez qiluvchi mayda organoid
+lizosoma|Hujayra ichida hazm qiluvchi pufakcha
+vakuola|Hujayradagi suyuqlikka to'la bo'shliq
+xloroplast|O'simlik hujayrasidagi yashil fotosintez organoidi
+plastida|O'simlik hujayrasining rangli organoidi
+organoid|Hujayra ichidagi maxsus vazifali tuzilma
+xromosoma|Irsiy axborot joylashgan tuzilma
+gen|Irsiyatning eng kichik birligi
+genom|Organizmning barcha genlari to'plami
+genotip|Organizmning irsiy belgilar yig'indisi
+fenotip|Organizmning tashqi ko'rinadigan belgilari
+allel|Bir genning turli shakllaridan biri
+mutatsiya|Irsiy materialdagi o'zgarish
+irsiyat|Belgilarning avlodga o'tishi
+o'zgaruvchanlik|Organizmlar belgilarining farqlanishi
+nasl|Bir ota-onadan tarqalgan avlod
+dominant|Ustun keladigan irsiy belgi
+retsessiv|Yashiringan, bo'ysunuvchi irsiy belgi
+oqsil|Aminokislotalardan tuzilgan asosiy modda
+aminokislota|Oqsil tarkibidagi birlik modda
+ferment|Reaksiyalarni tezlashtiruvchi oqsil
+gormon|Bezlar ishlab chiqaradigan tartibga soluvchi modda
+uglevod|Energiya beruvchi oziq modda
+glyukoza|Oddiy shakar, asosiy energiya manbai
+kraxmal|O'simlikdagi zaxira uglevod
+sellyuloza|O'simlik hujayra devori moddasi
+lipid|Yog'simon organik birikma
+yog'|Energiya zaxirasi bo'lgan modda
+vitamin|Oz miqdorda zarur organik modda
+fermentativ|Fermentlar ishtirokidagi jarayon
+fotosintez|O'simlik yorug'likda organik modda hosil qilishi
+nafas|Organizmning kislorod yutib energiya olishi
+metabolizm|Organizmdagi modda almashinuvi
+assimilyatsiya|Moddalarni o'zlashtirish jarayoni
+dissimilyatsiya|Moddalarning parchalanishi
+osmos|Suvning pardadan o'tishi
+diffuziya|Moddalarning tarqalib yoyilishi
+gomeostaz|Ichki muhit barqarorligi
+bo'linish|Hujayraning ko'payish jarayoni
+mitoz|Hujayraning oddiy bo'linishi
+meyoz|Jinsiy hujayralar hosil bo'lish bo'linishi
+mikroskop|Mayda narsalarni kattalashtiruvchi asbob
+to'qima|Bir xil hujayralar guruhi
+epiteliy|Qoplovchi to'qima
+muskul|Qisqarish xususiyatli to'qima
+suyak|Tayanch tizimining qattiq to'qimasi
+tog'ay|Egiluvchan tayanch to'qima
+nerv|Qo'zg'alishni o'tkazuvchi to'qima
+neyron|Nerv tizimining hujayrasi
+refleks|Qo'zg'atuvchiga javob reaksiyasi
+retseptor|Qo'zg'atuvchini qabul qiluvchi tuzilma
+analizator|Axborotni qabul qilib tahlil qiluvchi tizim
+organ|Muayyan vazifa bajaruvchi tana qismi
+sistema|Birgalikda ishlovchi organlar tizimi
+yurak|Qonni haydovchi muskulli organ
+arteriya|Yurakdan qon olib chiquvchi tomir
+vena|Qonni yurakka qaytaruvchi tomir
+kapillyar|Eng mayda qon tomiri
+qon|Tomirlarda oquvchi suyuq to'qima
+plazma|Qonning suyuq qismi
+gemoglobin|Qizil qon tanachasidagi oqsil
+eritrotsit|Kislorod tashuvchi qizil qon tanasi
+leykotsit|Himoya qiluvchi oq qon tanasi
+trombotsit|Qon ivishini ta'minlovchi tanacha
+immunitet|Organizmning kasallikka qarshiligi
+antitelo|Kasallikka qarshi himoya oqsili
+antigen|Immun javob chaqiruvchi modda
+limfa|Rangsiz to'qima suyuqligi
+o'pka|Nafas olish organi
+bronx|O'pkaga havo olib boruvchi naycha
+traxeya|Kekirdak, havo yo'li
+alveola|O'pkadagi havo pufakchasi
+diafragma|Nafasda qatnashuvchi muskulli parda
+oshqozon|Ovqat hazm qiluvchi organ
+ichak|Oziq so'riladigan hazm organi
+jigar|Zaharsizlantiruvchi yirik bez
+buyrak|Qonni filtrlovchi ayirish organi
+siydik|Buyrakda hosil bo'ladigan chiqindi suyuqlik
+nefron|Buyrakning funksional birligi
+bez|Maxsus modda ishlab chiqaruvchi organ
+insulin|Qondagi shakarni kamaytiruvchi gormon
+adrenalin|Buyrakusti bezi gormoni
+tiroksin|Qalqonsimon bez gormoni
+miya|Nerv tizimining markaziy organi
+miyacha|Harakat muvofiqligini boshqaruvchi qism
+po'stloq|Katta miyaning tashqi qatlami
+gipofiz|Bezlarni boshqaruvchi asosiy bez
+sinaps|Neyronlar orasidagi aloqa joyi
+akson|Neyronning uzun o'simtasi
+dendrit|Neyronning qisqa o'simtasi
+skelet|Tananing suyak tayanchi
+bo'g'im|Suyaklarning harakatchan birikmasi
+pay|Muskulni suyakka bog'lovchi to'qima
+ligament|Suyaklarni bog'lovchi boylam
+teri|Tanani qoplovchi himoya organi
+epidermis|Terining ustki qatlami
+melanin|Teriga rang beruvchi pigment
+ko'z|Ko'rish organi
+gavhar|Ko'zning yorug'lik sindiruvchi linzasi
+to'rparda|Ko'zning yorug'lik sezuvchi qavati
+quloq|Eshitish va muvozanat organi
+nog'ora|Quloqdagi tovush qabul qiluvchi parda
+tana|Organizmning jismoniy qismi
+embrion|Rivojlanayotgan homila
+urug'|Yangi o'simlik beruvchi tuzilma
+chang|O'simlikning erkak jinsiy hujayrasi
+tuxumhujayra|Urg'ochi jinsiy hujayra
+spermatozoid|Erkak jinsiy hujayra
+urug'lanish|Jinsiy hujayralarning qo'shilishi
+zigota|Urug'langan tuxum hujayra
+partenogenez|Urug'lanishsiz rivojlanish
+regeneratsiya|Yo'qolgan qismning tiklanishi
+anabioz|Hayotiy jarayonlar sustlashgan holat
+ontogenez|Organizmning individual rivojlanishi
+filogenez|Turning tarixiy rivojlanishi
+evolyutsiya|Organik dunyoning tarixiy taraqqiyoti
+seleksiya|Yangi nav va zot yaratish fani
+duragaylash|Turli zotlarni chatishtirish
+chatishtirish|Ikki organizmni ko'paytirishda qo'shish
+tur|Organizmlar klassifikatsiyasining asosiy birligi
+avlod|Yaqin turlar guruhi
+oila|Avlodlarni birlashtiruvchi guruh
+sinf|Oilalarni birlashtiruvchi guruh
+tip|Hayvonot olamining yirik bo'limi
+bo'lim|O'simliklar klassifikatsiyasi guruhi
+klassifikatsiya|Organizmlarni guruhlash tizimi
+sistematika|Organizmlarni tasniflovchi fan
+botanika|O'simliklarni o'rganuvchi fan
+zoologiya|Hayvonlarni o'rganuvchi fan
+anatomiya|Organizm tuzilishini o'rganuvchi fan
+fiziologiya|Organizm faoliyatini o'rganuvchi fan
+genetika|Irsiyat va o'zgaruvchanlik fani
+ekologiya|Organizm va muhit aloqalari fani
+mikrobiologiya|Mikroorganizmlar fani
+sitologiya|Hujayra haqidagi fan
+gistologiya|To'qimalar haqidagi fan
+embriologiya|Homila rivojlanishi fani
+virusologiya|Viruslarni o'rganuvchi fan
+bakteriologiya|Bakteriyalarni o'rganuvchi fan
+paleontologiya|Qazilma organizmlar fani
+biosfera|Tirik organizmlar yashaydigan qobiq
+populyatsiya|Bir turdagi organizmlar guruhi
+areal|Turning tarqalish hududi
+biotsenoz|Hamjamoa bo'lib yashovchi organizmlar
+ekotizim|Organizm va muhitning yagona majmuasi
+zanjir|Oziqlanish aloqalari ketma-ketligi
+simbioz|Organizmlarning birga yashashi
+parazit|Boshqa organizm hisobidan yashovchi
+ho'jayin|Parazit yashaydigan organizm
+yirtqich|Boshqa hayvonni ovlab yeydigan jonivor
+o'lja|Yirtqich ovlaydigan hayvon
+raqobat|Resurs uchun kurash
+bakteriya|Yadrosi yo'q mayda organizm
+virus|Hujayrasiz yuqumli zarracha
+zamburug'|Alohida olamga mansub organizm
+mog'or|Zax yuzada o'sadigan zamburug'
+achitqi|Bijg'itish qiluvchi zamburug'
+suvo't|Suvda yashovchi oddiy o'simlik
+lishaynik|Zamburug' va suvo't birikmasi
+mox|Eng oddiy quruqlik o'simligi
+paporotnik|Urug'siz sporali o'simlik
+yalang'ochurug'li|Mevasiz urug'li o'simliklar
+yopiqurug'li|Gulli, mevali o'simliklar
+ildiz|O'simlikni tuproqqa biriktiruvchi organ
+poya|O'simlikning tik o'suvchi qismi
+barg|Fotosintez qiluvchi o'simlik organi
+gul|O'simlikning ko'payish organi
+meva|Urug'ni o'rab turuvchi tuzilma
+kurtak|Yangi novda beruvchi tugunча
+stomata|Bargdagi gaz almashinuv teshigi
+nektar|Guldagi shirin suyuqlik
+changchi|Gulning erkak qismi
+urug'chi|Gulning urg'ochi qismi
+fototropizm|Yorug'likka qarab o'sish
+geotropizm|Yer tortishiga javoban o'sish
+transpiratsiya|O'simlikdan suv bug'lanishi
+sut|Emizuvchilarning bola oziqlantirish suyuqligi
+umurtqa|Orqa miyani o'rovchi suyaklar ustuni
+umurtqali|Umurtqa pog'onasi bor hayvon
+umurtqasiz|Umurtqa pog'onasiz hayvon
+sutemizuvchi|Bolasini sut bilan boqadigan hayvon
+qushlar|Patli, uchuvchi umurtqalilar
+sudralib|Qurib yuradigan umurtqali sinf
+amfibiya|Suvda va quruqda yashovchi hayvon
+baliqlar|Suvda jabra bilan nafas oluvchilar
+hasharot|Olti oyoqli bo'g'imoyoqli
+o'rgimchak|Sakkiz oyoqli bo'g'imoyoqli
+qisqichbaqa|Suvda yashovchi bo'g'imoyoqli
+mollyuska|Yumshoq tanali hayvon
+chuvalchang|Cho'zilgan tanali umurtqasiz
+jabra|Suv hayvonlarining nafas organi
+tangacha|Baliq va sudralib teri qoplami
+pat|Qushlar tana qoplami
+pardaqanot|Hasharotlar qanot turi
+metamorfoz|Hayvon rivojlanishidagi shakl o'zgarishi
+lichinka|Hasharot rivojlanishining qurt bosqichi
+g'umbak|Lichinka va voyaga yetgan oraliq bosqich
+instinkt|Tug'ma murakkab xulq
+ekskretsiya|Chiqindi moddalarni ajratish
+sekretsiya|Bezlarning modda ajratishi
+kislorod|Nafas olish uchun zarur gaz
+karbonat|Nafas chiqarilayotgan gaz
+xlorofill|O'simlikka yashil rang beruvchi pigment
+pigment|Tirik to'qimalarga rang beruvchi modda
+spora|Ko'payishga xizmat qiluvchi hujayra
+kista|Himoya qobig'idagi dam olish shakli
+plankton|Suvda erkin suzuvchi mayda organizmlar
+benton|Suv tubida yashovchi organizmlar
+koloniya|Birga yashovchi bir turdagi organizmlar
+toksin|Organizm ishlab chiqaradigan zahar
+patogen|Kasallik qo'zg'atuvchi organizm
+infeksiya|Organizmga yuqumli zararlanishi
+vaktsina|Immunitet hosil qiluvchi preparat
+epidemiya|Kasallikning keng tarqalishi
+biologiya|Tirik tabiatni o'rganuvchi fan
+organizm|Yaxlit tirik tana
+mikrob|Mayda ko'zga ko'rinmas organizm
+protista|Oddiy tuzilgan bir hujayralilar
+amyoba|Shaklini o'zgartiruvchi oddiy organizm
+infuzoriya|Kipriklari bor bir hujayrali
+flagellata|Xivchinli oddiy organizm
+yomg'irchuvalchang|Tuproqda yashovchi halqali chuvalchang
+nematoda|Yumaloq chuvalchang
+pijavka|Qon so'ruvchi halqali chuvalchang
+korall|Dengizdagi bo'shliqichli hayvon
+meduza|Suzib yuruvchi bo'shliqichli
+gidra|Chuchuk suv bo'shliqichli hayvoni
+gubka|Eng oddiy ko'p hujayrali hayvon
+echinoderma|Ninatanli dengiz hayvoni
+morf|Organizm shakli ko'rinishi
+adaptatsiya|Muhitga moslashish
+mimikriya|Boshqa organizmga o'xshab olish
+kamuflyaj|Muhitga singib ketuvchi rang
+lokomotsiya|Organizmning harakatlanishi
+termoregulyatsiya|Tana haroratini boshqarish
+fermentatsiya|Bijg'ish jarayoni
+glikoliz|Glyukozaning parchalanishi
+katabolizm|Moddalarning parchalanish jarayoni
+anabolizm|Moddalarni sintez qilish jarayoni
+nukleotid|Nuklein kislota birligi
+nuklein|Irsiy axborot saqlovchi kislota
+replikatsiya|DNK nusxasini ko'paytirish
+transkripsiya|DNK dan RNK ko'chirish
+translyatsiya|Oqsil sintezlanish bosqichi
+kodon|Aminokislotani belgilovchi uchlik
+polisaxarid|Ko'p shakarli uglevod
+monosaxarid|Oddiy bir shakar
+disaxarid|Ikki shakardan iborat uglevod
+steroid|Maxsus halqali lipid
+xolesterin|Hujayra membranasidagi lipid
+katalizator|Reaksiyani tezlashtiruvchi modda
+substrat|Ferment ta'sir qiladigan modda
+ph|Muhitning kislotalik ko'rsatkichi
+turgor|Hujayraning suvga to'lgan holati
+plazmoliz|Hujayradan suv chiqib qisqarishi
+fagotsitoz|Zarrachalarni yutib hazm qilish
+pinotsitoz|Suyuqlikni yutib olish
+sitoskelet|Hujayra ichki tayanch tizimi
+sentriola|Bo'linishda qatnashuvchi organoid
+golji|Moddalarni qadoqlovchi organoid
+retikulum|Hujayra ichidagi naycha tizimi
+kislota|Vodorod ioni beruvchi modda
+asos|Ishqoriy xususiyatli birikma
+buffer|Muhit barqarorligini saqlovchi aralashma
+immunoglobulin|Himoya vazifasini bajaruvchi oqsil
+limfotsit|Immunitetda ishtirok etuvchi hujayra
+makrofag|Zararli zarrachalarni yutuvchi hujayra
+allergiya|Organizmning haddan ortiq sezgirligi
+yallig'lanish|To'qimaning himoya reaksiyasi
+nekroz|To'qimaning nobud bo'lishi
+atrofiya|Organ hajmining kichrayishi
+gipertrofiya|Organ hajmining kattalashishi
+gangliy|Nerv tuguni
+retina|Ko'zning yorug'lik sezadigan qavati
+kortex|Organ po'st qatlami
+medulla|Organning ichki qismi
+plevra|O'pkani o'rovchi parda
+peritoneum|Qorin bo'shlig'i pardasi
+perikard|Yurakni o'rovchi parda
+klapan|Qon oqimini bir tomonga yo'naltiruvchi tuzilma
+aorta|Eng yirik arteriya
+sistola|Yurakning qisqarish fazasi
+diastola|Yurakning bo'shashish fazasi
+puls|Tomir urishi
+limfaugul|Immun hujayralar to'plangan tugun
+taloq|Qonni filtrlovchi limfoid organ
+timus|Immunitetni shakllantiruvchi bez
+gipotalamus|Ichki muhitni boshqaruvchi miya qismi
+talamus|Sezgi signallari markazi
+neyrotransmitter|Sinapsdagi kimyoviy vositachi
+mielin|Aksonni o'rovchi qobiq
+spinal|Orqa miyaga oid
+avtonom|Ichki organlarni boshqaruvchi nerv tizimi
+simpatik|Organizmni faollashtiruvchi nerv qismi
+parasimpatik|Organizmni tinchlantiruvchi nerv qismi
+antibiotik|Mikroblarni o'ldiruvchi dori
+mutagen|Mutatsiya chaqiruvchi omil
+teratogen|Homila nuqsonini chaqiruvchi omil
+kanserogen|O'simta chaqiruvchi modda
+onkologiya|O'smalarni o'rganuvchi soha
+biopsiya|Tirik to'qimadan namuna olish
+transplantatsiya|Organ ko'chirib o'tkazish
+klonlash|Nusxa organizm yaratish
+biotexnologiya|Tirik organizmlardan foydalanish fani
+gennomuhandislik|Genlarni o'zgartirish texnologiyasi
+probiotik|Foydali mikroblar preparati
+antioksidant|Oksidlanishdan himoya qiluvchi modda
+radikal|Faol zararli zarracha
+fermentologiya|Fermentlarni o'rganuvchi soha
+osteologiya|Suyaklarni o'rganuvchi soha
+miologiya|Muskullarni o'rganuvchi soha
+neyrologiya|Nerv tizimi fani
+kardiologiya|Yurak kasalliklari fani
+gematologiya|Qonni o'rganuvchi fan
+immunologiya|Immunitet fani
+endokrinologiya|Bezlar va gormonlar fani
+nefrologiya|Buyrak kasalliklari fani
+dermatologiya|Teri kasalliklari fani
+oftalmologiya|Ko'z kasalliklari fani
+ekotip|Muhitga moslashgan populyatsiya shakli
+biomassa|Tirik organizmlar umumiy og'irligi
+produtsent|Organik modda ishlab chiqaruvchi
+konsument|Tayyor organik moddani iste'mol qiluvchi
+redutsent|Chiqindilarni parchalovchi organizm
+detrit|O'lik organik qoldiq
+gumus|Tuproqdagi chirindi modda
+azotfiksatsiya|Havo azotini biriktirish
+nitrifikatsiya|Azotni oksidlash jarayoni
+sukchessiya|Hamjamoalarning navbatlashuvi
+migratsiya|Hayvonlarning ko'chishi
+anabolik|Sintezga qaratilgan jarayon
+gameta|Jinsiy hujayra
+soma|Tananing jinsiy bo'lmagan hujayralari
+diploid|Qo'sh xromosoma to'plamli hujayra
+gaploid|Yakka xromosoma to'plamli hujayra
+poliploid|Ko'paygan xromosoma to'plamli
+krossingover|Xromosomalar uchastkasi almashinuvi
+konyugatsiya|Xromosomalarning yaqinlashishi
+gametogenez|Jinsiy hujayralar hosil bo'lishi
+spermatogenez|Erkak hujayralar yetilishi
+ovogenez|Tuxum hujayra yetilishi
+blastula|Embrionning pufaksimon bosqichi
+gastrula|Embrion ikki qavatli bosqichi
+ektoderma|Embrionning tashqi qavati
+entoderma|Embrionning ichki qavati
+mezoderma|Embrionning o'rta qavati
+morfologiya|Tashqi tuzilishni o'rganuvchi soha
+simmetriya|Tana qismlarining muvofiq joylashuvi
+segment|Tananing takrorlanuvchi bo'lagi
+xitin|Hasharot qattiq qoplami moddasi
+mitseliy|Zamburug' ipsimon tanasi
+gif|Zamburug' mitseliy ipi
+sporangiy|Sporalar hosil bo'ladigan organ
+rizoid|Mox va suvo'tning ildizsimon o'simtasi
+kambiy|O'simlik yo'g'onlashtiruvchi to'qimasi
+ksilema|Suv o'tkazuvchi o'simlik to'qimasi
+floema|Organik modda o'tkazuvchi to'qima
+meristema|O'simlik o'suvchi to'qimasi
+parenxima|O'simlikning asosiy to'qimasi
+epiderma|O'simlik qoplovchi to'qimasi
+kutikula|Barg sirtidagi himoya qavati
+tilakoid|Xloroplastdagi membrana tuzilmasi
+grana|Tilakoidlar ustuni
+stroma|Xloroplastning ichki moddasi
+karotin|Sabzi rangli pigment
+antotsian|O'simlikdagi qizil-ko'k pigment
+auksin|O'simlik o'sishini boshqaruvchi modda
+gibberellin|O'simlik o'sish fitogormoni
+etilen|Mevani yetiltiruvchi fitogormon
+tropizm|Qo'zg'atuvchiga qarab o'sish
+nastiya|Qo'zg'atuvchiga yo'nalishsiz harakat
+veykasiya|Qattiq namsizlikka chidamlilik
+anaerob|Kislorodsiz yashovchi organizm
+aerob|Kislorod bilan yashovchi organizm
+saprofit|O'lik organika bilan oziqlanuvchi
+geterotrof|Tayyor organika bilan oziqlanuvchi
+avtotrof|Organik moddani o'zi hosil qiluvchi
+mikoriza|Zamburug' va ildiz birikmasi
+hemotrof|Kimyoviy energiyadan foydalanuvchi
+xemosintez|Kimyoviy energiyadan organika hosil qilish
+biolyuminessensiya|Organizmning yorug'lik chiqarishi
+ekolokatsiya|Tovush bilan muhitni aniqlash
+feromon|Hayvonlar ajratadigan signal moddasi
+kamuflaj|Muhitga mos tus olish
+diapauza|Rivojlanishning vaqtinchalik to'xtashi
+spyachka|Qishki uyquga kirish holati
+linka|Hayvonning teri yoki qoplamini tashlashi
+inkubatsiya|Tuxumni issiqlikda saqlab chiqarish
+yashovchanlik|Organizmning tirik qolish qobiliyati
+reproduksiya|Organizmlarning ko'payishi
+fekundatsiya|Urug'lantirish jarayoni
+geterozis|Duragay ustunligi hodisasi
+inbreeding|Qarindoshlar o'rtasida chatishtirish
+mutant|Mutatsiyaga uchragan organizm
+shtamm|Mikroorganizmning sof navi
+kultura|Sun'iy muhitda o'stirilgan mikroblar
+plazmida|Bakteriyadagi kichik DNK halqasi
+kapsula|Bakteriyani o'rovchi shilimshiq qavat
+flagellum|Bakteriyaning harakat xivchini
+pili|Bakteriya yuzasidagi tukcha
+endospora|Bakteriyaning chidamli dam shakli
+konidiya|Zamburug' nojinsiy sporasi
+askospora|Xaltachali zamburug' sporasi
+bazidiya|Qalpoqli zamburug' spora organi
+simbiont|Birga yashovchi organizm sherigi
+kommensal|Zarar bermay birga yashovchi organizm
+mutualizm|Ikki tomon foydali birga yashash
+amensalizm|Bir tomonga zararli munosabat
+predatsiya|Yirtqichlik munosabati
+trofik|Oziqlanishga oid aloqa
+nisha|Turning ekologik o'rni
+tolerantlik|Omil ta'siriga chidamlilik
+optimum|Yashash uchun eng qulay sharoit
+limit|Yashashni cheklovchi omil
+sezonlik|Mavsumga bog'liq o'zgaruvchanlik
+bioritm|Organizmdagi davriy jarayonlar
+fotoperiodizm|Kun uzunligiga javob berish
+diffuzion|Moddalarning yoyilishiga oid
+faollik|Organizmning hayotiy harakati
+qo'zg'aluvchanlik|Ta'sirga javob berish qobiliyati
+sezuvchanlik|Muhit o'zgarishini his qilish
+tonus|Muskulning doimiy taranglik holati
+koordinatsiya|Harakatlarning muvofiqligi
+gomologik|Kelib chiqishi umumiy organlar
+analogik|Vazifasi o'xshash, kelib chiqishi har xil
+rudiment|Qisqargan, vazifasini yo'qotgan organ
+atavizm|Ajdod belgisining qaytishi
+konvergensiya|Turli turlarda belgilar o'xshashligi
+divergensiya|Belgilarning ajralib borishi
+aromorfoz|Tuzilishning yuqori darajaga ko'tarilishi
+idioadaptatsiya|Muhitga mayda moslashuv
+degeneratsiya|Tuzilishning soddalashishi
+drift|Genlar chastotasining tasodifiy o'zgarishi
+izolyatsiya|Populyatsiyalarning ajralib qolishi
+tanlanish|Moslashganlarning saqlanib qolishi
+kurash|Mavjudlik uchun raqobat
+moslashuv|Muhit sharoitiga uyg'unlashish
+biogenez|Tirik faqat tirikdan paydo bo'lishi
+abiogenez|Tirikning jonsizdan paydo bo'lishi
+koatservat|Hayot paydo bo'lishidagi tomchi tuzilma
+prokariot|Yadrosi shakllanmagan organizm
+eukariot|Chin yadroli organizm
+sitokinez|Sitoplazmaning bo'linishi
+karyokinez|Yadroning bo'linishi
+interfaza|Bo'linishlar orasidagi davr
+profaza|Mitozning birinchi bosqichi
+metafaza|Xromosomalar o'rtaga teriladigan bosqich
+anafaza|Xromosomalar ajraladigan bosqich
+telofaza|Mitozning yakuniy bosqichi
+veretene|Bo'linishda xromosomani tortuvchi tuzilma
+sentromera|Xromosomaning belanma qismi
+kariotip|Hujayra xromosomalari to'plami
+genofond|Populyatsiyaning genlar zaxirasi
+biomarker|Biologik jarayon ko'rsatkichi
+metabolit|Modda almashinuvi mahsuloti
+koferment|Fermentga yordam beruvchi modda
+izoferment|Bir fermentning har xil shakllari
+denaturatsiya|Oqsil tuzilishining buzilishi
+gidroliz|Suv ishtirokida parchalanish
+oksidlanish|Elektron yo'qotish reaksiyasi
+qaytarilish|Elektron biriktirish reaksiyasi
+atf|Hujayra energiya moddasi
+nukleosoma|DNK o'ralgan oqsil birligi
+xromatin|Yadro ichidagi DNK va oqsil moddasi
+xromatida|Xromosomaning bir yarmi
+telomer|Xromosoma uchidagi himoya qismi
+transpozon|O'rin almashtiruvchi gen bo'lagi
+ekzon|Genning kodlovchi qismi
+intron|Genning kodlamaydigan qismi
+promotor|Gen o'qilishini boshlovchi qism
+operon|Birga boshqariladigan genlar guruhi
+amplifikatsiya|DNK nusxalarini ko'paytirish
+sekvenslash|DNK nukleotidlari tartibini aniqlash
+monogibrid|Bir belgi bo'yicha chatishtirish
+digibrid|Ikki belgi bo'yicha chatishtirish
+qoplama|Tanani tashqi muhitdan himoyalovchi qatlam
+exoskelet|Tashqi qattiq skelet
+endoskelet|Ichki suyak skeleti
+gidroskelet|Suyuqlikka tayangan skelet
+notoxorda|Umurtqa oldi tayanch tog'ayi
+somit|Embrion muskul bo'lagi
+koelom|Ikkilamchi tana bo'shlig'i
+gemolimfa|Bo'g'imoyoqlilar qoni
+osmoregulyatsiya|Tanadagi suv-tuz muvozanatini saqlash
+neyrogumoral|Nerv va gormonlar orqali boshqaruv
+immunizatsiya|Immunitet hosil qilish jarayoni
+antiseptik|Mikroblarni yo'qotuvchi vosita
+dezinfeksiya|Zararli mikroblardan tozalash
+sterilizatsiya|Barcha mikroblardan tozalash
+pasterizatsiya|Mahsulotni qizdirib zararsizlantirish
+biosintez|Organizmda modda hosil qilish
+fotoliz|Yorug'lik ta'sirida suvning parchalanishi
+transport|Moddalarning tashilishi jarayoni
+osmotik|Osmos bosimiga oid jarayon
+gradient|Moddaning zichlik farqi
+potensial|Membranadagi elektr kuchlanishi
+depolarizatsiya|Membrana zaryadining o'zgarishi
+impuls|Nerv tolasidagi qo'zg'alish to'lqini
+retseptsiya|Qo'zg'atuvchini qabul qilish
+adaptyarlik|Moslashuvchanlik darajasi
+populyatsion|Populyatsiyaga oid tushuncha
+endemik|Faqat bir hududda uchraydigan tur
+relikt|Qadimdan saqlanib qolgan tur
+kosmopolit|Keng tarqalgan tur
+introduksiya|Yangi turni boshqa hududga kiritish
+akklimatizatsiya|Yangi iqlimga ko'niktirish
+domestikatsiya|Hayvonni xonakilashtirish
+monofag|Bir xil oziq bilan oziqlanuvchi
+polifag|Ko'p xil oziq yeydigan organizm
+fitofag|O'simlik bilan oziqlanuvchi
+zoofag|Hayvon bilan oziqlanuvchi
+detritofag|Chirindi bilan oziqlanuvchi
+filtrator|Suvni filtrlab oziqlanuvchi
+osmotrof|Erigan moddani so'rib oziqlanuvchi
+fagotrof|Zarrachani yutib oziqlanuvchi

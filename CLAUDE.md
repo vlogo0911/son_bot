@@ -564,3 +564,6 @@
   (`MAFIA_REFRESH`), a'zolarni `MAFIA_PER_MSG` 5 tadan bitta xabarda (`mafia_build`, tezlik ≥0.7 s) chaqiradi; Mafia bot xabarlari (yangi/tahrir,
   `_mafia_watch` → `mafia_on_bot_message`): "Jami: N" (`MAFIA_COUNT_RE`) ≥ min → `/start@bot`, chaqiruv to'xtaydi; "O'yin tugadi"/bekor →
   keyingi o'yin. Empire Mafia kodiga tegilmagan.
+- ⚡ Web animatsiya unumi (Crash/Kamikaze canvas): Crash `dpr` 2 ga chegaralangan (yuqori DPR telefonlarda eng katta yuk edi),
+  har ikki o'yin frame'ida ~30 fps cheklov (Kamikaze kutishda 15 fps), har kadrdagi `ctx.shadowBlur` arzon ikki qatlamli glow bilan
+  almashtirildi + Crash frame `document.hidden` da to'xtaydi. Harakat dt-asosli — fps cheklovi tezlikni o'zgartirmaydi.

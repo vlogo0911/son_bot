@@ -29237,7 +29237,7 @@ function initCrash(){
         cround=document.getElementById('cround'), conline=document.getElementById('conline');
   if(!btn) return;
   renderHist(chist);
-  const ctx=cv.getContext('2d'); const dpr=window.devicePixelRatio||1;
+  const ctx=cv.getContext('2d'); const dpr=Math.min(2,window.devicePixelRatio||1);
   // server holati (raund/bosqich/vaqt) — hamma uchun bir xil
   const S={round:0, phase:'bet', el:0, at:performance.now(), growth:0.12, crash:null, betDur:7, me:null, queued:null, players:[], total:0, pot:0};
   let alive=true, raf=0, timer=0, busy=false, crashAt=0, tip=[0,0,0], lastTip=null, roundSeen=0;
@@ -29377,7 +29377,7 @@ function initCrash(){
     const fill=new Path2D(line); fill.lineTo(tx,base); fill.lineTo(X(0),base); fill.closePath();
     const g=ctx.createLinearGradient(0,top,0,base); g.addColorStop(0,'rgba(255,60,90,.5)'); g.addColorStop(1,'rgba(255,60,90,.03)');
     ctx.fillStyle=g; ctx.fill(fill);
-    ctx.strokeStyle='#ff3b6b'; ctx.lineWidth=4*dpr; ctx.lineJoin='round'; ctx.shadowColor='#ff3b6b'; ctx.shadowBlur=14*dpr; ctx.stroke(line); ctx.shadowBlur=0;
+    ctx.lineJoin='round'; ctx.strokeStyle='rgba(255,59,107,.22)'; ctx.lineWidth=11*dpr; ctx.stroke(line); ctx.strokeStyle='#ff3b6b'; ctx.lineWidth=4*dpr; ctx.stroke(line);
     return [tx,ty,Math.atan2(y-y0,(x-x0)||1)+Math.sin(now/330)*0.14*wob];
   }
   function particles(dt){
@@ -29391,8 +29391,10 @@ function initCrash(){
   function frame(){
     if(!alive) return;
     raf=requestAnimationFrame(frame);
-    if(!cr.classList.contains('on')) return;
-    const now=performance.now(), dt=Math.min(0.05,(now-lastNow)/1000); lastNow=now;
+    if(!cr.classList.contains('on')||document.hidden) return;
+    const now=performance.now();
+    if(now-lastNow<30) return;                 // ~30 fps — telefon qotmasligi uchun
+    const dt=Math.min(0.05,(now-lastNow)/1000); lastNow=now;
     size(); const W=cv.width,H=cv.height; ctx.clearRect(0,0,W,H);
     background(W,H,now,dt);
     if(S.phase==='bet'){
@@ -30794,7 +30796,7 @@ function initKami(){
     if(!sec.classList.contains('on')||document.hidden) return;
     const now=performance.now();
     const calm=!playing&&!busy&&!plane.dead&&!plane.kamikaze&&plane.tx==null&&!shots.length&&!sparks.length&&!splashes.length&&!puffs.length;
-    if(calm && now-lastDraw<66) return;           // kutish paytida ~15 fps — zaif telefonlarda qizib, qotib qolmasin
+    if(now-lastDraw<(calm?66:30)) return;          // kutishda ~15 fps, o'yinda ~30 fps — telefon qizib/qotmasin
     lastDraw=now;
     size(); const g=geo();
     // kamera: keyingi ustun ekranning ~45% ida
@@ -30820,7 +30822,7 @@ function initKami(){
     for(const s of shots){ const u=(now-s.t0)/520; if(u<0) continue;
       const [tx,ty]=cellXY(s.col,s.row,g), sx=sh.x-g.T*0.5, sy=sh.cy+(s.row-2)*g.T*0.3;
       if(u<1){ const x=sx+(tx-sx)*u, y=sy+(ty-sy)*u - Math.sin(Math.PI*u)*g.T*1.2;
-        ctx.fillStyle='#ffe08a'; ctx.shadowColor='#ff8a3a'; ctx.shadowBlur=14*dpr; ctx.beginPath(); ctx.arc(x,y,4*dpr,0,7); ctx.fill(); ctx.shadowBlur=0;
+        ctx.fillStyle='rgba(255,138,58,.35)'; ctx.beginPath(); ctx.arc(x,y,9*dpr,0,7); ctx.fill(); ctx.fillStyle='#ffe08a'; ctx.beginPath(); ctx.arc(x,y,4*dpr,0,7); ctx.fill();
         if(u<0.12){ ctx.fillStyle='rgba(255,200,90,'+(1-u/0.12)+')'; ctx.beginPath(); ctx.arc(sx,sy,12*dpr,0,7); ctx.fill(); } }
       else if(!s.done){ s.done=true; splashes.push({x:tx,y:ty,t0:now}); SND.play(s.hit?'explode':'splash'); burst(tx,ty,s.hit?'#ff5a3a':'#9fe8ff',s.hit?70:26); } }
     for(let i=shots.length-1;i>=0;i--) if(shots[i].done) shots.splice(i,1);

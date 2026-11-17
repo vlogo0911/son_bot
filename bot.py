@@ -27801,9 +27801,61 @@ WEBAPP_HTML = r"""<!doctype html>
   .tme .r{font:900 20px "Cinzel",Georgia,serif;background:var(--g-text);-webkit-background-clip:text;background-clip:text;color:transparent;min-width:44px}
   .tme small{display:block;color:var(--dim);font-size:11px}
   .tnote{color:var(--dim);font-size:12px;margin-top:10px;text-align:center}
+  /* ═════════ 🎨 3 KO'RINISH MAVZUSI (Empire / Neon / iOS 26) ═════════ */
+  /* Empire = default (:root oltin). Quyida Neon va iOS almashtiradi. */
+  .thm .thmrow{display:flex;gap:8px;margin-top:10px}
+  .thmb{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:12px 4px;border-radius:14px;cursor:pointer;
+    border:1px solid var(--line);background:#0d0d16;color:var(--txt);font-size:22px;font-weight:800;transition:.15s}
+  .thmb span{font-size:11px;color:var(--dim);font-weight:700}
+  .thmb.on{border-color:var(--gold);background:linear-gradient(135deg,rgba(255,210,74,.18),rgba(34,211,238,.12))}
+  .thmb.on span{color:var(--txt)}
+  /* ───── 🌌 NEON DARK ───── */
+  html[data-theme="neon"]{
+    --bg:#07060d; --card:#12101e; --line:#2a2440; --cyan:#22d3ee; --mag:#e879f9; --pur:#8b5cf6; --lime:#a3e635;
+    --gold:#ffd24a; --gold2:#ffb020; --txt:#f3eede; --dim:#9a93b8;
+    --g-metal:linear-gradient(135deg,#22d3ee,#8b5cf6 55%,#e879f9);
+    --g-text:linear-gradient(90deg,#22d3ee,#e879f9);
+    --g-border:linear-gradient(135deg,#22d3ee,#8b5cf6 50%,#e879f9);
+  }
+  html[data-theme="neon"] body{
+    background-color:#07060d;
+    background-image:radial-gradient(1200px 500px at 50% -10%,rgba(139,92,246,.2),transparent),
+                     radial-gradient(900px 400px at 100% 0,rgba(34,211,238,.12),transparent),
+                     radial-gradient(900px 400px at 0 10%,rgba(232,121,249,.1),transparent)}
+  html[data-theme="neon"] .royal,html[data-theme="neon"] h2,html[data-theme="neon"] .hname{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  html[data-theme="neon"] .thmb{background:#12101e}
+  /* ───── 🍏 iOS 26 (yorug' + frosted glass) ───── */
+  html[data-theme="ios"]{
+    --bg:#eceef3; --card:#ffffff; --line:#e3e5ea; --cyan:#0a84ff; --mag:#bf5af2; --pur:#5e5ce6; --lime:#30d158;
+    --gold:#ff9f0a; --gold2:#ff9500; --txt:#1c1c1e; --dim:#8a8a8e;
+    --g-metal:linear-gradient(135deg,#0a84ff,#5e5ce6);
+    --g-text:linear-gradient(90deg,#0a84ff,#bf5af2);
+    --g-border:linear-gradient(135deg,#0a84ff,#5e5ce6);
+  }
+  html[data-theme="ios"] body{color:#1c1c1e;background-color:#eceef3;
+    background-image:radial-gradient(900px 500px at 50% -10%,rgba(10,132,255,.12),transparent),
+                     radial-gradient(700px 400px at 110% 10%,rgba(191,90,242,.1),transparent),
+                     radial-gradient(700px 400px at -10% 30%,rgba(48,209,88,.08),transparent)}
+  html[data-theme="ios"] .royal,html[data-theme="ios"] h2,html[data-theme="ios"] .hname{font-family:-apple-system,"SF Pro Display",system-ui,sans-serif}
+  html[data-theme="ios"] .card{background:rgba(255,255,255,.78);backdrop-filter:blur(18px) saturate(160%);-webkit-backdrop-filter:blur(18px) saturate(160%);border:1px solid rgba(0,0,0,.06);box-shadow:0 6px 20px rgba(0,0,0,.06)}
+  html[data-theme="ios"] .card::before{display:none}
+  html[data-theme="ios"] .hdr{background:rgba(255,255,255,.72);backdrop-filter:blur(18px) saturate(160%);-webkit-backdrop-filter:blur(18px) saturate(160%);box-shadow:0 6px 20px rgba(0,0,0,.08)}
+  html[data-theme="ios"] .hdr::before{background:rgba(0,0,0,.06)}
+  html[data-theme="ios"] .hsub,html[data-theme="ios"] .lbl,html[data-theme="ios"] .bal .l{color:#8a8a8e}
+  html[data-theme="ios"] .tabs{background:rgba(255,255,255,.82);backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px) saturate(180%);border-top:1px solid rgba(0,0,0,.06)}
+  html[data-theme="ios"] .tab{color:#8a8a8e}
+  html[data-theme="ios"] .tab.on{color:#0a84ff;border-color:rgba(10,132,255,.25);background:linear-gradient(135deg,rgba(10,132,255,.14),rgba(191,90,242,.14));box-shadow:none}
+  html[data-theme="ios"] input.bet,html[data-theme="ios"] select.sel,html[data-theme="ios"] .stepper{background:#f2f3f7;color:#1c1c1e;border-color:#e0e2e8}
+  html[data-theme="ios"] .thmb{background:#f2f3f7}
+  html[data-theme="ios"] #toast{background:rgba(255,255,255,.92);color:#1c1c1e;border-color:rgba(0,0,0,.08);box-shadow:0 10px 30px rgba(0,0,0,.15)}
+  html[data-theme="ios"] .sheet{background:rgba(252,252,253,.94);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px)}
+  html[data-theme="ios"] .row{border-bottom-color:#ececf0}
+  html[data-theme="ios"] .ava{box-shadow:0 0 0 3px #fff,0 6px 18px rgba(10,132,255,.35)}
+  html[data-theme="ios"] .ava::after{filter:none}
 </style>
 </head>
 <body>
+<script>try{var _t=localStorage.getItem('theme');if(_t&&_t!=='empire')document.documentElement.setAttribute('data-theme',_t);}catch(e){}</script>
 <div id="app"><div class="center"><div class="big">⏳</div>Yuklanmoqda…</div></div>
 <script>
 const tg = window.Telegram ? window.Telegram.WebApp : null;
@@ -27820,8 +27872,17 @@ const CASINO_ICON='<svg class="cz-ico" viewBox="0 0 48 48" width="27" height="27
   '<path d="M15.5 29.5 L17 19.5 L21 24 L24 17 L27 24 L31 19.5 L32.5 29.5 Z" fill="url(#czg)" stroke="#5a3a05" stroke-width=".8" stroke-linejoin="round"/>'+
   '<rect x="15.5" y="29.5" width="17" height="2.6" rx="1" fill="url(#czg)"/></svg>';
 
+function curTheme(){ try{ return localStorage.getItem('theme')||'empire'; }catch(e){ return 'empire'; } }
+function themeColors(t){ return t==='ios'?{bg:'#eceef3',hd:'#ffffff'}:t==='neon'?{bg:'#07060d',hd:'#07060d'}:{bg:'#0a0705',hd:'#0a0705'}; }
+function applyTheme(t){
+  if(t==='empire') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme',t);
+  try{ localStorage.setItem('theme',t); }catch(e){}
+  const c=themeColors(t);
+  if(tg){ try{tg.setHeaderColor(c.hd);tg.setBackgroundColor(c.bg);}catch(e){} }
+}
 function boot(){
-  if(tg){ tg.ready(); tg.expand(); try{tg.setHeaderColor('#07070d');tg.setBackgroundColor('#07070d');}catch(e){} }
+  if(tg){ tg.ready(); tg.expand(); const c=themeColors(curTheme()); try{tg.setHeaderColor(c.hd);tg.setBackgroundColor(c.bg);}catch(e){} }
   fetch('/app/api/data',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({initData: tg?tg.initData:''})})
     .then(r=>r.json()).then(render).catch(()=>fail('Aloqa xatosi'));
@@ -27853,6 +27914,20 @@ function render(res){
 
   // PROFIL
   const p=$('<div class="sec" id="s-profil"></div>');
+  // 🎨 Ko'rinish mavzusi (Empire / Neon / iOS 26)
+  (function(){
+    const cur=curTheme();
+    const tc=$('<div class="card full thm"><div class="lbl">🎨 Ko‘rinish mavzusi</div><div class="thmrow">'+
+      '<button class="thmb" data-t="empire">👑<span>Empire</span></button>'+
+      '<button class="thmb" data-t="neon">🌌<span>Neon</span></button>'+
+      '<button class="thmb" data-t="ios">🍏<span>iOS 26</span></button>'+
+      '</div></div>');
+    const btns=tc.querySelectorAll('.thmb');
+    btns.forEach(b=>{ if(b.dataset.t===cur) b.classList.add('on');
+      b.onclick=()=>{ applyTheme(b.dataset.t); btns.forEach(x=>x.classList.toggle('on',x===b));
+        toast('🎨 Mavzu: '+(b.dataset.t==='ios'?'iOS 26':b.dataset.t==='neon'?'Neon dark':'Empire')); }; });
+    p.appendChild(tc);
+  })();
   p.appendChild($('<div class="grid">'+
     card('💰 Hamyon', d.money_fmt+'$', 'neon','full')+
     card('🏆 Reyting', d.rank?('#'+d.rank):'—','mag')+

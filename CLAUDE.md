@@ -298,6 +298,19 @@
   `_WebCallback` soxta query bilan chaqiriladi — mantiq bir xil. O'zimniki: `/app/api/request/cancel` (`web_request_cancel`) va
   `/app/api/request/remind` (`web_request_remind`, `REQ_REMIND_GAP` 10 daq). Ajrashish xabari `send_divorce_consent` (yetkazilmasa
   `REL_SEND_FAILED` → web javobida `undelivered`).
+- 🎨 Web app 3 ko'rinish mavzusi (Profil tepasidagi `.thm` karta): Empire (oltin, default — `:root`), 🌌 Neon dark, 🍏 iOS 26
+  (yorug' frosted-glass). `html[data-theme="neon|ios"]` CSS o'zgaruvchilari + body/font/surface override'lari (WEBAPP_HTML `<style>`
+  oxirida "3 KO'RINISH MAVZUSI" bloki). Tanlov `localStorage('theme')` (har foydalanuvchi/qurilma uchun), `<body>` tagidagi inline
+  skript bilan chaqnashsiz qo'llanadi; `curTheme`/`applyTheme`/`themeColors` Telegram header/fon rangini ham moslaydi. `#s-crash` o'z
+  neon palitrasini saqlaydi (temadan mustasno). Server/token kerak emas.
+- 💕 Qalb Rasmi (Games → `.gcc.qalb` → `openQalb(d)` → to'liq ekran `#qrv`; VIP EMAS, hamyonga tegmaydi, gate `web_enabled_for`):
+  2 kishilik real-vaqt birgalikda chizish. Xona kodi (5 belgi) orqali ulanish, umumiy tuval, 12 rang, mo'yqalam qalinligi (1–30),
+  o'chirg'ich (oq chiziq), undo/redo (faqat o'z chizmalaringiz), 2 tomonlama rozilik bilan tozalash, PNG saqlash, qayta ulanishda saqlanadi.
+  Server relay `web_qalb` (`/app/api/qalb/{create,join,leave,poll,draw,undo,redo,clear_req,clear_ok,clear_no,state}`) — xotirada `QALB_ROOMS`
+  (host/guest, `ops` monoton `seq` bilan: op `s`=segment, `u`/`r`=undo/redo, `c`=tozalash), `QALB_WHERE`. Klient normallashtirilgan [0,1]
+  koordinatalar, segmentlarni ~80 ms da yuboradi, `after=seq` bilan ~230 ms poll; o'z chizmasini jonli chizadi (echo'ni o'tkazib yuboradi),
+  `redraw` oplardan qayta tiklaydi. `QALB_TTL` 150 s nofaollik, `QALB_EMPTY_TTL` 300 s (qayta ulanish), `QALB_MAX_OPS` 8000. `JS QALB` moduli
+  WEBAPP_HTML ichida; undo/redo `g` (`uid-N`) egasini server tekshiradi.
 - 🎮 Web app Games: pastki qatorda "Kazino" o'rniga "🎮 Games" tab (`games`) → `#s-games` (`gamesPage`): kategoriyalar 🎰 Kazino
   (`setTab('casino')`, lobbi tepasida "‹ Games") va 👑 VIP (`#s-vip`, `vipPage`). `setTab` casino/vip/crash/frog/kami uchun Games tabini
   yoritadi. VIP: `vip_users` (until, ownerlar beradi), `is_vip` (ownerlar doim VIP), payload `vip` (`vip_payload`: vip/until/best/top),

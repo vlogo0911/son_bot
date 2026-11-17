@@ -31943,6 +31943,8 @@ def main():
         )
         return
 
+    from db_transfer import apply_pending_restore, register as register_db_transfer
+    apply_pending_restore(DB_FILE)
     init_db()
     init_economy()
     init_group_members()
@@ -32042,6 +32044,7 @@ def main():
         # . va ! prefikslari (PrefixHandler komandani pastki registrsiz talab qiladi)
         app.add_handler(PrefixHandler(EXTRA_PREFIXES, names, handler))
 
+    register_db_transfer(app, DB_FILE, CAREER_OWNER_IDS)
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
     # Alohida guruh (-1): a'zolar ro'yxatini yig'adi, asosiy handlerlarni to'smaydi.

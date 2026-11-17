@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import ApplicationHandlerStop, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
 _PENDING_SUFFIX = ".restore_pending"
 _MAX_DB_BYTES = 45 * 1024 * 1024
@@ -95,6 +95,7 @@ def register(app, db_file, owners):
                 os.unlink(path)
             context.user_data.pop("dbtransfer_wait", None)
             await q.message.reply_text("Bekor qilindi.")
+        raise ApplicationHandlerStop
 
     async def document(update, context):
         if not allowed(update) or not context.user_data.pop("dbtransfer_wait", False):

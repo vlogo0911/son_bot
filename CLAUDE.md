@@ -298,11 +298,15 @@
   `_WebCallback` soxta query bilan chaqiriladi — mantiq bir xil. O'zimniki: `/app/api/request/cancel` (`web_request_cancel`) va
   `/app/api/request/remind` (`web_request_remind`, `REQ_REMIND_GAP` 10 daq). Ajrashish xabari `send_divorce_consent` (yetkazilmasa
   `REL_SEND_FAILED` → web javobida `undelivered`).
-- 🎨 Web app 3 ko'rinish mavzusi (Profil tepasidagi `.thm` karta): Empire (oltin, default — `:root`), 🌌 Neon dark, 🍏 iOS 26
-  (yorug' frosted-glass). `html[data-theme="neon|ios"]` CSS o'zgaruvchilari + body/font/surface override'lari (WEBAPP_HTML `<style>`
-  oxirida "3 KO'RINISH MAVZUSI" bloki). Tanlov `localStorage('theme')` (har foydalanuvchi/qurilma uchun), `<body>` tagidagi inline
-  skript bilan chaqnashsiz qo'llanadi; `curTheme`/`applyTheme`/`themeColors` Telegram header/fon rangini ham moslaydi. `#s-crash` o'z
-  neon palitrasini saqlaydi (temadan mustasno). Server/token kerak emas.
+- 🎨 Web app 3 ko'rinish mavzusi (Profil tepasidagi `.thm` karta, har variantda mini-namuna `.dzp`): **Empire style** (oltin, default — `:root`),
+  🌌 **Neon dark** (neumorf: to'q kulrang, binafsha neon, "bo'rtma" kartalar, ko'tarilgan faol tab; Montserrat shrifti) va 🫧 **iOS 26**
+  (Liquid Glass: xira binafsha-ko'k suyuq fon `body::before` (sekin siljiydi), shaffof shisha sirtlar `backdrop-filter`, yorqin qirralar
+  `--g-border`, tovlanuvchi pufak tugmalar, suzuvchi shisha tab kapsulasi). Ikkalasi ham Empire Mafia web app'idagi dizayn bilan bir xil.
+  `html[data-theme="neon|ios"]` bloklari WEBAPP_HTML `<style>` OXIRIDA ("KO'RINISH MAVZULARI v2") — `.sec:not(#s-crash) .card` kabi
+  yuqori specificity'li qoidalarni yengish uchun xuddi shu selektor ishlatiladi; gradient `html` ga beriladi (body qisqa sahifada qutisini
+  bo'yab chiziq qoldirmasin). Tanlov `localStorage('theme')` (`empire|neon|ios`), `<body>` tagidagi inline skript bilan chaqnashsiz
+  qo'llanadi; `curTheme`/`applyTheme`/`themeColors`/`themeFont` Telegram header/fon rangini ham moslaydi. `#s-crash` o'z palitrasini
+  saqlaydi. Server/token kerak emas.
 - 💕 Qalb Rasmi (Games → `.gcc.qalb` → `openQalb(d)` → to'liq ekran `#qrv`; VIP EMAS, hamyonga tegmaydi, gate `web_enabled_for`):
   2 kishilik real-vaqt birgalikda chizish. Xona kodi (5 belgi) orqali ulanish, umumiy tuval, 12 rang, mo'yqalam qalinligi (1–30),
   o'chirg'ich (oq chiziq), undo/redo (faqat o'z chizmalaringiz), 2 tomonlama rozilik bilan tozalash, PNG saqlash, qayta ulanishda saqlanadi.

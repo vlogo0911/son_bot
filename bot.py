@@ -17637,6 +17637,10 @@ class _ExchangeHandler(BaseHTTPRequestHandler):
                       "/app/api/voice/state", "/app/api/voice/rooms", "/app/api/voice/create", "/app/api/voice/kick",
                       "/app/api/voice/mute", "/app/api/voice/close", "/app/api/voice/media"):
             coro = web_voice(uid, path.rsplit("/", 1)[1], body)
+        elif path.startswith("/app/api/qalb/") and path.rsplit("/", 1)[1] in ("create", "join", "leave", "poll",
+                                                                                "draw", "undo", "redo", "clear_req",
+                                                                                "clear_ok", "clear_no", "state"):
+            coro = web_qalb(uid, path.rsplit("/", 1)[1], body)
         elif path.startswith("/app/api/mp/") and path.rsplit("/", 1)[1] in ("list", "create", "quick", "join", "leave",
                                                                               "start", "end", "sync"):
             coro = web_mp(uid, path.rsplit("/", 1)[1], body)
@@ -25293,6 +25297,195 @@ def voice_summary():
     return {"count": sum(r["count"] for r in rooms), "rooms": rooms, "max": VOICE_MAX}
 
 
+# ── 💕 QALB RASMI — 2 kishilik real-vaqt birgalikda chizish (xotirada relay; VIP emas, hamyonga tegmaydi) ──
+# Server faqat uzatadi: har chizish segmenti/undo/redo/tozalash "op" sifatida append qilinadi (monoton seq).
+# Klient after=seq bilan poll qiladi, yangi oplarni oladi. Qayta ulanishda state to'liq oplarni qaytaradi.
+QALB_ROOMS: dict[str, dict] = {}   # code -> room
+QALB_WHERE: dict[int, str] = {}    # uid -> code
+QALB_TTL = 150                     # shuncha s poll bo'lmasa — o'yinchi nofaol
+QALB_EMPTY_TTL = 300               # ikkala o'yinchi ketgach xona shuncha s saqlanadi (qayta ulanish uchun)
+QALB_ROOMS_MAX = 60
+QALB_MAX_OPS = 8000                # xotira chegarasi (eski oplar oldidan tashlanadi)
+QALB_SEG_MAX = 400                 # bitta segmentdagi maks nuqta
+
+
+def _qalb_code():
+    al = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    while True:
+        c = "".join(random.choice(al) for _ in range(5))
+        if c not in QALB_ROOMS:
+            return c
+
+
+def _qalb_gc():
+    now = time.time()
+    for code, r in list(QALB_ROOMS.items()):
+        for u in [u for u, t in list(r["seen"].items()) if now - t > QALB_TTL]:
+            r["seen"].pop(u, None)
+            if QALB_WHERE.get(u) == code:
+                QALB_WHERE.pop(u, None)
+        active = [u for u in (r["host"], r["guest"]) if u and now - r["seen"].get(u, 0) <= QALB_TTL]
+        if not active and now - r.get("empty", now) > QALB_EMPTY_TTL:
+            QALB_ROOMS.pop(code, None)
+        elif not active:
+            r.setdefault("empty", now)
+        else:
+            r["empty"] = now
+
+
+def _qalb_trim(r):
+    ops = r["ops"]
+    if len(ops) > QALB_MAX_OPS:
+        del ops[:len(ops) - QALB_MAX_OPS]
+
+
+def _qalb_info(r, uid):
+    now = time.time()
+    peers = []
+    for u in (r["host"], r["guest"]):
+        if u:
+            peers.append({"id": u, "name": r["names"].get(u, "?"),
+                          "online": now - r["seen"].get(u, 0) <= QALB_TTL,
+                          "host": u == r["host"], "me": u == uid})
+    return {"code": r["code"], "peers": peers, "seq": r["seq"],
+            "clear_req": ({"by": r["clear_req"], "name": r["names"].get(r["clear_req"], "?")} if r["clear_req"] else None)}
+
+
+def _qalb_part(uid, code):
+    r = QALB_ROOMS.get(code)
+    QALB_WHERE.pop(uid, None)
+    if not r:
+        return
+    r["seen"].pop(uid, None)
+    if r["guest"] == uid:
+        r["guest"] = None          # host o'rni saqlanadi (qayta ulansa tiklanadi)
+    r.setdefault("empty", time.time())
+
+
+async def web_qalb(uid, act, body):
+    if not web_enabled_for(uid):
+        return {"error": "off"}
+    _qalb_gc()
+    now = time.time()
+
+    if act == "create":
+        old = QALB_WHERE.get(uid)
+        if old:
+            _qalb_part(uid, old)
+        if len(QALB_ROOMS) >= QALB_ROOMS_MAX:
+            return {"error": "busy"}
+        code = _qalb_code()
+        QALB_ROOMS[code] = {"code": code, "host": uid, "guest": None,
+                            "names": {uid: _web_player_name(uid)}, "seen": {uid: now},
+                            "ops": [], "seq": 0, "clear_req": None, "created": now, "empty": now}
+        QALB_WHERE[uid] = code
+        return {"result": "ok", "room": _qalb_info(QALB_ROOMS[code], uid), "ops": []}
+
+    if act == "join":
+        code = str(body.get("code") or "").strip().upper()[:5]
+        r = QALB_ROOMS.get(code)
+        if not r:
+            return {"error": "not_found"}
+        if uid != r["host"] and uid != r["guest"]:
+            if r["guest"] and now - r["seen"].get(r["guest"], 0) <= QALB_TTL:
+                return {"error": "full"}
+            r["guest"] = uid
+        r["names"][uid] = _web_player_name(uid)
+        r["seen"][uid] = now
+        QALB_WHERE[uid] = code
+        return {"result": "ok", "room": _qalb_info(r, uid), "ops": r["ops"], "resync": True}
+
+    code = QALB_WHERE.get(uid)
+    r = QALB_ROOMS.get(code)
+    if not r:
+        return {"error": "no_room"}
+    r["seen"][uid] = now
+
+    if act == "leave":
+        _qalb_part(uid, code)
+        return {"result": "ok"}
+
+    if act == "state":
+        return {"result": "ok", "room": _qalb_info(r, uid), "ops": r["ops"], "seq": r["seq"], "resync": True}
+
+    if act == "poll":
+        try:
+            after = int(body.get("after") or 0)
+        except (TypeError, ValueError):
+            after = 0
+        minseq = r["ops"][0]["seq"] if r["ops"] else 0
+        if after and after < minseq - 1:
+            return {"result": "ok", "room": _qalb_info(r, uid), "ops": r["ops"], "seq": r["seq"], "resync": True}
+        ops = [o for o in r["ops"] if o["seq"] > after]
+        return {"result": "ok", "room": _qalb_info(r, uid), "ops": ops, "seq": r["seq"]}
+
+    if act == "draw":
+        g = str(body.get("g") or "")[:40]
+        if not g.startswith(f"{uid}-"):
+            return {"error": "bad"}
+        pts = body.get("pts")
+        if not isinstance(pts, list) or not pts:
+            return {"error": "bad"}
+        cl = []
+        for p in pts[:QALB_SEG_MAX]:
+            try:
+                x = round(float(p[0]), 4)
+                y = round(float(p[1]), 4)
+            except (TypeError, ValueError, IndexError):
+                continue
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                cl.append([x, y])
+        if not cl:
+            return {"error": "bad"}
+        color = str(body.get("color") or "#111")[:9]
+        try:
+            w = float(body.get("w") or 4)
+        except (TypeError, ValueError):
+            w = 4.0
+        w = max(1.0, min(40.0, w))
+        tool = "e" if body.get("tool") == "e" else "d"
+        r["seq"] += 1
+        r["ops"].append({"seq": r["seq"], "op": "s", "g": g, "by": uid, "color": color, "w": w, "tool": tool, "pts": cl})
+        r["clear_req"] = None
+        _qalb_trim(r)
+        return {"result": "ok", "seq": r["seq"]}
+
+    if act in ("undo", "redo"):
+        g = str(body.get("g") or "")[:40]
+        if not g.startswith(f"{uid}-"):
+            return {"error": "bad"}
+        r["seq"] += 1
+        r["ops"].append({"seq": r["seq"], "op": "u" if act == "undo" else "r", "g": g, "by": uid})
+        _qalb_trim(r)
+        return {"result": "ok", "seq": r["seq"]}
+
+    if act == "clear_req":
+        others = [u for u in (r["host"], r["guest"]) if u and u != uid and now - r["seen"].get(u, 0) <= QALB_TTL]
+        if not others:
+            r["seq"] += 1
+            r["ops"].append({"seq": r["seq"], "op": "c", "by": uid})
+            r["clear_req"] = None
+            _qalb_trim(r)
+            return {"result": "ok", "cleared": True, "seq": r["seq"]}
+        r["clear_req"] = uid
+        return {"result": "ok", "pending": True}
+
+    if act == "clear_ok":
+        if not r["clear_req"] or r["clear_req"] == uid:
+            return {"error": "no_req"}
+        r["seq"] += 1
+        r["ops"].append({"seq": r["seq"], "op": "c", "by": uid})
+        r["clear_req"] = None
+        _qalb_trim(r)
+        return {"result": "ok", "cleared": True, "seq": r["seq"]}
+
+    if act == "clear_no":
+        r["clear_req"] = None
+        return {"result": "ok"}
+
+    return {"error": "bad_act"}
+
+
 # ── 🌐 VIP o'yinlar MULTIPLAYER relay (xotirada): xonalar, kod bilan kirish, tez o'yin, ~10 Hz holat almashinuvi ──
 # Har klient o'z holatini (state ≤ MP_STATE_MAX) yuboradi va hodisalar (ev) navbatiga yozadi; server faqat uzatadi.
 MP_GAMES = {"tank": 8, "bumper": 6, "sea": 2, "checkers": 2, "nrush": 6, "cstrike": 8}
@@ -27852,6 +28045,57 @@ WEBAPP_HTML = r"""<!doctype html>
   html[data-theme="ios"] .row{border-bottom-color:#ececf0}
   html[data-theme="ios"] .ava{box-shadow:0 0 0 3px #fff,0 6px 18px rgba(10,132,255,.35)}
   html[data-theme="ios"] .ava::after{filter:none}
+  /* ═════════ 💕 QALB RASMI (2 kishilik birgalikda chizish) ═════════ */
+  .gcc.qalb{background:linear-gradient(135deg,rgba(255,90,150,.22),rgba(0,0,0,.35));box-shadow:inset 0 0 0 1.5px rgba(255,150,190,.55),0 10px 24px rgba(0,0,0,.45)}
+  .gcc.qalb .gci{background:radial-gradient(circle at 35% 30%,#ff7aa8,#b11f52);color:#fff}
+  .gcc.qalb b{color:#ffc3dc}
+  .qrv{position:fixed;inset:0;z-index:90;display:none;flex-direction:column;background:#0c0a12}
+  .qrv.show{display:flex}
+  html[data-theme="ios"] .qrv{background:#eceef3}
+  .qr-top{display:flex;align-items:center;gap:10px;padding:12px 14px;background:rgba(0,0,0,.35);border-bottom:1px solid var(--line)}
+  html[data-theme="ios"] .qr-top{background:rgba(255,255,255,.7);backdrop-filter:blur(14px)}
+  .qr-x{font-size:20px;cursor:pointer;color:var(--txt);line-height:1}
+  .qr-ti{font-family:Cinzel,serif;font-weight:800;color:#ff9ec4;font-size:16px}
+  .qr-code{margin-left:auto;font-weight:900;letter-spacing:2px;font-size:15px;color:var(--gold);background:rgba(255,255,255,.1);padding:5px 10px;border-radius:10px;cursor:pointer}
+  .qr-peers{display:flex;gap:10px;align-items:center;font-size:12px;color:var(--dim);flex-wrap:wrap}
+  .qr-peers span.qr-dot{width:8px;height:8px;border-radius:50%;background:#555;display:inline-block;margin-right:4px;vertical-align:middle}
+  .qr-peers span.qr-dot.on{background:#3ef07a;box-shadow:0 0 8px #3ef07a}
+  .qr-lobby{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center}
+  .qr-lobby .em{font-size:60px}
+  .qr-lobby h3{font-family:Cinzel,serif;color:#ff9ec4;margin:0;font-size:22px}
+  .qr-lobby p{color:var(--dim);font-size:14px;margin:0;max-width:300px;line-height:1.5}
+  .qr-big{width:100%;max-width:320px;border:none;border-radius:16px;padding:16px;font-size:17px;font-weight:900;cursor:pointer;color:#fff;
+    background:linear-gradient(135deg,#ff5a96,#b11f52);box-shadow:0 10px 24px rgba(255,90,150,.4)}
+  .qr-or{color:var(--dim);font-size:12px;letter-spacing:2px}
+  .qr-join{display:flex;gap:8px;width:100%;max-width:320px}
+  .qr-join input{flex:1;min-width:0;background:#17121c;border:1px solid var(--line);border-radius:14px;color:var(--txt);padding:14px;font-size:18px;font-weight:800;text-align:center;letter-spacing:4px;text-transform:uppercase;outline:none}
+  html[data-theme="ios"] .qr-join input{background:#f2f3f7}
+  .qr-join button{border:none;border-radius:14px;padding:0 18px;font-weight:800;color:#2b1b02;background:var(--g-metal);cursor:pointer}
+  .qr-board{flex:1;position:relative;display:none;overflow:hidden}
+  .qr-board.on{display:block}
+  #qrCanvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;background:#fff}
+  .qr-wait{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:rgba(10,8,18,.6);color:#fff;z-index:2;text-align:center;padding:20px}
+  .qr-wait.hide{display:none}
+  .qr-wait .cd{font-size:30px;font-weight:900;letter-spacing:6px;color:#ffd24a}
+  .qr-cf{position:absolute;left:12px;right:12px;top:12px;z-index:3;background:rgba(20,16,28,.97);border:1px solid var(--line);border-radius:14px;padding:12px 14px;display:none;align-items:center;gap:10px}
+  .qr-cf.on{display:flex}
+  .qr-cf b{flex:1;font-size:13px;font-weight:700}
+  .qr-cf button{border:none;border-radius:10px;padding:9px 12px;font-weight:800;cursor:pointer}
+  .qr-cf .yes{background:#ff5a6a;color:#fff}.qr-cf .no{background:#2a2440;color:#fff}
+  .qr-tools{padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:rgba(0,0,0,.42);border-top:1px solid var(--line);display:none;flex-direction:column;gap:10px}
+  html[data-theme="ios"] .qr-tools{background:rgba(255,255,255,.78);backdrop-filter:blur(14px)}
+  .qr-tools.on{display:flex}
+  .qr-cols{display:flex;gap:8px;overflow-x:auto;padding-bottom:2px}
+  .qr-cols::-webkit-scrollbar{display:none}
+  .qr-col{flex:none;width:30px;height:30px;border-radius:50%;border:2px solid rgba(255,255,255,.25);cursor:pointer;transition:.12s}
+  .qr-col.on{border-color:#fff;transform:scale(1.14);box-shadow:0 0 10px rgba(255,255,255,.5)}
+  .qr-trow{display:flex;align-items:center;gap:8px}
+  .qr-trow input[type=range]{flex:1;accent-color:#ff5a96}
+  .qr-tb{border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:15px;font-weight:800;cursor:pointer;background:#17121c;color:var(--txt);flex:none}
+  html[data-theme="ios"] .qr-tb{background:#f2f3f7}
+  .qr-tb.cl,.qr-tb.sv,.qr-tb.u,.qr-tb.rd{flex:1}
+  .qr-tb.on{background:linear-gradient(135deg,#ff5a96,#b11f52);color:#fff;border-color:transparent}
+  .qr-prev{width:30px;height:30px;border-radius:50%;flex:none;border:1px solid rgba(255,255,255,.4);background:#111}
 </style>
 </head>
 <body>
@@ -29751,6 +29995,7 @@ function gamesPage(d){
   const sec=$('<div class="sec" id="s-games"></div>'), v=d.vip||{};
   sec.innerHTML='<h2>🎮 Games</h2><div class="gcat">'+
     '<div class="gcc" data-go="casino" data-tap="1"><div class="gci">'+CASINO_ICON.replace('width="27" height="27"','width="40" height="40"')+'</div><div><b>KAZINO</b><div class="hsub">Royal Crash · Hovuz'+(d.kami?' · Kamikaze':'')+' — hamyon puli bilan</div></div></div>'+
+    '<div class="gcc qalb" data-go="qalb" data-tap="1"><div class="gci">💕</div><div><b>QALB RASMI</b><div class="hsub">Ikki yurak — bitta tuval · sherigingiz bilan real vaqtda birga chizing</div></div></div>'+
     (v.open?'<div class="gcc vip" data-go="vip" data-tap="1"><div class="gci">👑</div><div><b>VIP O‘YINLAR</b><div class="hsub">🌐 ONLINE · TANK ARENA · BUMPER ARENA · DENGIZ JANGI · SHASHKA · CLASSIC STRIKE · NEON RUSH · METRO DASH · NEON SNAKE · BLOCK STORM</div></div>'+
       '<span class="glk">'+(v.test?'🧪 TEST':v.vip?'✅ VIP':'🔒 VIP')+'</span></div>':'')+
     (d.media?'<div class="gcc media" data-go="media" data-tap="1"><div class="gci">🎬</div><div><b>MEDIA</b><div class="hsub">YouTube: musiqa · kino · multfilm · trend — ovozli xonada birga ko‘rish</div></div>'+
@@ -29759,8 +30004,105 @@ function gamesPage(d){
       (d.market.test?'<span class="glk">🧪 TEST</span>':'')+'</div>':'')+
   '</div><div class="gnote">🎮 Kategoriya tanlang</div>';
   sec.querySelectorAll('.gcc').forEach(c=>c.onclick=()=>setTab(c.dataset.go));
+  const qc=sec.querySelector('.gcc.qalb'); if(qc) qc.onclick=()=>openQalb(d);
   return sec;
 }
+function openQalb(d){ QALB.open(d); }
+const QALB=(()=>{
+  const PAL=['#111111','#ffffff','#ff3b6b','#ff8a3a','#ffd24a','#36d06b','#22d3ee','#4a7bff','#b06bff','#ff6bd0','#8a5a2b','#c2a96e'];
+  let ov=null,cv=null,ctx=null,dpr=1;
+  let me=0,code='',inRoom=false,allOps=[],seqSeen=0,poller=0,peers=[],clearReq=null;
+  let color='#111111',width=5,eraser=false,gestureN=0,myGestures=[],myRedo=[];
+  let cur=null,buf=[],lastPt=null,flushT=0,rzT=0;
+  function elq(h){ const d=document.createElement('div'); d.innerHTML=h; return d.firstElementChild; }
+  function q(s){ return ov?ov.querySelector(s):null; }
+  function paper(){ ctx.save(); ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,cv.width,cv.height); ctx.restore(); }
+  function strokeOp(o){ const p=o.pts; if(!p||!p.length) return;
+    ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle=o.color; ctx.lineWidth=Math.max(1,o.w)*dpr;
+    ctx.beginPath(); ctx.moveTo(p[0][0]*cv.width,p[0][1]*cv.height);
+    if(p.length===1) ctx.lineTo(p[0][0]*cv.width+0.1,p[0][1]*cv.height);
+    else for(let i=1;i<p.length;i++) ctx.lineTo(p[i][0]*cv.width,p[i][1]*cv.height);
+    ctx.stroke(); }
+  function redraw(){ if(!ctx) return; paper();
+    let lastClear=0; const hid=new Set();
+    for(const o of allOps){ if(o.op==='c'&&o.seq>lastClear) lastClear=o.seq; }
+    for(const o of allOps){ if(o.op==='u') hid.add(o.g); else if(o.op==='r') hid.delete(o.g); }
+    for(const o of allOps){ if(o.op==='s'&&o.seq>lastClear&&!hid.has(o.g)) strokeOp(o); } }
+  function applyBatch(ops,resync){ if(resync){ allOps=(ops||[]).slice(); redraw(); return; }
+    let rd=false; for(const o of ops){ allOps.push(o); if(o.op!=='s') rd=true; }
+    if(rd) redraw(); else for(const o of ops){ if(o.op==='s'&&o.by!==me) strokeOp(o); } }
+  function sizeCanvas(){ if(!cv) return; const b=cv.getBoundingClientRect(); dpr=Math.min(2,window.devicePixelRatio||1);
+    cv.width=Math.max(1,Math.round(b.width*dpr)); cv.height=Math.max(1,Math.round(b.height*dpr)); redraw(); }
+  function onResize(){ clearTimeout(rzT); rzT=setTimeout(sizeCanvas,150); }
+  function norm(e){ const b=cv.getBoundingClientRect();
+    return [Math.min(1,Math.max(0,(e.clientX-b.left)/b.width)),Math.min(1,Math.max(0,(e.clientY-b.top)/b.height))]; }
+  function liveSeg(a,c){ ctx.lineCap='round';ctx.lineJoin='round'; ctx.strokeStyle=eraser?'#ffffff':color;
+    ctx.lineWidth=(eraser?Math.max(width*2.2,14):width)*dpr;
+    ctx.beginPath(); ctx.moveTo(a[0]*cv.width,a[1]*cv.height); ctx.lineTo(c[0]*cv.width,c[1]*cv.height); ctx.stroke(); }
+  function sendSeg(){ if(!cur||buf.length<1) return; const seg=buf.slice(); buf=lastPt?[lastPt]:[];
+    api('/app/api/qalb/draw',{g:cur,color:eraser?'#ffffff':color,w:eraser?Math.max(width*2.2,14):width,tool:eraser?'e':'d',pts:seg}).catch(()=>{}); }
+  function down(e){ if(!inRoom) return; e.preventDefault(); gestureN++; cur=me+'-'+gestureN; const p=norm(e);
+    buf=[p]; lastPt=p; liveSeg(p,[p[0]+0.0005,p[1]]); clearInterval(flushT); flushT=setInterval(sendSeg,80); }
+  function move(e){ if(!cur) return; e.preventDefault(); const p=norm(e); liveSeg(lastPt,p); buf.push(p); lastPt=p; if(buf.length>=24) sendSeg(); }
+  function up(){ if(!cur) return; clearInterval(flushT); sendSeg(); myGestures.push(cur); myRedo=[]; cur=null; buf=[]; lastPt=null; }
+  function undo(){ if(!myGestures.length){ toast('↩️ Ortga qaytariladigan amal yo‘q'); return; } const g=myGestures.pop(); myRedo.push(g); haptic('warning'); api('/app/api/qalb/undo',{g}).catch(()=>{}); }
+  function redo(){ if(!myRedo.length){ toast('↪️ Tiklanadigan amal yo‘q'); return; } const g=myRedo.pop(); myGestures.push(g); api('/app/api/qalb/redo',{g}).catch(()=>{}); }
+  function clearReqFn(){ api('/app/api/qalb/clear_req',{}).then(r=>{ if(r&&r.pending) toast('🧽 Tozalash so‘rovi yuborildi — sherik tasdiqlasin'); }).catch(()=>{}); }
+  function save(){ try{ cv.toBlob(function(b){ if(!b){ toast('⚠️ Saqlab bo‘lmadi — skrinshot oling'); return; }
+    const u=URL.createObjectURL(b),a=document.createElement('a'); a.href=u; a.download='qalb-rasmi.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u),3000); toast('💾 Rasm saqlandi'); },'image/png'); }catch(e){ toast('⚠️ Saqlab bo‘lmadi — skrinshot oling'); } }
+  function updatePrev(){ const p=q('.qr-prev'); if(!p) return; const sz=Math.max(8,Math.min(30,(+width)+6)); p.style.width=p.style.height=sz+'px'; p.style.background=eraser?'#fff':color; }
+  function updateTop(){ const pe=q('.qr-peers'); if(pe) pe.innerHTML=peers.map(p=>'<span><span class="qr-dot '+(p.online?'on':'')+'"></span>'+esc(p.name)+(p.me?' (siz)':'')+'</span>').join(' ');
+    const others=peers.filter(p=>!p.me&&p.online), w=q('.qr-wait');
+    if(w){ if(others.length) w.classList.add('hide'); else { w.classList.remove('hide'); const cd=w.querySelector('.cd'); if(cd) cd.textContent=code; } } }
+  function updateClearBar(){ const bar=q('.qr-cf'); if(!bar) return;
+    if(clearReq&&clearReq.by!==me){ bar.querySelector('b').textContent='🧽 '+esc(clearReq.name||'Sherik')+' rasmni tozalamoqchi. Rozimisiz?'; bar.classList.add('on'); }
+    else bar.classList.remove('on'); }
+  function poll(){ if(!inRoom) return;
+    api('/app/api/qalb/poll',{after:seqSeen}).then(r=>{ if(!inRoom) return;
+      if(r&&r.room){ peers=r.room.peers||[]; clearReq=r.room.clear_req||null; updateTop(); updateClearBar(); }
+      if(r&&r.resync) applyBatch(r.ops||[],true); else if(r&&r.ops&&r.ops.length) applyBatch(r.ops,false);
+      if(r&&typeof r.seq==='number') seqSeen=r.seq;
+    }).catch(()=>{}).finally(()=>{ if(inRoom){ clearTimeout(poller); poller=setTimeout(poll,230); } }); }
+  function enterRoom(room,ops){ code=room.code; inRoom=true; allOps=[]; seqSeen=room.seq||0; peers=room.peers||[]; clearReq=room.clear_req||null;
+    myGestures=[]; myRedo=[]; gestureN=0; showBoard(); sizeCanvas(); if(ops&&ops.length){ applyBatch(ops,true); seqSeen=room.seq||seqSeen; }
+    updateTop(); updateClearBar(); window.addEventListener('resize',onResize); clearTimeout(poller); poll(); }
+  function create(){ api('/app/api/qalb/create',{}).then(r=>{ if(r&&r.result==='ok') enterRoom(r.room,r.ops); else toast(r&&r.error==='busy'?'Xonalar to‘lgan, keyinroq urining':r&&r.error==='off'?'🌐 O‘chirilgan':'⚠️ Xatolik'); }).catch(()=>toast('⚠️ Aloqa xatosi')); }
+  function join(){ const inp=q('.qr-join input'); const c=((inp&&inp.value)||'').trim().toUpperCase(); if(c.length<4){ toast('Kodni kiriting'); return; }
+    api('/app/api/qalb/join',{code:c}).then(r=>{ if(r&&r.result==='ok') enterRoom(r.room,r.ops); else toast(r&&r.error==='not_found'?'❌ Xona topilmadi':r&&r.error==='full'?'Xona to‘la (2 kishi)':'⚠️ Xatolik'); }).catch(()=>toast('⚠️ Aloqa xatosi')); }
+  function showLobby(){ const l=q('.qr-lobby'); if(l) l.style.display='flex'; const b=q('.qr-board'); if(b) b.classList.remove('on'); const t=q('.qr-tools'); if(t) t.classList.remove('on'); const cc=q('.qr-code'); if(cc) cc.style.display='none'; }
+  function showBoard(){ const l=q('.qr-lobby'); if(l) l.style.display='none'; const b=q('.qr-board'); if(b) b.classList.add('on'); const t=q('.qr-tools'); if(t) t.classList.add('on'); const cc=q('.qr-code'); if(cc){ cc.style.display='block'; cc.textContent=code; } }
+  function close(){ inRoom=false; clearTimeout(poller); clearInterval(flushT); if(code) api('/app/api/qalb/leave',{}).catch(()=>{}); code=''; cur=null; window.removeEventListener('resize',onResize); if(ov) ov.classList.remove('show'); }
+  function build(){ if(ov) return;
+    ov=elq('<div class="qrv" id="qrv"></div>');
+    ov.innerHTML='<div class="qr-top"><span class="qr-x">✕</span><span class="qr-ti">💕 Qalb Rasmi</span>'+
+      '<span class="qr-code" style="display:none"></span><div class="qr-peers"></div></div>'+
+      '<div class="qr-lobby"><div class="em">💕</div><h3>Qalb Rasmi</h3>'+
+        '<p>Ikki yurak — bitta tuval. Xona oching va kodni sherigingizga yuboring, yoki kod bilan qo‘shiling. Chizganlaringiz bir-biringizga darhol ko‘rinadi.</p>'+
+        '<button class="qr-big qr-create">➕ Xona ochish</button><div class="qr-or">— yoki —</div>'+
+        '<div class="qr-join"><input maxlength="5" placeholder="KOD" autocomplete="off" autocapitalize="characters"><button>Kirish</button></div></div>'+
+      '<div class="qr-board"><canvas id="qrCanvas"></canvas>'+
+        '<div class="qr-wait"><div>⏳ Sherik kutilmoqda…</div><div class="cd"></div><div style="font-size:12px;color:#ccc">Bu kodni sherigingizga yuboring</div></div>'+
+        '<div class="qr-cf"><b></b><button class="yes">✅ Ha</button><button class="no">❌ Yo‘q</button></div></div>'+
+      '<div class="qr-tools"><div class="qr-cols"></div>'+
+        '<div class="qr-trow"><span class="qr-prev"></span><input type="range" min="1" max="30" value="5"><button class="qr-tb er">🧽</button></div>'+
+        '<div class="qr-trow"><button class="qr-tb u">↩️</button><button class="qr-tb rd">↪️</button><button class="qr-tb cl">🧹 Tozalash</button><button class="qr-tb sv">💾 Saqlash</button></div></div>';
+    document.body.appendChild(ov);
+    cv=ov.querySelector('#qrCanvas'); ctx=cv.getContext('2d');
+    q('.qr-x').onclick=close; q('.qr-create').onclick=create; q('.qr-join button').onclick=join;
+    const cc=q('.qr-code'); if(cc) cc.onclick=()=>{ if(code){ try{ if(tg&&tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light'); }catch(e){} toast('🔑 Kod: '+code); } };
+    const cols=q('.qr-cols'); PAL.forEach(c=>{ const b=elq('<div class="qr-col"></div>'); b.style.background=c; if(c===color) b.classList.add('on');
+      b.onclick=()=>{ color=c; eraser=false; cols.querySelectorAll('.qr-col').forEach(x=>x.classList.toggle('on',x===b)); const er=q('.qr-tb.er'); if(er) er.classList.remove('on'); updatePrev(); }; cols.appendChild(b); });
+    const rng=q('input[type=range]'); if(rng) rng.oninput=()=>{ width=+rng.value; updatePrev(); };
+    q('.qr-tb.er').onclick=(e)=>{ eraser=!eraser; e.currentTarget.classList.toggle('on',eraser); updatePrev(); };
+    q('.qr-tb.u').onclick=undo; q('.qr-tb.rd').onclick=redo; q('.qr-tb.cl').onclick=clearReqFn; q('.qr-tb.sv').onclick=save;
+    q('.qr-cf .yes').onclick=()=>{ api('/app/api/qalb/clear_ok',{}).catch(()=>{}); q('.qr-cf').classList.remove('on'); };
+    q('.qr-cf .no').onclick=()=>{ api('/app/api/qalb/clear_no',{}).catch(()=>{}); q('.qr-cf').classList.remove('on'); };
+    cv.addEventListener('pointerdown',down); window.addEventListener('pointermove',move); window.addEventListener('pointerup',up); window.addEventListener('pointercancel',up);
+    updatePrev();
+  }
+  function open(d){ me=Number(d&&d.id)||0; build(); ov.classList.add('show'); inRoom=false; code=''; allOps=[]; redraw&&(ctx&&paper()); showLobby(); }
+  return {open:open,close:close};
+})();
 function vipPage(d){
   const sec=$('<div class="sec" id="s-vip"></div>'), v=d.vip||{};
   const top=(v.top||[]).map((t,i)=>'<div class="row"><span>'+(i+1)+'. '+esc(t.name)+'</span><b>'+fmtMoney(t.best)+' · R'+t.level+'</b></div>').join('');
